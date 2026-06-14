@@ -11,6 +11,9 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 import { Global } from "@opencode-ai/core/global"
+import { Token } from "@opencode-ai/core/util/token"
+import { ModelTier } from "@/provider/model-tier"
+import type { Provider } from "@/provider/provider"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
 
@@ -34,7 +37,7 @@ function extract(messages: SessionV1.WithParts[]) {
 export interface Interface {
   readonly clear: (messageID: MessageID) => Effect.Effect<void>
   readonly systemPaths: () => Effect.Effect<Set<string>, FSUtil.Error>
-  readonly system: () => Effect.Effect<string[], FSUtil.Error>
+  readonly system: (opts?: { model?: Provider.Model }) => Effect.Effect<string[], FSUtil.Error>
   readonly find: (dir: string) => Effect.Effect<string | undefined, FSUtil.Error>
   readonly resolve: (
     messages: SessionV1.WithParts[],
@@ -152,7 +155,7 @@ export const layer: Layer.Layer<
       return paths
     })
 
-    const system = Effect.fn("Instruction.system")(function* () {
+    const system = Effect.fn("Instruction.system")(function* (opts?: { model?: Provider.Model }) {
       const config = yield* cfg.get()
       const paths = yield* systemPaths()
       const urls = (config.instructions ?? []).filter(
@@ -162,9 +165,13 @@ export const layer: Layer.Layer<
       const files = yield* Effect.forEach(Array.from(paths), read, { concurrency: 8 })
       const remote = yield* Effect.forEach(urls, fetch, { concurrency: 4 })
 
+      // For small-tier models, keep oversized instruction files within a section budget so the ambient
+      // project docs don't crowd out the task. Other models keep the full content unchanged.
+      const fit = opts?.model && ModelTier.isSmall(opts.model) ? capInstruction : (text: string) => text
+
       return [
-        ...Array.from(paths).flatMap((item, i) => (files[i] ? [`Instructions from: ${item}\n${files[i]}`] : [])),
-        ...urls.flatMap((item, i) => (remote[i] ? [`Instructions from: ${item}\n${remote[i]}`] : [])),
+        ...Array.from(paths).flatMap((item, i) => (files[i] ? [`Instructions from: ${item}\n${fit(files[i])}`] : [])),
+        ...urls.flatMap((item, i) => (remote[i] ? [`Instructions from: ${item}\n${fit(remote[i])}`] : [])),
       ]
     })
 
@@ -234,6 +241,46 @@ export const defaultLayer = layer.pipe(
 
 export function loaded(messages: SessionV1.WithParts[]) {
   return extract(messages)
+}
+
+export const SECTION_BUDGET = 1500
+
+// Split markdown into a leading block plus one block per heading line.
+function sections(content: string) {
+  const result: string[] = []
+  let current: string[] = []
+  for (const line of content.split("\n")) {
+    if (/^#{1,6}\s/.test(line) && current.length > 0) {
+      result.push(current.join("\n"))
+      current = [line]
+      continue
+    }
+    current.push(line)
+  }
+  if (current.length > 0) result.push(current.join("\n"))
+  return result
+}
+
+// Keep whole instruction sections from the top until the token budget is reached. Engaged only for
+// small-tier models on oversized instruction files; the omission note points the model at the file.
+export function capInstruction(content: string, budget = SECTION_BUDGET) {
+  if (Token.estimate(content) <= budget) return content
+  const parts = sections(content)
+  if (parts.length <= 1) return content
+  const kept: string[] = []
+  let used = 0
+  let omitted = 0
+  for (const part of parts) {
+    const size = Token.estimate(part)
+    if (kept.length === 0 || used + size <= budget) {
+      kept.push(part)
+      used += size
+      continue
+    }
+    omitted++
+  }
+  if (omitted === 0) return content
+  return `${kept.join("\n")}\n\n[${omitted} instruction section(s) omitted to fit a smaller model's context — read the file if you need them.]`
 }
 
 export const node = LayerNode.make(layer, [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient])

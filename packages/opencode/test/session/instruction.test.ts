@@ -254,3 +254,26 @@ describe("Instruction.systemPaths global config", () => {
     }),
   )
 })
+
+describe("Instruction.capInstruction", () => {
+  const sectioned = (n: number) =>
+    Array.from({ length: n }, (_, i) => `## Section ${i}\n${"x ".repeat(400)}`).join("\n")
+
+  test("returns content unchanged when within budget", () => {
+    const content = "## A\nshort\n## B\nshort"
+    expect(Instruction.capInstruction(content, 1000)).toBe(content)
+  })
+
+  test("keeps whole sections from the top until the budget is reached and notes omissions", () => {
+    const content = sectioned(10)
+    const result = Instruction.capInstruction(content, 600)
+    expect(result.length).toBeLessThan(content.length)
+    expect(result.startsWith("## Section 0")).toBe(true)
+    expect(result).toMatch(/instruction section\(s\) omitted/)
+  })
+
+  test("never chops a single-section file", () => {
+    const content = `# Title\n${"y ".repeat(4000)}`
+    expect(Instruction.capInstruction(content, 100)).toBe(content)
+  })
+})
