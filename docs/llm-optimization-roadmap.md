@@ -29,14 +29,14 @@ medium/large behavior is unchanged.
 | #5 | `f6d9df2` | ModelTier; lean prompt (`session/prompt/small.txt`) + terse skill list + reduced tools (drop `task`/`lsp`) for small models; fractional `compaction.threshold` + earlier default trigger; `grep` `output_mode`; optional `lsp` `line`/`character`; head+tail compaction truncation; constraint-preserving summary prompt; per-component `context.budget` debug log |
 | #6 | `55e8208` | small-tier compaction tuning (fewer verbatim turns + tighter preserve budget); web-fetch `TurndownService` singleton |
 | #7 | `d5155b0` | prompt-cache breakpoints for `openrouter` + `github-copilot` (generic `openai-compatible` excluded); transform contract tests updated |
+| #9 | `0b8dc7b` | **R1** — per-turn, high-salience step-discipline reminder for small models (`session/reminders.ts` + `small-steps.txt`) |
 
 ## Remaining
 
-### R1 — Code-side scaffolding / stepping for small models
-Inject a tier-gated "operating procedure" reminder (plan → act one step → verify) and
-progress nudges, reusing `session/reminders.ts`. Optional follow-ups: dependency-aware
-tool-call ordering, doom-loop delegation hint.
-Files: `session/reminders.ts`, `session/prompt/*.txt`.
+### R1 — Code-side scaffolding / stepping for small models — done (#9)
+Shipped: a tier-gated "operating procedure" reminder injected per turn next to the latest
+user input (`session/reminders.ts` + `session/prompt/small-steps.txt`). Optional follow-ups
+not yet done: dependency-aware tool-call ordering, doom-loop delegation hint.
 
 ### R2 — Relevance / section-based instruction loading
 `session/instruction.ts#system()` injects the full `AGENTS.md` / `CLAUDE.md` every turn.
