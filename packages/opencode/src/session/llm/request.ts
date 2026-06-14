@@ -10,6 +10,8 @@ import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { Token } from "@opencode-ai/core/util/token"
+import { ModelTier } from "@/provider/model-tier"
 import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
@@ -167,6 +169,19 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const opencodeProjectID = input.model.providerID.startsWith("opencode")
     ? (yield* InstanceState.context).project.id
     : undefined
+
+  const systemTokens = Token.estimate(system.join("\n"))
+  const toolTokens = Token.estimate(JSON.stringify(input.tools))
+  const historyTokens = Token.estimate(JSON.stringify(input.messages))
+  yield* Effect.logDebug("context.budget", {
+    providerID: input.model.providerID,
+    modelID: input.model.api.id,
+    tier: ModelTier.fromId(input.model.api.id),
+    systemTokens,
+    toolTokens,
+    historyTokens,
+    total: systemTokens + toolTokens + historyTokens,
+  })
 
   return {
     system,

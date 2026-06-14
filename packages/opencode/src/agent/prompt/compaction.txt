@@ -6,4 +6,6 @@ If the prompt includes a <previous-summary> block, treat it as the current ancho
 
 Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
 
+Preserve verbatim and literally: user behavioral constraints and preferences ("do not do X", "always use Y"), exact error messages, command flags, version numbers, URLs, and any snippet the user pasted. Never generalize, paraphrase, or drop these.
+
 Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
