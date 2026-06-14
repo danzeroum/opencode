@@ -179,14 +179,19 @@ function extractTextFromHTML(html: string) {
   return text.trim()
 }
 
+let turndownService: TurndownService | undefined
+
 function convertHTMLToMarkdown(html: string): string {
-  const turndownService = new TurndownService({
-    headingStyle: "atx",
-    hr: "---",
-    bulletListMarker: "-",
-    codeBlockStyle: "fenced",
-    emDelimiter: "*",
-  })
-  turndownService.remove(["script", "style", "meta", "link"])
+  // Reuse one service across fetches; constructing it builds its full rule set each time.
+  if (!turndownService) {
+    turndownService = new TurndownService({
+      headingStyle: "atx",
+      hr: "---",
+      bulletListMarker: "-",
+      codeBlockStyle: "fenced",
+      emDelimiter: "*",
+    })
+    turndownService.remove(["script", "style", "meta", "link"])
+  }
   return turndownService.turndown(html)
 }
