@@ -4,6 +4,7 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
+import { ModelTier } from "@/provider/model-tier"
 import { MessageV2 } from "./message-v2"
 import { Token } from "@/util/token"
 import { SessionProcessor } from "./processor"
@@ -88,9 +89,11 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
 }
 
 function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model }) {
+  // Small models keep a tighter verbatim tail so compaction frees more of their limited window.
+  const max = ModelTier.isSmall(input.model) ? Math.floor(MAX_PRESERVE_RECENT_TOKENS / 2) : MAX_PRESERVE_RECENT_TOKENS
   return (
     input.cfg.compaction?.preserve_recent_tokens ??
-    Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable(input) * 0.25)))
+    Math.min(max, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable(input) * 0.25)))
   )
 }
 
@@ -200,7 +203,7 @@ export const layer = Layer.effect(
       cfg: ConfigV1.Info
       model: Provider.Model
     }) {
-      const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+      const limit = input.cfg.compaction?.tail_turns ?? (ModelTier.isSmall(input.model) ? 1 : DEFAULT_TAIL_TURNS)
       if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
       const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
       const all = turns(input.messages)
