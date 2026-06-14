@@ -60,15 +60,17 @@ export const estimate = (input: string) => {
 }
 ```
 
-### R4 — Wire ModelTier into the V2 runtime — follow-up (structural)
-Mirror small-tier prompt/skills/tools/compaction gating into `packages/core`. **Not a clean insertion:**
+### R4 — Wire ModelTier into the V2 runtime — partially done
+**Done:** a string-based core `ModelTier` (`packages/core/src/model-tier.ts`, mirrors the V1 helper) plus
+small-tier early-compaction gating in V2 — `session/compaction.ts#compactIfNeeded` now caps the effective
+limit at 75% of the window for small models, mirroring V1's fractional overflow threshold.
+
+**Remaining (structural, deferred):** small-tier prompt/skills/tool gating in V2. Not a clean insertion —
 the V2 runner (`session/runner/llm.ts`) loads the System Context (`systemContext.load()`,
 `skillGuidance.load(agent)`, `referenceGuidance.load()`) *before* it resolves the model
-(`models.resolve(session)`), and materializes tools by permission, not by model. Tier-gating therefore
-needs the model resolved earlier and threaded into those producers + tool materialization — a structural
-change that must respect the Context-Epoch / Safe-Provider-Turn-Boundary invariants in `CONTEXT.md`.
-The one already-model-aware seam is V2 compaction (`compaction.compactIfNeeded({ model, ... })`), where
-the V1 fractional/earlier-threshold gating can be mirrored cleanly first. V2 is not the active runtime today.
+(`models.resolve(session)`), and materializes tools by permission, not by model. That needs the model
+resolved earlier and threaded into those producers + tool materialization, respecting the
+Context-Epoch / Safe-Provider-Turn-Boundary invariants in `CONTEXT.md`. V2 is not the active runtime today.
 
 ## Out of scope (deliberate — would be regressions)
 

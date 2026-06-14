@@ -8,6 +8,7 @@ import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { Token } from "../util/token"
+import { ModelTier } from "../model-tier"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
@@ -232,9 +233,13 @@ export const make = (dependencies: Dependencies) => {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+    const limit = context - Math.max(output, config.buffer)
+    // Small-tier models compact earlier to stay out of the region where their coherence degrades
+    // (mirrors the V1 fractional overflow threshold). This only tightens the buffer-based limit.
+    const effective = ModelTier.isSmall(String(input.model.id)) ? Math.min(limit, Math.floor(context * 0.75)) : limit
     if (
       estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
-      context - Math.max(output, config.buffer)
+      effective
     )
       return false
     return yield* compactAfterOverflow(input)
