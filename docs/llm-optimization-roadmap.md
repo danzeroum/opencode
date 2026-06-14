@@ -30,29 +30,45 @@ medium/large behavior is unchanged.
 | #6 | `55e8208` | small-tier compaction tuning (fewer verbatim turns + tighter preserve budget); web-fetch `TurndownService` singleton |
 | #7 | `d5155b0` | prompt-cache breakpoints for `openrouter` + `github-copilot` (generic `openai-compatible` excluded); transform contract tests updated |
 | #9 | `0b8dc7b` | **R1** — per-turn, high-salience step-discipline reminder for small models (`session/reminders.ts` + `small-steps.txt`) |
+| #10 | `414aa1c` | **R2** — cap oversized instruction files for small models (`capInstruction` in `session/instruction.ts`) |
 
 ## Remaining
 
-### R1 — Code-side scaffolding / stepping for small models — done (#9)
-Shipped: a tier-gated "operating procedure" reminder injected per turn next to the latest
-user input (`session/reminders.ts` + `session/prompt/small-steps.txt`). Optional follow-ups
-not yet done: dependency-aware tool-call ordering, doom-loop delegation hint.
+> R1 (#9) and R2 (#10) are done — see the table above. R3 and R4 are the open items.
 
-### R2 — Relevance / section-based instruction loading
-`session/instruction.ts#system()` injects the full `AGENTS.md` / `CLAUDE.md` every turn.
-Add opt-in section selection (split on `##`, keep sections matching touched paths /
-prompt keywords) and/or a size cap with summary fallback, gated by config + tier.
-Files: `session/instruction.ts`, V2 `core/src/instruction-context.ts`.
+### R3 — Real tokenizer — BLOCKED (environment)
+Goal: replace the `chars/4` estimate (`core/src/util/token.ts`) with a real BPE tokenizer for
+accurate compaction/overflow/budget decisions, keeping `chars/4` as a fallback.
 
-### R3 — Real tokenizer
-Replace the `chars/4` estimate (`core/src/util/token.ts`) with a real tokenizer
-(js-tiktoken `o200k_base` / `cl100k_base`) for accurate compaction/overflow/budget
-decisions; keep `chars/4` as fallback. Adds a dependency.
+Status: **blocked in the web sandbox.** `bun add js-tiktoken` re-resolves the 27-package workspace
+and times out (>9 min) on every attempt, so the dependency cannot be installed here and importing it
+would break CI. This is purely an environment limit — land it wherever `bun install` works (local/CI).
+Ready change for `core/src/util/token.ts` (plus `bun add js-tiktoken` in `packages/core`):
 
-### R4 — Wire ModelTier into the V2 runtime
-Mirror the small-tier prompt/skills/tools/compaction gating into `packages/core`
-(System-Context registry, `skill/guidance.ts`, runner) so tiering applies once V2
-becomes the active path.
+```ts
+import { getEncoding, type Tiktoken } from "js-tiktoken"
+const CHARS_PER_TOKEN = 4
+let enc: Tiktoken | null | undefined
+function tokenizer() {
+  if (enc === undefined) try { enc = getEncoding("o200k_base") } catch { enc = null }
+  return enc
+}
+export const estimate = (input: string) => {
+  const t = tokenizer()
+  if (t) try { return t.encode(input).length } catch {}
+  return Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
+}
+```
+
+### R4 — Wire ModelTier into the V2 runtime — follow-up (structural)
+Mirror small-tier prompt/skills/tools/compaction gating into `packages/core`. **Not a clean insertion:**
+the V2 runner (`session/runner/llm.ts`) loads the System Context (`systemContext.load()`,
+`skillGuidance.load(agent)`, `referenceGuidance.load()`) *before* it resolves the model
+(`models.resolve(session)`), and materializes tools by permission, not by model. Tier-gating therefore
+needs the model resolved earlier and threaded into those producers + tool materialization — a structural
+change that must respect the Context-Epoch / Safe-Provider-Turn-Boundary invariants in `CONTEXT.md`.
+The one already-model-aware seam is V2 compaction (`compaction.compactIfNeeded({ model, ... })`), where
+the V1 fractional/earlier-threshold gating can be mirrored cleanly first. V2 is not the active runtime today.
 
 ## Out of scope (deliberate — would be regressions)
 
