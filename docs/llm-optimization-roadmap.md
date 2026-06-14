@@ -31,34 +31,33 @@ medium/large behavior is unchanged.
 | #7 | `d5155b0` | prompt-cache breakpoints for `openrouter` + `github-copilot` (generic `openai-compatible` excluded); transform contract tests updated |
 | #9 | `0b8dc7b` | **R1** — per-turn, high-salience step-discipline reminder for small models (`session/reminders.ts` + `small-steps.txt`) |
 | #10 | `414aa1c` | **R2** — cap oversized instruction files for small models (`capInstruction` in `session/instruction.ts`) |
+| #11 | `ca9984b` | **R4** — core `ModelTier` + earlier V2 compaction for small models |
+| #12 | `1f0a0da` | **R4** — small-tier operating-procedure injected into V2 requests (`session/runner/llm.ts`) |
 
 ## Remaining
 
-> R1 (#9) and R2 (#10) are done — see the table above. R3 and R4 are the open items.
+> R1 (#9), R2 (#10), and R4 (#11, #12) are done — see the table. R3 is **not being shipped**; see below.
 
-### R3 — Real tokenizer — BLOCKED (environment)
-Goal: replace the `chars/4` estimate (`core/src/util/token.ts`) with a real BPE tokenizer for
-accurate compaction/overflow/budget decisions, keeping `chars/4` as a fallback.
+### R3 — Real tokenizer — WON'T DO as a global estimate swap (performance)
+Goal was: replace the `chars/4` estimate (`core/src/util/token.ts`) with a real BPE tokenizer
+(js-tiktoken `o200k_base`) for more accurate compaction/overflow/budget decisions.
 
-Status: **blocked in the web sandbox.** `bun add js-tiktoken` re-resolves the 27-package workspace
-and times out (>9 min) on every attempt, so the dependency cannot be installed here and importing it
-would break CI. This is purely an environment limit — land it wherever `bun install` works (local/CI).
-Ready change for `core/src/util/token.ts` (plus `bun add js-tiktoken` in `packages/core`):
+**Decision: do not replace the hot-path `estimate()` with a real tokenizer.** Two blockers, the second decisive:
 
-```ts
-import { getEncoding, type Tiktoken } from "js-tiktoken"
-const CHARS_PER_TOKEN = 4
-let enc: Tiktoken | null | undefined
-function tokenizer() {
-  if (enc === undefined) try { enc = getEncoding("o200k_base") } catch { enc = null }
-  return enc
-}
-export const estimate = (input: string) => {
-  const t = tokenizer()
-  if (t) try { return t.encode(input).length } catch {}
-  return Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
-}
-```
+1. *Dependency install* — `bun add js-tiktoken` re-resolves the 27-package workspace and times out
+   (>15 min, several attempts) in the web sandbox, so the lockfile can't be updated here (CI installs
+   frozen, so an unlocked import fails CI).
+2. *Performance — the real blocker.* `estimate()` is on the hot path: it runs in tight loops during
+   compaction selection **and** over the full history every turn (the `context.budget` log). Swapping in
+   real BPE encoding (verified locally with the package available) made `test/session/compaction.test.ts`
+   go from ~3s to **>180s (timed out)** — roughly a 60× slowdown — and would add seconds of per-turn
+   latency on long sessions. `chars/4` is O(1); BPE is O(n) per call. A real tokenizer must not back the
+   hot-path estimate.
+
+**If accurate counts are wanted later:** expose them only on a rarely-called path (e.g. an
+`opencode debug tokens` command or a one-shot `/context-stats`) while keeping `chars/4` for
+compaction/overflow; or adopt a faster tokenizer **with memoization** and re-baseline the compaction
+tests that pin `chars/4`-derived sizes. `chars/4` remains the default.
 
 ### R4 — Wire ModelTier into the V2 runtime — done (prompt + compaction + tools)
 **Done:** a string-based core `ModelTier` (`packages/core/src/model-tier.ts`, mirrors the V1 helper);
