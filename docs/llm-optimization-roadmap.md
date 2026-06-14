@@ -60,17 +60,19 @@ export const estimate = (input: string) => {
 }
 ```
 
-### R4 — Wire ModelTier into the V2 runtime — partially done
-**Done:** a string-based core `ModelTier` (`packages/core/src/model-tier.ts`, mirrors the V1 helper) plus
-small-tier early-compaction gating in V2 — `session/compaction.ts#compactIfNeeded` now caps the effective
-limit at 75% of the window for small models, mirroring V1's fractional overflow threshold.
+### R4 — Wire ModelTier into the V2 runtime — done (prompt + compaction + tools)
+**Done:** a string-based core `ModelTier` (`packages/core/src/model-tier.ts`, mirrors the V1 helper);
+small-tier early-compaction gating in V2 (`session/compaction.ts#compactIfNeeded` caps the effective
+limit at 75% of the window for small models); and a small-tier operating-procedure injected into the V2
+request system at the post-model seam (`session/runner/llm.ts`, where the model is already resolved — no
+risky reordering). Tools: V2's set has no `task`/`lsp` (the V1 drops), so the surface is already lean and
+no reduction was needed.
 
-**Remaining (structural, deferred):** small-tier prompt/skills/tool gating in V2. Not a clean insertion —
-the V2 runner (`session/runner/llm.ts`) loads the System Context (`systemContext.load()`,
-`skillGuidance.load(agent)`, `referenceGuidance.load()`) *before* it resolves the model
-(`models.resolve(session)`), and materializes tools by permission, not by model. That needs the model
-resolved earlier and threaded into those producers + tool materialization, respecting the
-Context-Epoch / Safe-Provider-Turn-Boundary invariants in `CONTEXT.md`. V2 is not the active runtime today.
+**Intentionally deferred — skills verbosity by tier in V2:** the skill-guidance Context Source loads
+*before* the model is resolved (`skillGuidance.load(agent)`), and it is already permission-filtered to
+names + descriptions, so tier-gating its verbosity would require resolving the model ahead of System
+Context load (a reorder touching Context-Epoch invariants) for a marginal token saving. Left as a
+deliberate follow-up. V2 is not the active runtime today.
 
 ## Out of scope (deliberate — would be regressions)
 

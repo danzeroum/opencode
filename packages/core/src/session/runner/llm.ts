@@ -14,6 +14,7 @@ import { Database } from "../../database/database"
 import { EventV2 } from "../../event"
 import { Location } from "../../location"
 import { ModelV2 } from "../../model"
+import { ModelTier } from "../../model-tier"
 import { ProviderV2 } from "../../provider"
 import { QuestionV2 } from "../../question"
 import { SystemContext } from "../../system-context/index"
@@ -33,6 +34,18 @@ import { type RunError, Service, StepLimitExceededError } from "./index"
 import { SessionRunnerModel } from "./model"
 import { createLLMEventPublisher } from "./publish-llm-event"
 import { toLLMMessages } from "./to-llm-message"
+
+// Injected into the request system for small-tier models in V2 (mirrors the V1 small-steps reminder).
+// It lives here rather than in the System Context because the model is resolved after context load;
+// once model-before-context ordering exists this should become a tier-gated Context Source.
+const SMALL_TIER_GUIDANCE = [
+  "You are a smaller-capability model. Work in small, verified steps:",
+  "- Before acting, state the single next step in one line.",
+  "- Do one thing per turn (one edit, or one small batch of related reads/searches); do not chain many unrelated tool calls.",
+  "- After changing a file, verify it (read it back or run the project's check) before moving on.",
+  "- If you are unsure which file or symbol to change, search first — do not guess.",
+  "- If a tool result is large, search within it instead of re-reading the whole thing.",
+].join("\n")
 
 /**
  * Runs one durable coding-agent Session until it settles.
@@ -219,7 +232,11 @@ export const layer = Layer.effect(
       const request = LLM.request({
         model,
         providerOptions: { openai: { promptCacheKey } },
-        system: [agent.info?.system, system.baseline]
+        system: [
+          agent.info?.system,
+          system.baseline,
+          ModelTier.isSmall(String(model.id)) ? SMALL_TIER_GUIDANCE : undefined,
+        ]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
         messages: toLLMMessages(context, model),
