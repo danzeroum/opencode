@@ -1108,7 +1108,18 @@ describe("session.message-v2.toModelMessage", () => {
               },
             },
           },
-          { type: "text", text: "answer" },
+          {
+            type: "text",
+            text: "answer",
+            providerOptions: {
+              anthropic: { cacheControl: { type: "ephemeral" } },
+              openrouter: { cacheControl: { type: "ephemeral" } },
+              bedrock: { cachePoint: { type: "default" } },
+              openaiCompatible: { cache_control: { type: "ephemeral" } },
+              copilot: { copilot_cache_control: { type: "ephemeral" } },
+              alibaba: { cacheControl: { type: "ephemeral" } },
+            },
+          },
         ],
       },
     ])

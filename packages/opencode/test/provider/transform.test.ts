@@ -2314,7 +2314,11 @@ describe("ProviderTransform.message - providerOptions key remapping", () => {
 
     const result = ProviderTransform.message(msgs, model, {})
 
-    expect(result[0].providerOptions?.copilot).toEqual({ someOption: "value" })
+    // Copilot models now get cache breakpoints, so the copilot option carries the cache marker too.
+    expect(result[0].providerOptions?.copilot).toEqual({
+      someOption: "value",
+      copilot_cache_control: { type: "ephemeral" },
+    })
     expect(result[0].providerOptions?.["github-copilot"]).toBeUndefined()
   })
 
