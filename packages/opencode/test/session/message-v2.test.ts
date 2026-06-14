@@ -813,7 +813,7 @@ describe("session.message-v2.toModelMessage", () => {
             toolName: "bash",
             output: {
               type: "text",
-              value: "abcd\n[Tool output truncated for compaction: omitted 6 chars]",
+              value: "ab\n[Tool output truncated for compaction: omitted 6 chars from the middle]\nij",
             },
           },
         ],

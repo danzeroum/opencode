@@ -51,7 +51,14 @@ export { isMedia }
 function truncateToolOutput(text: string, maxChars?: number) {
   if (!maxChars || text.length <= maxChars) return text
   const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+  // Preserve both the head and the tail: tool results often carry the most relevant
+  // information at the end (final grep hit, command exit, error summary), so head-only
+  // truncation would discard exactly what a later turn needs.
+  const headChars = Math.ceil(maxChars / 2)
+  const tailChars = maxChars - headChars
+  const head = text.slice(0, headChars)
+  const tail = tailChars > 0 ? text.slice(text.length - tailChars) : ""
+  return `${head}\n[Tool output truncated for compaction: omitted ${omitted} chars from the middle]\n${tail}`
 }
 
 export const Event = {

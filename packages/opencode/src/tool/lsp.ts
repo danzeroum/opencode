@@ -23,11 +23,11 @@ const operations = [
 export const Parameters = Schema.Struct({
   operation: Schema.Literals(operations).annotate({ description: "The LSP operation to perform" }),
   filePath: Schema.String.annotate({ description: "The absolute or relative path to the file" }),
-  line: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
-    description: "The line number (1-based, as shown in editors)",
+  line: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).annotate({
+    description: "The line number (1-based). Required for all operations except workspaceSymbol and documentSymbol.",
   }),
-  character: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
-    description: "The character offset (1-based, as shown in editors)",
+  character: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).annotate({
+    description: "The character offset (1-based). Required for all operations except workspaceSymbol and documentSymbol.",
   }),
   query: Schema.optional(Schema.String).annotate({
     description: "Search query for workspaceSymbol. Empty string requests all symbols.",
@@ -60,8 +60,12 @@ export const LspTool = Tool.define(
             metadata: meta,
           })
 
+          const needsPosition = args.operation !== "workspaceSymbol" && args.operation !== "documentSymbol"
+          if (needsPosition && (args.line === undefined || args.character === undefined))
+            throw new Error(`line and character are required for the ${args.operation} operation`)
+
           const uri = pathToFileURL(file).href
-          const position = { file, line: args.line - 1, character: args.character - 1 }
+          const position = { file, line: (args.line ?? 1) - 1, character: (args.character ?? 1) - 1 }
           const relPath = path.relative(instance.worktree, file)
           const detail =
             args.operation === "workspaceSymbol"

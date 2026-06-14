@@ -119,6 +119,15 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
       "description": "File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")",
       "type": "string",
     },
+    "output_mode": {
+      "description": "Output mode: "content" (matching lines, default), "files_with_matches" (file paths only), or "count" (number of matches).",
+      "enum": [
+        "content",
+        "files_with_matches",
+        "count",
+      ],
+      "type": "string",
+    },
     "path": {
       "description": "The directory to search in. Defaults to the current working directory.",
       "type": "string",
@@ -159,7 +168,7 @@ exports[`tool parameters JSON Schema (wire shape) lsp 1`] = `
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "character": {
-      "description": "The character offset (1-based, as shown in editors)",
+      "description": "The character offset (1-based). Required for all operations except workspaceSymbol and documentSymbol.",
       "maximum": 9007199254740991,
       "minimum": 1,
       "type": "integer",
@@ -169,7 +178,7 @@ exports[`tool parameters JSON Schema (wire shape) lsp 1`] = `
       "type": "string",
     },
     "line": {
-      "description": "The line number (1-based, as shown in editors)",
+      "description": "The line number (1-based). Required for all operations except workspaceSymbol and documentSymbol.",
       "maximum": 9007199254740991,
       "minimum": 1,
       "type": "integer",
@@ -197,8 +206,6 @@ exports[`tool parameters JSON Schema (wire shape) lsp 1`] = `
   "required": [
     "operation",
     "filePath",
-    "line",
-    "character",
   ],
   "type": "object",
 }

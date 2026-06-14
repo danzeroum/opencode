@@ -24,6 +24,7 @@ import { Schema } from "effect"
 import z from "zod"
 import { Plugin } from "../plugin"
 import { Provider } from "@/provider/provider"
+import { ModelTier } from "@/provider/model-tier"
 
 import { WebSearchTool } from "./websearch"
 import { LspTool } from "./lsp"
@@ -265,7 +266,11 @@ export const layer = Layer.effect(
     })
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      const tier = ModelTier.fromId(input.modelID)
       const filtered = (yield* all()).filter((tool) => {
+        // Small models select tools poorly as the surface grows; drop delegation/LSP for them
+        // and lean on the core read/edit/write/grep/glob/shell set.
+        if (tier === "small" && (tool.id === TaskTool.id || tool.id === LspTool.id)) return false
         if (tool.id === WebSearchTool.id) {
           return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
         }
