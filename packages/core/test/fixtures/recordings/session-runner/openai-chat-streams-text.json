@@ -13,7 +13,7 @@
         "headers": {
           "content-type": "application/json"
         },
-        "body": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"max_tokens\":20,\"temperature\":0}"
+        "body": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"system\",\"content\":\"You are a smaller-capability model. Work in small, verified steps:\\n- Before acting, state the single next step in one line.\\n- Do one thing per turn (one edit, or one small batch of related reads/searches); do not chain many unrelated tool calls.\\n- After changing a file, verify it (read it back or run the project's check) before moving on.\\n- If you are unsure which file or symbol to change, search first — do not guess.\\n- If a tool result is large, search within it instead of re-reading the whole thing.\"},{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"max_tokens\":20,\"temperature\":0}"
       },
       "response": {
         "status": 200,
