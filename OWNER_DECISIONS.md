@@ -2,7 +2,7 @@
 
 > GitHub Issues está desabilitado no repo, então este arquivo serve como o documento de
 > **pendências/decisões** para você revisar quando voltar. Trabalho autônomo em andamento no
-> **PR #14** (branch `claude/affectionate-davinci-05ifmg`). Roadmap vivo: [`RUST_MIGRATION.md`](./RUST_MIGRATION.md).
+> **PR #14** (branch `claude/affectionate-davinci-05ifmg`). Roadmap: [`RUST_MIGRATION.md`](./RUST_MIGRATION.md). Prévia do EventStore (Fase 2): [`EVENTSTORE_PLAN.md`](./EVENTSTORE_PLAN.md).
 
 ## Estado atual (CI verde ✅)
 - **Fase 0** completa: Cargo workspace (`crates/`), seam strangler-fig (proxy reverso gated por `OPENCODE_RUST_ROUTES`), OpenAPI code-first (utoipa), `xtask`, workflow `rust.yml`.
@@ -11,7 +11,7 @@
 
 ## Pendências / decisões que precisam de você
 
-1. **Merge do PR #14.** É um PR único que cresce por fase (devo desenvolver só nesse branch). Decida: revisar/mergear incrementalmente para `dev`, ou deixar acumular. Não vou mergear sem você.
+1. **Merge / cadência — DECIDIDO (2026-06-15).** ✅ Você aprovou o merge do PR #14 e cadência de **merge semanal** (um PR de cutover por semana, salvo urgência), com o CI como gate definitivo. **⚠️ Descoberta importante antes de mergear:** `push`/merge em `dev` dispara `publish.yml` (release: version-bump + build + publish npm) **e** `deploy.yml` (SST/AWS deploy). Ou seja, mergear cutovers direto em `dev` acionaria release+deploy a cada semana. **Recomendação:** usar uma branch de integração dedicada (ex.: `rust-migration`) como alvo dos PRs de cutover e promover para `dev` só em marcos deliberados. Aguardando sua escolha de alvo de merge (pergunta no chat) antes de mergear o #14.
 
 2. **CI `check-duplicates` travado (infra do fork).** `pr-management.yml` roda em runner self-hosted `blacksmith-4vcpu-ubuntu-2404`, ausente neste fork → check fica *queued* (só no 1º commit, não no HEAD). Não é código. **Recomendo** trocar esse job para `ubuntu-latest` ou desabilitá-lo no fork.
 
