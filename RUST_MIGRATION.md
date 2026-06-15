@@ -56,7 +56,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 
 ### Phase 0 — Foundations ✅ (this PR)
 - ✅ Cargo workspace + all crate skeletons; toolchain/deny/nextest config
-- ✅ Reverse-proxy seam (`OPENCODE_RUST_ROUTES`) + native `/_rust/health`
+- ✅ Reverse-proxy seam (`OPENCODE_RUST_ROUTES`) + native `/_rust/health` + a request-level integration test (axum `oneshot`: native route → 200, un-migrated route → proxy fallback → 502)
 - ✅ Code-first OpenAPI (utoipa) + `xtask` (`ci` / `openapi` / `openapi-diff`)
 - ✅ Error contract: `AppError` → HTTP status + error envelope in `opencode-server` (NB: the placeholder uses a `_tag` shape, but the real Effect HttpApi typed errors are `{name, data}` — see `BadRequestError` in `opencode-proto`; the `ApiError` mapping will adopt `{name, data}` as typed-error routes are cut over)
 - ✅ `rust.yml` CI (fmt + clippy -D warnings + nextest + cargo-deny + openapi gate), side-by-side with TS CI

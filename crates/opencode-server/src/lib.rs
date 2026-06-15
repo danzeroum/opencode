@@ -567,4 +567,46 @@ mod tests {
         .await;
         assert!(ok);
     }
+
+    #[tokio::test]
+    async fn router_serves_native_route_and_proxies_others() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::new(),
+            // Only the `global` group is cut over natively here.
+            routes: RouteTable::parse("global"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let app = build_router(state);
+
+        // `/global/health` is enabled → served natively (200, healthy: true).
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/global/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["healthy"], serde_json::json!(true));
+
+        // `/path` is NOT enabled → falls through to the proxy → unreachable upstream → 502.
+        let resp = app
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/path")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
 }
