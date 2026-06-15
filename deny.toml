@@ -2,6 +2,9 @@
 [advisories]
 version = 2
 yanked = "deny"
+# Vulnerabilities still fail the build (cargo-deny default); only scope the noisier
+# "unmaintained" advisory to our own workspace deps, not deep transitive crates.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
