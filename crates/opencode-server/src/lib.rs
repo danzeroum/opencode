@@ -169,11 +169,70 @@ async fn path_get(
     })
 }
 
+/// 400 responder returning the Effect HttpApi `BadRequestError` body (`{name, data}`).
+pub struct ApiBadRequest(pub opencode_proto::BadRequestError);
+
+impl axum::response::IntoResponse for ApiBadRequest {
+    fn into_response(self) -> axum::response::Response {
+        (axum::http::StatusCode::BAD_REQUEST, Json(self.0)).into_response()
+    }
+}
+
+fn bad_request(message: impl Into<String>, kind: &str) -> ApiBadRequest {
+    ApiBadRequest(opencode_proto::BadRequestError {
+        name: "BadRequest".to_string(),
+        data: opencode_proto::BadRequestData {
+            message: message.into(),
+            kind: Some(kind.to_string()),
+        },
+    })
+}
+
+/// `GET /find/file` — fuzzy file search (group `file`). Matches the golden `find.files`:
+/// 200 `array<string>` + 400 `BadRequestError`. Reuses `opencode_tools::find_files`.
+#[utoipa::path(
+    get,
+    path = "/find/file",
+    operation_id = "find.files",
+    params(
+        ("directory" = Option<String>, Query, description = "Directory to search (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id"),
+        ("query" = String, Query, description = "Search query"),
+        ("dirs" = Option<bool>, Query, description = "Include directories"),
+        ("type" = Option<String>, Query, description = "Filter by type"),
+        ("limit" = Option<i64>, Query, description = "Max results")
+    ),
+    responses(
+        (status = 200, description = "File paths", body = Vec<String>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "file"
+)]
+async fn find_files(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<String>>, ApiBadRequest> {
+    let query = params
+        .get("query")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad_request("missing required query parameter: query", "Query"))?;
+    let directory = params.get("directory").cloned().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100);
+    let files = opencode_tools::find_files(std::path::Path::new(&directory), query, limit);
+    Ok(Json(files))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health, global_health, path_get),
+    paths(health, global_health, path_get, find_files),
     components(schemas(
         opencode_proto::Health,
         opencode_proto::ErrorEnvelope,
@@ -184,7 +243,8 @@ async fn path_get(
     tags(
         (name = "control", description = "Control-plane routes"),
         (name = "global", description = "Global control-plane routes"),
-        (name = "instance", description = "Instance-scoped routes")
+        (name = "instance", description = "Instance-scoped routes"),
+        (name = "file", description = "File routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -242,6 +302,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("instance") {
         router = router.route("/path", get(path_get));
+    }
+    if state.routes.handles("file") {
+        router = router.route("/find/file", get(find_files));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -325,5 +388,35 @@ mod tests {
         let Json(body) = path_get(Query(std::collections::HashMap::new())).await;
         assert!(!body.directory.is_empty());
         assert!(body.config.ends_with("/opencode"));
+    }
+
+    #[test]
+    fn openapi_has_find_files_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/find/file"]["get"];
+        assert_eq!(op["operationId"], "find.files");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+            "array"
+        );
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn find_files_missing_query_is_bad_request() {
+        let res = find_files(Query(std::collections::HashMap::new())).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn find_files_with_query_returns_ok() {
+        let mut q = std::collections::HashMap::new();
+        q.insert("query".to_string(), "Cargo".to_string());
+        q.insert(
+            "directory".to_string(),
+            env!("CARGO_MANIFEST_DIR").to_string(),
+        );
+        let res = find_files(Query(q)).await;
+        assert!(res.is_ok());
     }
 }

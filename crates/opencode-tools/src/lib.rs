@@ -116,6 +116,32 @@ pub fn grep(pattern: &str, root: impl AsRef<Path>) -> Result<Vec<GrepMatch>, Too
     Ok(results)
 }
 
+/// Fuzzy-ish file search backing the `find.files` route: relative paths under `root` whose path
+/// contains `query` (case-insensitive substring), honoring `.gitignore`, sorted and capped at
+/// `limit`. An empty `query` lists all files (up to `limit`).
+pub fn find_files(root: impl AsRef<Path>, query: &str, limit: usize) -> Vec<String> {
+    let root = root.as_ref();
+    let needle = query.to_lowercase();
+    let mut out = Vec::new();
+    for entry in ignore::Walk::new(root).flatten() {
+        if entry.file_type().is_none_or(|t| !t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if needle.is_empty() || rel.to_lowercase().contains(&needle) {
+            out.push(rel);
+        }
+    }
+    out.sort();
+    out.truncate(limit);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +201,17 @@ mod tests {
     fn invalid_glob_is_pattern_error() {
         let err = glob("[", ".").unwrap_err();
         assert!(matches!(err, ToolError::Pattern(_)));
+    }
+
+    #[test]
+    fn find_files_substring_sorted_and_limited() {
+        let dir = fixture();
+        // fixture(): a.rs, b.txt, sub/c.rs
+        let all = find_files(dir.path(), "", 100);
+        assert_eq!(all, vec!["a.rs", "b.txt", "sub/c.rs"]);
+        let rs = find_files(dir.path(), ".rs", 100);
+        assert_eq!(rs, vec!["a.rs", "sub/c.rs"]);
+        let limited = find_files(dir.path(), "", 2);
+        assert_eq!(limited.len(), 2);
     }
 }
