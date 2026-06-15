@@ -94,13 +94,40 @@ async fn health(State(state): State<ServerState>) -> Json<Health> {
     })
 }
 
+/// `GET /global/health` — the first real contract route served natively (gated by the `global`
+/// group). Matches the golden `global.health` operation: inline 200 health body + 400 BadRequestError.
+#[utoipa::path(
+    get,
+    path = "/global/health",
+    operation_id = "global.health",
+    responses(
+        (status = 200, description = "Health information", body = inline(opencode_proto::GlobalHealth)),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "global"
+)]
+async fn global_health() -> Json<opencode_proto::GlobalHealth> {
+    Json(opencode_proto::GlobalHealth {
+        healthy: true,
+        version: VERSION.to_string(),
+    })
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health),
-    components(schemas(opencode_proto::Health, opencode_proto::ErrorEnvelope)),
-    tags((name = "control", description = "Control-plane routes")),
+    paths(health, global_health),
+    components(schemas(
+        opencode_proto::Health,
+        opencode_proto::ErrorEnvelope,
+        opencode_proto::BadRequestError,
+        opencode_proto::BadRequestData
+    )),
+    tags(
+        (name = "control", description = "Control-plane routes"),
+        (name = "global", description = "Global control-plane routes")
+    ),
     info(title = "opencode", version = VERSION)
 )]
 pub struct ApiDoc;
@@ -152,6 +179,9 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("health") {
         router = router.route("/health", get(health));
     }
+    if state.routes.handles("global") {
+        router = router.route("/global/health", get(global_health));
+    }
 
     router.fallback(proxy::proxy_handler).with_state(state)
 }
@@ -199,5 +229,21 @@ mod tests {
         let (status, env) = ApiError(opencode_effect::AppError::Conflict("dup".into())).parts();
         assert_eq!(status, 409);
         assert_eq!(env.tag, "ConflictError");
+    }
+
+    #[test]
+    fn openapi_has_global_health_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/global/health"]["get"];
+        assert_eq!(op["operationId"], "global.health");
+        assert!(op["responses"]["200"].is_object());
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn global_health_handler_returns_healthy() {
+        let Json(body) = global_health().await;
+        assert!(body.healthy);
+        assert_eq!(body.version, VERSION);
     }
 }
