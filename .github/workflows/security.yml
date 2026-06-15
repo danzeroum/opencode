@@ -11,7 +11,7 @@ on:
       - "rust-toolchain.toml"
       - "deny.toml"
       - ".config/**"
-      - "RUST_MIGRATION.md"
+      - "*.md"
       - ".github/workflows/**"
   workflow_dispatch:
 
