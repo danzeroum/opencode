@@ -1,0 +1,14 @@
+[package]
+name = "opencode-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "opencode persistence: sqlx pool, migration runner, event-store/session-store — Phase 2"
+
+[dependencies]
+opencode-events.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true

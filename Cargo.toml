@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/opencode-bin",
+  "crates/opencode-server",
+  "crates/opencode-core",
+  "crates/opencode-tools",
+  "crates/opencode-llm",
+  "crates/opencode-db",
+  "crates/opencode-config",
+  "crates/opencode-proto",
+  "crates/opencode-events",
+  "crates/opencode-effect",
+  "crates/opencode-plugin",
+  "crates/opencode-integration",
+  "crates/xtask",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/danzeroum/opencode"
+
+[workspace.dependencies]
+# Internal crates
+opencode-proto = { path = "crates/opencode-proto" }
+opencode-events = { path = "crates/opencode-events" }
+opencode-effect = { path = "crates/opencode-effect" }
+opencode-config = { path = "crates/opencode-config" }
+opencode-db = { path = "crates/opencode-db" }
+opencode-llm = { path = "crates/opencode-llm" }
+opencode-tools = { path = "crates/opencode-tools" }
+opencode-plugin = { path = "crates/opencode-plugin" }
+opencode-integration = { path = "crates/opencode-integration" }
+opencode-core = { path = "crates/opencode-core" }
+opencode-server = { path = "crates/opencode-server" }
+
+# Async runtime + HTTP
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+
+# Serialization + OpenAPI
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+utoipa = { version = "5", features = ["axum_extras"] }
+
+# Errors + tracing + utils
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+async-trait = "0.1"
+ulid = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
