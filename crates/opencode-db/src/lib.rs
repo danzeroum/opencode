@@ -84,12 +84,11 @@ impl EventStore for MemoryEventStore {
         for ev in events {
             seq += 1;
             log.push(StoredEvent {
+                id: format!("evt_{}", ulid::Ulid::new().to_string().to_lowercase()),
                 aggregate_id: aggregate_id.to_string(),
                 seq,
                 kind: ev.kind,
-                version: ev.version,
-                payload: ev.payload,
-                replay: ev.replay,
+                data: ev.data,
             });
         }
         Ok(seq)
@@ -119,12 +118,7 @@ mod tests {
     use serde_json::json;
 
     fn ev(kind: &str) -> EventInput {
-        EventInput {
-            kind: kind.to_string(),
-            version: 1,
-            payload: json!({}),
-            replay: false,
-        }
+        EventInput::new(kind, json!({}))
     }
 
     #[tokio::test]
@@ -141,6 +135,7 @@ mod tests {
 
         let all = store.read("ses_1", 0).await.unwrap();
         assert_eq!(all.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(all.iter().all(|e| e.id.starts_with("evt_")));
 
         let tail = store.read("ses_1", 2).await.unwrap();
         assert_eq!(tail.len(), 1);

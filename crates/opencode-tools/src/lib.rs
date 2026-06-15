@@ -8,9 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
+use grep::matcher::Matcher;
 use grep::regex::RegexMatcher;
 use grep::searcher::sinks::UTF8;
-use grep::searcher::Searcher;
+use grep::searcher::{Searcher, Sink, SinkMatch};
 
 pub mod files;
 pub mod git;
@@ -116,6 +117,125 @@ pub fn grep(pattern: &str, root: impl AsRef<Path>) -> Result<Vec<GrepMatch>, Too
     Ok(results)
 }
 
+/// A submatch within a line: the matched text and its byte range within the line bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubMatch {
+    /// The matched text.
+    pub text: String,
+    /// Start byte offset within the line.
+    pub start: usize,
+    /// End byte offset within the line.
+    pub end: usize,
+}
+
+/// A detailed grep match mirroring ripgrep's JSON match shape (backs the `find.text` route).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailedMatch {
+    /// File path (relative to the search root).
+    pub path: String,
+    /// The matching line, trailing newline trimmed.
+    pub line_text: String,
+    /// 1-based line number.
+    pub line_number: u64,
+    /// Absolute byte offset of the line within the file.
+    pub absolute_offset: u64,
+    /// Submatch ranges within the line.
+    pub submatches: Vec<SubMatch>,
+}
+
+struct DetailSink<'a> {
+    matcher: &'a RegexMatcher,
+    path: String,
+    out: &'a mut Vec<DetailedMatch>,
+}
+
+impl Sink for DetailSink<'_> {
+    type Error = std::io::Error;
+    fn matched(
+        &mut self,
+        _searcher: &Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> Result<bool, std::io::Error> {
+        let bytes = mat.bytes();
+        let mut submatches = Vec::new();
+        let _ = self.matcher.find_iter(bytes, |m| {
+            submatches.push(SubMatch {
+                text: String::from_utf8_lossy(&bytes[m.start()..m.end()]).into_owned(),
+                start: m.start(),
+                end: m.end(),
+            });
+            true
+        });
+        self.out.push(DetailedMatch {
+            path: self.path.clone(),
+            line_text: String::from_utf8_lossy(bytes).trim_end().to_string(),
+            line_number: mat.line_number().unwrap_or(0),
+            absolute_offset: mat.absolute_byte_offset(),
+            submatches,
+        });
+        Ok(true)
+    }
+}
+
+/// Like [`grep`], but returns detailed matches (submatch ranges + byte offsets), mirroring the
+/// ripgrep JSON match shape consumed by the `find.text` route. Honors `.gitignore`.
+pub fn grep_detailed(
+    pattern: &str,
+    root: impl AsRef<Path>,
+) -> Result<Vec<DetailedMatch>, ToolError> {
+    let matcher = RegexMatcher::new(pattern).map_err(|e| ToolError::Pattern(e.to_string()))?;
+    let root = root.as_ref();
+    let mut out = Vec::new();
+    for entry in ignore::Walk::new(root).flatten() {
+        if entry.file_type().is_none_or(|t| !t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut searcher = Searcher::new();
+        let _ = searcher.search_path(
+            &matcher,
+            path,
+            DetailSink {
+                matcher: &matcher,
+                path: rel,
+                out: &mut out,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Fuzzy-ish file search backing the `find.files` route: relative paths under `root` whose path
+/// contains `query` (case-insensitive substring), honoring `.gitignore`, sorted and capped at
+/// `limit`. An empty `query` lists all files (up to `limit`).
+pub fn find_files(root: impl AsRef<Path>, query: &str, limit: usize) -> Vec<String> {
+    let root = root.as_ref();
+    let needle = query.to_lowercase();
+    let mut out = Vec::new();
+    for entry in ignore::Walk::new(root).flatten() {
+        if entry.file_type().is_none_or(|t| !t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if needle.is_empty() || rel.to_lowercase().contains(&needle) {
+            out.push(rel);
+        }
+    }
+    out.sort();
+    out.truncate(limit);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +295,48 @@ mod tests {
     fn invalid_glob_is_pattern_error() {
         let err = glob("[", ".").unwrap_err();
         assert!(matches!(err, ToolError::Pattern(_)));
+    }
+
+    #[test]
+    fn find_files_substring_sorted_and_limited() {
+        let dir = fixture();
+        // fixture(): a.rs, b.txt, sub/c.rs
+        let all = find_files(dir.path(), "", 100);
+        assert_eq!(all, vec!["a.rs", "b.txt", "sub/c.rs"]);
+        let rs = find_files(dir.path(), ".rs", 100);
+        assert_eq!(rs, vec!["a.rs", "sub/c.rs"]);
+        let limited = find_files(dir.path(), "", 2);
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn grep_detailed_reports_submatches_and_offsets() {
+        let dir = fixture(); // b.txt: "hello\nworld\nhello world\n"
+        let mut hits = grep_detailed("world", dir.path()).unwrap();
+        hits.retain(|m| m.path == "b.txt");
+        hits.sort_by_key(|m| m.line_number);
+        assert_eq!(hits.len(), 2);
+
+        assert_eq!(hits[0].line_number, 2);
+        assert_eq!(hits[0].line_text, "world");
+        assert_eq!(
+            hits[0].submatches,
+            vec![SubMatch {
+                text: "world".into(),
+                start: 0,
+                end: 5
+            }]
+        );
+
+        assert_eq!(hits[1].line_number, 3);
+        assert_eq!(hits[1].line_text, "hello world");
+        assert_eq!(
+            hits[1].submatches,
+            vec![SubMatch {
+                text: "world".into(),
+                start: 6,
+                end: 11
+            }]
+        );
     }
 }
