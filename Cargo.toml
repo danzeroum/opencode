@@ -42,7 +42,10 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Phase 0: the reverse proxy only reaches a localhost HTTP upstream, so no TLS backend is
+# pulled in yet (keeps `ring`/`rustls` out of the tree → simpler cross-compile + clean licenses).
+# TLS (rustls + a vendored-free backend) returns in Phase 3 when talking to LLM providers.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 futures = "0.3"
 
 # Serialization + OpenAPI
