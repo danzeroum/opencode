@@ -5,7 +5,7 @@
 //! on timeout). Replaces the TS `cross-spawn` / `cross-spawn-spawner.ts` machinery (~508 lines)
 //! with `tokio::process`. Streaming output and PTY support arrive in later increments.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -73,6 +73,56 @@ pub async fn run_command(
     }
 }
 
+/// Options for [`run_shell`].
+#[derive(Debug, Clone)]
+pub struct ShellOptions {
+    /// Working directory for the command.
+    pub cwd: Option<PathBuf>,
+    /// Timeout after which the command is killed.
+    pub timeout: Duration,
+    /// Maximum bytes retained per stream; longer output is truncated with a marker (mirrors the
+    /// bash tool's output cap).
+    pub max_output_bytes: usize,
+}
+
+impl Default for ShellOptions {
+    fn default() -> Self {
+        Self {
+            cwd: None,
+            timeout: Duration::from_secs(120),
+            max_output_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// Run `script` through the platform shell (`sh -c` on unix, `cmd /C` on Windows), capturing output
+/// truncated to `max_output_bytes`. Foundation for the `bash` tool (tree-sitter command-approval is
+/// a separate, deferred concern — it is only a TODO in `bash.ts` too).
+pub async fn run_shell(script: &str, opts: &ShellOptions) -> Result<CommandOutput, ToolError> {
+    #[cfg(windows)]
+    let (program, flag) = ("cmd", "/C");
+    #[cfg(not(windows))]
+    let (program, flag) = ("sh", "-c");
+
+    let mut out = run_command(program, &[flag, script], opts.cwd.as_deref(), opts.timeout).await?;
+    truncate_utf8(&mut out.stdout, opts.max_output_bytes);
+    truncate_utf8(&mut out.stderr, opts.max_output_bytes);
+    Ok(out)
+}
+
+/// Truncate `s` to at most `max_bytes` on a char boundary, appending a marker if anything was cut.
+fn truncate_utf8(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.push_str("\n… [output truncated]");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +159,28 @@ mod tests {
             .unwrap();
         assert!(out.timed_out);
         assert_eq!(out.code, None);
+    }
+
+    #[tokio::test]
+    async fn run_shell_executes_and_captures() {
+        let out = run_shell("echo hello && echo oops 1>&2", &ShellOptions::default())
+            .await
+            .unwrap();
+        assert!(out.stdout.contains("hello"));
+        assert!(out.stderr.contains("oops"));
+        assert!(out.success());
+    }
+
+    #[tokio::test]
+    async fn run_shell_truncates_long_output() {
+        let opts = ShellOptions {
+            max_output_bytes: 100,
+            ..Default::default()
+        };
+        let out = run_shell("for i in $(seq 1 1000); do echo line$i; done", &opts)
+            .await
+            .unwrap();
+        assert!(out.stdout.contains("[output truncated]"));
+        assert!(out.stdout.len() < 160, "len was {}", out.stdout.len());
     }
 }
