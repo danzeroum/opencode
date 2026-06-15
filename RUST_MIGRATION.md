@@ -54,7 +54,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - ✅ Reverse-proxy seam (`OPENCODE_RUST_ROUTES`) + native `/_rust/health`
 - ✅ Code-first OpenAPI (utoipa) + `xtask` (`ci` / `openapi` / `openapi-diff`)
 - ✅ `rust.yml` CI (fmt + clippy -D warnings + nextest + cargo-deny + openapi gate), side-by-side with TS CI
-- ⬜ Full semantic `openapi-diff` vs `packages/sdk/openapi.json` (per-group; normalize `$ref`/nullable/key order)
+- 🟡 `openapi-diff` contract gate: per-operation compare (operationId + response codes + referenced schema names) vs `packages/sdk/openapi.json`, hard-failing only for an explicit cut-over allowlist (`CUTOVER_PATHS`, empty until first cutover) — landed; deeper normalization (nullable vs Option, params) as routes migrate
 - ⬜ Audit the MCP patch (`patches/@modelcontextprotocol%2Fsdk@1.29.0.patch`, reconnect/`onsessionexpired`)
 - ⬜ Spikes: `die`/`catchDefect` → `TurnOutcome` enum; `FiberSet` → `ToolExecutor`; `state.ts` `Draft<T>`/replay
 - ⬜ Pin `effect@4.0.0-beta.74`; align with the in-flight V2 refactor (`specs/v2`)
