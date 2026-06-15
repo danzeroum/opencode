@@ -157,6 +157,132 @@ pub enum RequestError {
     Invalid(InvalidRequestError),
 }
 
+// ---------------------------------------------------------------------------
+// V2 session read contract (`v2.session.get` — GET /api/session/{sessionID}).
+// SessionV2Info mirrors `packages/core/src/session/schema.ts`; the projection mapping it comes from
+// is `packages/core/src/session/info.ts` (`fromRow`). Numeric fields are `number` in the contract
+// (Effect `Finite`/`DateTime`), so they are `f64` here even where the DB stores integers.
+// ---------------------------------------------------------------------------
+
+/// A model reference (`{ id, providerID, variant? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ModelRef {
+    /// Model id.
+    pub id: String,
+    /// Provider id.
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    /// Variant id (defaults to `"default"` in the projection).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+}
+
+/// Cache-token usage (`{ read, write }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct TokenCache {
+    /// Cache-read tokens.
+    pub read: f64,
+    /// Cache-write tokens.
+    pub write: f64,
+}
+
+/// Token usage for a session.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionTokens {
+    /// Input tokens.
+    pub input: f64,
+    /// Output tokens.
+    pub output: f64,
+    /// Reasoning tokens.
+    pub reasoning: f64,
+    /// Cache tokens.
+    pub cache: TokenCache,
+}
+
+/// Session lifecycle timestamps (ms since epoch, `number` in the contract).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionTime {
+    /// Creation time.
+    pub created: f64,
+    /// Last-updated time.
+    pub updated: f64,
+    /// Archival time, if archived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<f64>,
+}
+
+/// `LocationRef` — where a session runs (`{ directory, workspaceID? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LocationRef {
+    /// Absolute working directory.
+    pub directory: String,
+    /// Workspace id (`wrk_…`), if any.
+    #[serde(rename = "workspaceID", skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+/// `SessionV2Info` — the V2 session projection returned by `v2.session.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionV2Info {
+    /// Session id (`ses_…`).
+    pub id: String,
+    /// Parent session id, if this is a child session.
+    #[serde(rename = "parentID", skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Owning project id.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// Agent id, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Selected model, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Accumulated cost (USD).
+    pub cost: f64,
+    /// Token usage.
+    pub tokens: SessionTokens,
+    /// Lifecycle timestamps.
+    pub time: SessionTime,
+    /// Session title.
+    pub title: String,
+    /// Where the session runs.
+    pub location: LocationRef,
+    /// Sub-path within the workspace, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subpath: Option<String>,
+}
+
+/// 200 body of `v2.session.get`: `{ data: SessionV2Info }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionGetResponse {
+    /// The session projection.
+    pub data: SessionV2Info,
+}
+
+/// `SessionNotFoundError` — 404 for `v2.session.get` (`{ _tag, sessionID, message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionNotFoundError {
+    /// Always `"SessionNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The session id that was not found.
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// `UnauthorizedError` — 401 for V2 routes (`{ _tag, message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct UnauthorizedError {
+    /// Always `"UnauthorizedError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

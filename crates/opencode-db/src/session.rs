@@ -8,9 +8,13 @@
 //! [`SESSION_INPUT_DDL`]/[`SESSION_CONTEXT_EPOCH_DDL`] constants exist for tests and for a future
 //! Rust-applies path. The repositories assume the tables already exist (created by TS).
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 use crate::DbError;
 
@@ -222,6 +226,146 @@ impl SessionContextEpochRepo {
     }
 }
 
+/// A row of the `session` **projection table** — the materialized session state the V2 read routes
+/// serve (the `SessionProjector` folds session events into this table on the write path; reads are a
+/// plain `SELECT`). Only the columns needed to build the `v2.session.get` response are read, so this
+/// stays compatible with the (wider) TS-owned `session` table. Mirrors `session/info.ts` `fromRow`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRecord {
+    /// Session id (`ses_…`).
+    pub id: String,
+    /// Owning project id.
+    pub project_id: String,
+    /// Parent session id, if a child session.
+    pub parent_id: Option<String>,
+    /// Agent id, if set.
+    pub agent: Option<String>,
+    /// Model JSON (`{ id, providerID, variant? }`), if set.
+    pub model: Option<Value>,
+    /// Accumulated cost.
+    pub cost: f64,
+    /// Input tokens.
+    pub tokens_input: i64,
+    /// Output tokens.
+    pub tokens_output: i64,
+    /// Reasoning tokens.
+    pub tokens_reasoning: i64,
+    /// Cache-read tokens.
+    pub tokens_cache_read: i64,
+    /// Cache-write tokens.
+    pub tokens_cache_write: i64,
+    /// Session title.
+    pub title: String,
+    /// Absolute working directory.
+    pub directory: String,
+    /// Workspace id, if any.
+    pub workspace_id: Option<String>,
+    /// Sub-path within the workspace, if any.
+    pub path: Option<String>,
+    /// Creation time (ms).
+    pub time_created: i64,
+    /// Last-updated time (ms).
+    pub time_updated: i64,
+    /// Archival time (ms), if archived.
+    pub time_archived: Option<i64>,
+}
+
+/// Columns read for [`SessionRecord`] (explicit, so the wider TS `session` table is fine).
+const SESSION_RECORD_COLS: &str = "id, project_id, parent_id, agent, model, cost, tokens_input, \
+     tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, title, directory, \
+     workspace_id, path, time_created, time_updated, time_archived";
+
+/// Read-only store over the `session` projection table.
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    /// Fetch a session by id, or `None` if it doesn't exist.
+    async fn get(&self, id: &str) -> Result<Option<SessionRecord>, DbError>;
+}
+
+/// SQLite-backed [`SessionStore`] over the shared pool.
+pub struct SqlxSessionStore {
+    pool: SqlitePool,
+}
+
+impl SqlxSessionStore {
+    /// Wrap the shared pool.
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl SessionStore for SqlxSessionStore {
+    async fn get(&self, id: &str) -> Result<Option<SessionRecord>, DbError> {
+        // Read via `Row::try_get` (rather than a tuple) — the row has >16 columns, and `model` needs
+        // JSON parsing from its TEXT column.
+        let Some(row) = sqlx::query(&format!(
+            "SELECT {SESSION_RECORD_COLS} FROM session WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let model: Option<String> = row.try_get("model")?;
+        let model = model.map(|s| serde_json::from_str(&s)).transpose()?;
+        Ok(Some(SessionRecord {
+            id: row.try_get("id")?,
+            project_id: row.try_get("project_id")?,
+            parent_id: row.try_get("parent_id")?,
+            agent: row.try_get("agent")?,
+            model,
+            cost: row.try_get("cost")?,
+            tokens_input: row.try_get("tokens_input")?,
+            tokens_output: row.try_get("tokens_output")?,
+            tokens_reasoning: row.try_get("tokens_reasoning")?,
+            tokens_cache_read: row.try_get("tokens_cache_read")?,
+            tokens_cache_write: row.try_get("tokens_cache_write")?,
+            title: row.try_get("title")?,
+            directory: row.try_get("directory")?,
+            workspace_id: row.try_get("workspace_id")?,
+            path: row.try_get("path")?,
+            time_created: row.try_get("time_created")?,
+            time_updated: row.try_get("time_updated")?,
+            time_archived: row.try_get("time_archived")?,
+        }))
+    }
+}
+
+/// In-memory [`SessionStore`] — test double / the backing for `AppContext::in_memory()`.
+#[derive(Default)]
+pub struct MemorySessionStore {
+    rows: Mutex<HashMap<String, SessionRecord>>,
+}
+
+impl MemorySessionStore {
+    /// Create an empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert (or replace) a session record.
+    pub fn insert(&self, record: SessionRecord) {
+        self.rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .insert(record.id.clone(), record);
+    }
+}
+
+#[async_trait]
+impl SessionStore for MemorySessionStore {
+    async fn get(&self, id: &str) -> Result<Option<SessionRecord>, DbError> {
+        Ok(self
+            .rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .get(id)
+            .cloned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +472,85 @@ mod tests {
         assert_eq!(got, epoch);
         assert_eq!(got.agent, "plan");
         assert_eq!(got.revision, 1);
+    }
+
+    /// The `session` projection table as TS writes it (subset of columns the V2 read serves).
+    const SESSION_PROJECTION_DDL: &str = "CREATE TABLE session (\
+        id text PRIMARY KEY, project_id text NOT NULL, parent_id text, agent text, model text, \
+        cost real NOT NULL DEFAULT 0, tokens_input integer NOT NULL DEFAULT 0, \
+        tokens_output integer NOT NULL DEFAULT 0, tokens_reasoning integer NOT NULL DEFAULT 0, \
+        tokens_cache_read integer NOT NULL DEFAULT 0, tokens_cache_write integer NOT NULL DEFAULT 0, \
+        title text NOT NULL, directory text NOT NULL, workspace_id text, path text, \
+        time_created integer NOT NULL, time_updated integer NOT NULL, time_archived integer)";
+
+    #[tokio::test]
+    async fn sqlx_session_store_reads_a_ts_written_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        sqlx::query(SESSION_PROJECTION_DDL)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        // A row shaped exactly as the TS server would persist it (model as JSON; workspace/path NULL).
+        sqlx::query(
+            "INSERT INTO session \
+             (id, project_id, parent_id, agent, model, cost, tokens_input, tokens_output, \
+              tokens_reasoning, tokens_cache_read, tokens_cache_write, title, directory, \
+              workspace_id, path, time_created, time_updated, time_archived) \
+             VALUES ('ses_1', 'prj_1', NULL, 'build', \
+                     '{\"id\":\"claude\",\"providerID\":\"anthropic\",\"variant\":\"default\"}', \
+                     1.5, 2, 3, 4, 5, 6, 'Hello', '/repo', NULL, NULL, 100, 200, NULL)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let store = SqlxSessionStore::new(db.pool().clone());
+        let got = store.get("ses_1").await.unwrap().unwrap();
+        assert_eq!(got.id, "ses_1");
+        assert_eq!(got.project_id, "prj_1");
+        assert_eq!(got.parent_id, None);
+        assert_eq!(got.agent.as_deref(), Some("build"));
+        assert_eq!(got.model.as_ref().unwrap()["providerID"], "anthropic");
+        assert_eq!(got.cost, 1.5);
+        assert_eq!(got.tokens_input, 2);
+        assert_eq!(got.tokens_cache_write, 6);
+        assert_eq!(got.title, "Hello");
+        assert_eq!(got.directory, "/repo");
+        assert_eq!(got.workspace_id, None);
+        assert_eq!(got.time_created, 100);
+        assert_eq!(got.time_archived, None);
+
+        assert!(store.get("ses_missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_session_store_roundtrips() {
+        let store = MemorySessionStore::new();
+        assert!(store.get("ses_1").await.unwrap().is_none());
+        let rec = SessionRecord {
+            id: "ses_1".into(),
+            project_id: "prj_1".into(),
+            parent_id: None,
+            agent: None,
+            model: None,
+            cost: 0.0,
+            tokens_input: 0,
+            tokens_output: 0,
+            tokens_reasoning: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
+            title: "t".into(),
+            directory: "/d".into(),
+            workspace_id: None,
+            path: None,
+            time_created: 1,
+            time_updated: 2,
+            time_archived: None,
+        };
+        store.insert(rec.clone());
+        assert_eq!(store.get("ses_1").await.unwrap().as_ref(), Some(&rec));
     }
 }

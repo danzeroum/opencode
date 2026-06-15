@@ -24,8 +24,9 @@ pub use opencode_events::{EventInput, StoredEvent};
 
 pub use migration::{MigrationReport, EXPECTED_MIGRATIONS};
 pub use session::{
-    SessionContextEpoch, SessionContextEpochRepo, SessionInput, SessionInputRepo,
-    SESSION_CONTEXT_EPOCH_DDL, SESSION_INPUT_DDL,
+    MemorySessionStore, SessionContextEpoch, SessionContextEpochRepo, SessionInput,
+    SessionInputRepo, SessionRecord, SessionStore, SqlxSessionStore, SESSION_CONTEXT_EPOCH_DDL,
+    SESSION_INPUT_DDL,
 };
 
 /// Database / event-store errors.
@@ -224,6 +225,11 @@ impl Database {
     /// An [`EventStore`] backed by the shared pool.
     pub fn event_store(&self) -> Arc<dyn EventStore> {
         Arc::new(SqlxEventStore::from_pool(self.pool.clone()))
+    }
+
+    /// A [`SessionStore`] (read model over the `session` projection table), backed by the shared pool.
+    pub fn session_store(&self) -> Arc<dyn SessionStore> {
+        Arc::new(SqlxSessionStore::new(self.pool.clone()))
     }
 
     /// The `session_input` repository, backed by the shared pool.
@@ -464,5 +470,46 @@ mod tests {
         // A second event store over the same pool sees the first one's write.
         let store2 = db.event_store();
         assert_eq!(store2.head_seq("ses_1").await.unwrap(), 1);
+    }
+
+    /// The event store must read rows written by *another* writer (the TS server) — i.e. events
+    /// inserted directly into the shared schema, not via our `append`. Proves on-disk compatibility.
+    #[tokio::test]
+    async fn event_store_reads_externally_written_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("opencode.db"))
+            .await
+            .unwrap();
+        // Insert as the TS store would: the aggregate head, then the event rows with `type`/`data`.
+        sqlx::query(
+            "INSERT INTO event_sequence (aggregate_id, seq, owner_id) VALUES ('ses_x', 2, 'usr_1')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        for (id, seq, kind, data) in [
+            ("evt_one", 1, "session.created.1", r#"{"title":"hi"}"#),
+            ("evt_two", 2, "session.updated.1", r#"{"title":"bye"}"#),
+        ] {
+            sqlx::query(
+                "INSERT INTO event (id, aggregate_id, seq, type, data) VALUES (?, 'ses_x', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(seq)
+            .bind(kind)
+            .bind(data)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let store = db.event_store();
+        assert_eq!(store.head_seq("ses_x").await.unwrap(), 2);
+        let events = store.read("ses_x", 0).await.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, "evt_one");
+        assert_eq!(events[0].kind, "session.created.1");
+        assert_eq!(events[0].data["title"], "hi");
+        assert_eq!(events[1].seq, 2);
     }
 }

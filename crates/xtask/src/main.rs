@@ -12,7 +12,14 @@ use serde_json::{json, Map, Value};
 
 /// Contract paths enforced as a hard gate. A route is added here once it is cut over to Rust;
 /// `openapi-diff` then fails if its generated shape diverges from the golden contract.
-const CUTOVER_PATHS: &[&str] = &["/global/health", "/path", "/find/file", "/find", "/log"];
+const CUTOVER_PATHS: &[&str] = &[
+    "/global/health",
+    "/path",
+    "/find/file",
+    "/find",
+    "/log",
+    "/api/session/{sessionID}",
+];
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "opencode Rust workspace tasks")]
@@ -70,6 +77,26 @@ fn response_schema(op: &Value, code: &str) -> Value {
     ))
     .cloned()
     .unwrap_or(Value::Null)
+}
+
+/// Merge an object `value`'s fields into `out` without overwriting existing keys. Used when a
+/// single-element `oneOf`/`anyOf`/`allOf` collapses to its sole member. Non-objects are ignored.
+fn merge_into(out: &mut Map<String, Value>, value: Value) {
+    if let Value::Object(fields) = value {
+        for (k, v) in fields {
+            out.entry(k).or_insert(v);
+        }
+    }
+}
+
+/// Whether a (normalized) schema is the bare null schema `{ "type": "null" }` — utoipa emits it as a
+/// union member for `Option<T>` over a `$ref`. Nullability is captured by `required`, so it's dropped
+/// from unions (the scalar-`type` array case is handled separately).
+fn is_null_schema(value: &Value) -> bool {
+    value
+        .as_object()
+        .map(|m| m.len() == 1 && m.get("type").and_then(Value::as_str) == Some("null"))
+        .unwrap_or(false)
 }
 
 /// Normalize a schema to its *structural skeleton* — resolving `$ref` against `components` and
@@ -141,13 +168,22 @@ fn normalize_schema(schema: &Value, components: &Map<String, Value>, depth: u8) 
         if let Some(arr) = map.get(key).and_then(|v| v.as_array()) {
             union.extend(
                 arr.iter()
-                    .map(|s| normalize_schema(s, components, depth - 1)),
+                    .map(|s| normalize_schema(s, components, depth - 1))
+                    // Drop the `{ "type": "null" }` member utoipa adds for `Option<$ref>`.
+                    .filter(|s| !is_null_schema(s)),
             );
         }
     }
     if !union.is_empty() {
         union.sort_by_key(Value::to_string);
-        out.insert("anyOf".into(), Value::Array(union));
+        union.dedup();
+        // A single-variant union ≡ the variant itself — collapses the golden's `anyOf[X, X]`
+        // (duplicated `$ref`) against a bare `$ref`.
+        if union.len() == 1 {
+            merge_into(&mut out, union.remove(0));
+        } else {
+            out.insert("anyOf".into(), Value::Array(union));
+        }
     }
     if let Some(arr) = map.get("allOf").and_then(|v| v.as_array()) {
         let mut all: Vec<Value> = arr
@@ -155,7 +191,14 @@ fn normalize_schema(schema: &Value, components: &Map<String, Value>, depth: u8) 
             .map(|s| normalize_schema(s, components, depth - 1))
             .collect();
         all.sort_by_key(Value::to_string);
-        out.insert("allOf".into(), Value::Array(all));
+        all.dedup();
+        // A single-element `allOf` ≡ the element — collapses utoipa's `Option<NestedStruct>` wrapper
+        // (`allOf: [{ $ref }]`) against the golden's inline object.
+        if all.len() == 1 {
+            merge_into(&mut out, all.remove(0));
+        } else {
+            out.insert("allOf".into(), Value::Array(all));
+        }
     }
     Value::Object(out)
 }

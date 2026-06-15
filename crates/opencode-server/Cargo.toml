@@ -11,6 +11,7 @@ opencode-proto.workspace = true
 opencode-effect.workspace = true
 opencode-core.workspace = true
 opencode-tools.workspace = true
+opencode-db.workspace = true
 
 axum.workspace = true
 tower.workspace = true
