@@ -572,7 +572,7 @@ mod tests {
     async fn router_serves_native_route_and_proxies_others() {
         use tower::ServiceExt;
         let state = ServerState {
-            ctx: AppContext::new(),
+            ctx: AppContext::in_memory(),
             // Only the `global` group is cut over natively here.
             routes: RouteTable::parse("global"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),

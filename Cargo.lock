@@ -1110,8 +1110,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "opencode-db",
  "opencode-effect",
  "opencode-server",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1143,6 +1146,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "opencode-events",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -1156,6 +1160,7 @@ name = "opencode-effect"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "opencode-db",
  "thiserror",
  "tracing",
  "tracing-subscriber",
