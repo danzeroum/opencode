@@ -1,0 +1,13 @@
+[package]
+name = "opencode-effect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DI/runtime support for opencode: AppContext, error taxonomy, tracing init"
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "opencode-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "opencode plugin host (out-of-process JS) + MCP client (rmcp) — Phase 5"
+
+[dependencies]
+thiserror.workspace = true

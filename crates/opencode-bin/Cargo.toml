@@ -1,0 +1,20 @@
+[package]
+name = "opencode-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "opencode binary: CLI + boots the axum server fronting the strangler proxy"
+
+[[bin]]
+name = "opencode"
+path = "src/main.rs"
+
+[dependencies]
+opencode-server.workspace = true
+opencode-effect.workspace = true
+
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

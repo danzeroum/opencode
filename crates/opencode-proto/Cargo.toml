@@ -1,0 +1,12 @@
+[package]
+name = "opencode-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "External HTTP wire types for opencode (mirror packages/sdk/openapi.json)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+utoipa.workspace = true

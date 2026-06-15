@@ -1,0 +1,13 @@
+[package]
+name = "opencode-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "opencode configuration (JSONC schema, catalog/models.dev merge) — Phase 1"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+jsonc-parser.workspace = true

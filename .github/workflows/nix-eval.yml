@@ -5,6 +5,15 @@ on:
     branches: [dev]
   pull_request:
     branches: [dev]
+    paths-ignore:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - ".config/**"
+      - "*.md"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 concurrency:
