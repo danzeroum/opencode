@@ -10,3 +10,4 @@ description = "opencode configuration (JSONC schema, catalog/models.dev merge) â
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+jsonc-parser.workspace = true

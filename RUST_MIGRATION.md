@@ -59,9 +59,10 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - ⬜ Spikes: `die`/`catchDefect` → `TurnOutcome` enum; `FiberSet` → `ToolExecutor`; `state.ts` `Draft<T>`/replay
 - ⬜ Pin `effect@4.0.0-beta.74`; align with the in-flight V2 refactor (`specs/v2`)
 
-### Phase 1 — Leaf / low-risk modules ⬜
-- `opencode-config` (JSONC/schema, ~30 files), `opencode-tools` (fs/glob/grep via ripgrep libs, git via gix)
-- Cutover: `health`, `fs`, `location`, `reference`, `command`, `skill`
+### Phase 1 — Leaf / low-risk modules 🟡
+- 🟡 `opencode-config`: JSONC loader (`jsonc-parser`, comment/trailing-comma parity) + typed `Config` (top-level V1 subset; unmodeled keys preserved via `extra`) — landed; remaining config submodules in progress
+- ⬜ `opencode-tools` (fs/glob/grep via ripgrep libs, git via gix)
+- ⬜ Cutover: `health`, `fs`, `location`, `reference`, `command`, `skill`
 
 ### Phase 2 — Persistence + event core ⬜
 - `opencode-db` (sqlx, migration-compat runner, event-store/session-store + `session_context_epoch`/`session_input`)
