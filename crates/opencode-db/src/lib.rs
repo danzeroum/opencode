@@ -25,8 +25,8 @@ pub use opencode_events::{EventInput, StoredEvent};
 pub use migration::{MigrationReport, EXPECTED_MIGRATIONS};
 pub use session::{
     MemorySessionStore, SessionContextEpoch, SessionContextEpochRepo, SessionInput,
-    SessionInputRepo, SessionRecord, SessionStore, SqlxSessionStore, SESSION_CONTEXT_EPOCH_DDL,
-    SESSION_INPUT_DDL,
+    SessionInputRepo, SessionListQuery, SessionRecord, SessionStore, SqlxSessionStore,
+    SESSION_CONTEXT_EPOCH_DDL, SESSION_INPUT_DDL,
 };
 
 /// Database / event-store errors.

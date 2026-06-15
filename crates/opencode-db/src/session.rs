@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
 use crate::DbError;
@@ -275,11 +276,57 @@ const SESSION_RECORD_COLS: &str = "id, project_id, parent_id, agent, model, cost
      tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, title, directory, \
      workspace_id, path, time_created, time_updated, time_archived";
 
+/// Filters/ordering for [`SessionStore::list`]. All filters are optional (`None` = no filter).
+#[derive(Debug, Clone, Default)]
+pub struct SessionListQuery {
+    /// Max rows to return (`None` = no limit).
+    pub limit: Option<i64>,
+    /// Order by `time_created` (then `id`) descending — most-recent first — when `true`; ascending
+    /// otherwise.
+    pub descending: bool,
+    /// ASCII-case-insensitive substring match on `title`.
+    pub search: Option<String>,
+    /// Restrict to a project id.
+    pub project: Option<String>,
+    /// Restrict to a workspace id.
+    pub workspace: Option<String>,
+}
+
 /// Read-only store over the `session` projection table.
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Fetch a session by id, or `None` if it doesn't exist.
     async fn get(&self, id: &str) -> Result<Option<SessionRecord>, DbError>;
+
+    /// List sessions matching `query`, ordered by `time_created` then `id` per `query.descending`.
+    async fn list(&self, query: &SessionListQuery) -> Result<Vec<SessionRecord>, DbError>;
+}
+
+/// Build a [`SessionRecord`] from a row. Read via `Row::try_get` (rather than a tuple) — the row has
+/// >16 columns, and `model` needs JSON parsing from its TEXT column.
+fn record_from_row(row: &SqliteRow) -> Result<SessionRecord, DbError> {
+    let model: Option<String> = row.try_get("model")?;
+    let model = model.map(|s| serde_json::from_str(&s)).transpose()?;
+    Ok(SessionRecord {
+        id: row.try_get("id")?,
+        project_id: row.try_get("project_id")?,
+        parent_id: row.try_get("parent_id")?,
+        agent: row.try_get("agent")?,
+        model,
+        cost: row.try_get("cost")?,
+        tokens_input: row.try_get("tokens_input")?,
+        tokens_output: row.try_get("tokens_output")?,
+        tokens_reasoning: row.try_get("tokens_reasoning")?,
+        tokens_cache_read: row.try_get("tokens_cache_read")?,
+        tokens_cache_write: row.try_get("tokens_cache_write")?,
+        title: row.try_get("title")?,
+        directory: row.try_get("directory")?,
+        workspace_id: row.try_get("workspace_id")?,
+        path: row.try_get("path")?,
+        time_created: row.try_get("time_created")?,
+        time_updated: row.try_get("time_updated")?,
+        time_archived: row.try_get("time_archived")?,
+    })
 }
 
 /// SQLite-backed [`SessionStore`] over the shared pool.
@@ -297,8 +344,6 @@ impl SqlxSessionStore {
 #[async_trait]
 impl SessionStore for SqlxSessionStore {
     async fn get(&self, id: &str) -> Result<Option<SessionRecord>, DbError> {
-        // Read via `Row::try_get` (rather than a tuple) — the row has >16 columns, and `model` needs
-        // JSON parsing from its TEXT column.
         let Some(row) = sqlx::query(&format!(
             "SELECT {SESSION_RECORD_COLS} FROM session WHERE id = ?"
         ))
@@ -308,28 +353,51 @@ impl SessionStore for SqlxSessionStore {
         else {
             return Ok(None);
         };
-        let model: Option<String> = row.try_get("model")?;
-        let model = model.map(|s| serde_json::from_str(&s)).transpose()?;
-        Ok(Some(SessionRecord {
-            id: row.try_get("id")?,
-            project_id: row.try_get("project_id")?,
-            parent_id: row.try_get("parent_id")?,
-            agent: row.try_get("agent")?,
-            model,
-            cost: row.try_get("cost")?,
-            tokens_input: row.try_get("tokens_input")?,
-            tokens_output: row.try_get("tokens_output")?,
-            tokens_reasoning: row.try_get("tokens_reasoning")?,
-            tokens_cache_read: row.try_get("tokens_cache_read")?,
-            tokens_cache_write: row.try_get("tokens_cache_write")?,
-            title: row.try_get("title")?,
-            directory: row.try_get("directory")?,
-            workspace_id: row.try_get("workspace_id")?,
-            path: row.try_get("path")?,
-            time_created: row.try_get("time_created")?,
-            time_updated: row.try_get("time_updated")?,
-            time_archived: row.try_get("time_archived")?,
-        }))
+        record_from_row(&row).map(Some)
+    }
+
+    async fn list(&self, query: &SessionListQuery) -> Result<Vec<SessionRecord>, DbError> {
+        // Build the filter clause dynamically, then bind in the same order.
+        let mut sql = format!("SELECT {SESSION_RECORD_COLS} FROM session");
+        let mut conds: Vec<&str> = Vec::new();
+        if query.project.is_some() {
+            conds.push("project_id = ?");
+        }
+        if query.workspace.is_some() {
+            conds.push("workspace_id = ?");
+        }
+        if query.search.is_some() {
+            conds.push("title LIKE ?");
+        }
+        if !conds.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conds.join(" AND "));
+        }
+        sql.push_str(if query.descending {
+            " ORDER BY time_created DESC, id DESC"
+        } else {
+            " ORDER BY time_created ASC, id ASC"
+        });
+        if query.limit.is_some() {
+            sql.push_str(" LIMIT ?");
+        }
+
+        let mut q = sqlx::query(&sql);
+        if let Some(p) = &query.project {
+            q = q.bind(p);
+        }
+        if let Some(w) = &query.workspace {
+            q = q.bind(w);
+        }
+        if let Some(s) = &query.search {
+            q = q.bind(format!("%{s}%"));
+        }
+        if let Some(l) = query.limit {
+            q = q.bind(l);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.iter().map(record_from_row).collect()
     }
 }
 
@@ -363,6 +431,37 @@ impl SessionStore for MemorySessionStore {
             .expect("session store mutex poisoned")
             .get(id)
             .cloned())
+    }
+
+    async fn list(&self, query: &SessionListQuery) -> Result<Vec<SessionRecord>, DbError> {
+        let search = query.search.as_ref().map(|s| s.to_lowercase());
+        let mut rows: Vec<SessionRecord> = self
+            .rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .values()
+            .filter(|r| query.project.as_ref().is_none_or(|p| &r.project_id == p))
+            .filter(|r| {
+                query
+                    .workspace
+                    .as_ref()
+                    .is_none_or(|w| r.workspace_id.as_deref() == Some(w.as_str()))
+            })
+            .filter(|r| {
+                search
+                    .as_ref()
+                    .is_none_or(|s| r.title.to_lowercase().contains(s))
+            })
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| (a.time_created, &a.id).cmp(&(b.time_created, &b.id)));
+        if query.descending {
+            rows.reverse();
+        }
+        if let Some(limit) = query.limit {
+            rows.truncate(limit.max(0) as usize);
+        }
+        Ok(rows)
     }
 }
 
@@ -552,5 +651,131 @@ mod tests {
         };
         store.insert(rec.clone());
         assert_eq!(store.get("ses_1").await.unwrap().as_ref(), Some(&rec));
+    }
+
+    #[tokio::test]
+    async fn sqlx_session_store_lists_with_order_limit_search_and_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        sqlx::query(SESSION_PROJECTION_DDL)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        for (id, project, title, created) in [
+            ("ses_a", "prj_1", "Alpha", 100),
+            ("ses_b", "prj_1", "Beta", 300),
+            ("ses_c", "prj_2", "Gamma alpha", 200),
+        ] {
+            sqlx::query(
+                "INSERT INTO session (id, project_id, title, directory, time_created, time_updated) \
+                 VALUES (?, ?, ?, '/repo', ?, ?)",
+            )
+            .bind(id)
+            .bind(project)
+            .bind(title)
+            .bind(created)
+            .bind(created)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        let store = SqlxSessionStore::new(db.pool().clone());
+        let ids = |rs: Vec<SessionRecord>| rs.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        // Default descending by time_created.
+        let desc = SessionListQuery {
+            descending: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(store.list(&desc).await.unwrap()),
+            ["ses_b", "ses_c", "ses_a"]
+        );
+
+        // Ascending.
+        let asc = SessionListQuery::default();
+        assert_eq!(
+            ids(store.list(&asc).await.unwrap()),
+            ["ses_a", "ses_c", "ses_b"]
+        );
+
+        // Limit (applied after ordering).
+        let limited = SessionListQuery {
+            descending: true,
+            limit: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(ids(store.list(&limited).await.unwrap()), ["ses_b", "ses_c"]);
+
+        // Project filter.
+        let by_project = SessionListQuery {
+            project: Some("prj_1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(store.list(&by_project).await.unwrap()),
+            ["ses_a", "ses_b"]
+        );
+
+        // Case-insensitive title search ("alpha" matches "Alpha" and "Gamma alpha").
+        let search = SessionListQuery {
+            search: Some("alpha".into()),
+            ..Default::default()
+        };
+        assert_eq!(ids(store.list(&search).await.unwrap()), ["ses_a", "ses_c"]);
+    }
+
+    #[tokio::test]
+    async fn memory_session_store_lists_with_order_and_filter() {
+        let store = MemorySessionStore::new();
+        let rec = |id: &str, project: &str, title: &str, created: i64| SessionRecord {
+            id: id.into(),
+            project_id: project.into(),
+            parent_id: None,
+            agent: None,
+            model: None,
+            cost: 0.0,
+            tokens_input: 0,
+            tokens_output: 0,
+            tokens_reasoning: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
+            title: title.into(),
+            directory: "/d".into(),
+            workspace_id: None,
+            path: None,
+            time_created: created,
+            time_updated: created,
+            time_archived: None,
+        };
+        store.insert(rec("ses_a", "prj_1", "Alpha", 100));
+        store.insert(rec("ses_b", "prj_1", "Beta", 300));
+        store.insert(rec("ses_c", "prj_2", "Gamma alpha", 200));
+        let ids = |rs: Vec<SessionRecord>| rs.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        let desc = SessionListQuery {
+            descending: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(store.list(&desc).await.unwrap()),
+            ["ses_b", "ses_c", "ses_a"]
+        );
+
+        let by_project = SessionListQuery {
+            project: Some("prj_1".into()),
+            limit: Some(1),
+            descending: true,
+            ..Default::default()
+        };
+        assert_eq!(ids(store.list(&by_project).await.unwrap()), ["ses_b"]);
+
+        let search = SessionListQuery {
+            search: Some("ALPHA".into()),
+            ..Default::default()
+        };
+        assert_eq!(ids(store.list(&search).await.unwrap()), ["ses_a", "ses_c"]);
     }
 }

@@ -429,11 +429,117 @@ async fn v2_session_get(
     }
 }
 
+/// Error responder for `v2.session.list`: a contract-shaped 400 `InvalidRequestError` (one arm of the
+/// golden 400 union), or a generic 500 envelope if the store read fails.
+pub enum SessionListFailure {
+    /// Invalid query parameter (400).
+    BadRequest(String),
+    /// Store read failed (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for SessionListFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            SessionListFailure::BadRequest(message) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message,
+                    kind: None,
+                    field: None,
+                }),
+            )
+                .into_response(),
+            SessionListFailure::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /api/session` — list sessions (group `session`). Matches the golden `v2.session.list`:
+/// 200 `SessionsResponse`, 400 union, 401. Reads the shared `session` projection table with
+/// `limit`/`order`/`search`/`project`/`workspace` filters. Opaque keyset cursors are a follow-up, so
+/// the `cursor` object is currently always returned empty (its fields are optional in the contract).
+#[utoipa::path(
+    get,
+    path = "/api/session",
+    operation_id = "v2.session.list",
+    params(
+        ("workspace" = Option<String>, Query, description = "Filter by workspace id"),
+        ("project" = Option<String>, Query, description = "Filter by project id"),
+        ("search" = Option<String>, Query, description = "Title substring (case-insensitive)"),
+        ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
+        ("limit" = Option<i64>, Query, description = "Max results"),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor")
+    ),
+    responses(
+        (status = 200, description = "Sessions", body = opencode_proto::SessionsResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::SessionListError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::SessionsResponse>, SessionListFailure> {
+    let descending = match params.get("order").map(String::as_str) {
+        None | Some("desc") => true,
+        Some("asc") => false,
+        Some(other) => {
+            return Err(SessionListFailure::BadRequest(format!(
+                "invalid order: {other} (expected asc|desc)"
+            )))
+        }
+    };
+    let limit = match params.get("limit") {
+        None => None,
+        Some(s) => Some(s.parse::<i64>().map_err(|_| {
+            SessionListFailure::BadRequest(format!("limit must be an integer: {s}"))
+        })?),
+    };
+    let pick = |key: &str| params.get(key).filter(|s| !s.is_empty()).cloned();
+    let query = opencode_db::SessionListQuery {
+        limit,
+        descending,
+        search: pick("search"),
+        project: pick("project"),
+        workspace: pick("workspace"),
+    };
+    let records = state
+        .ctx
+        .sessions()
+        .list(&query)
+        .await
+        .map_err(|e| SessionListFailure::Internal(e.to_string()))?;
+    let data = records.into_iter().map(session_record_to_info).collect();
+    Ok(Json(opencode_proto::SessionsResponse {
+        data,
+        cursor: opencode_proto::SessionCursor::default(),
+    }))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health, global_health, path_get, find_files, find_text, app_log, v2_session_get),
+    paths(
+        health,
+        global_health,
+        path_get,
+        find_files,
+        find_text,
+        app_log,
+        v2_session_get,
+        v2_session_list
+    ),
     components(schemas(
         opencode_proto::Health,
         opencode_proto::ErrorEnvelope,
@@ -454,7 +560,11 @@ async fn v2_session_get(
         opencode_proto::SessionTime,
         opencode_proto::LocationRef,
         opencode_proto::SessionNotFoundError,
-        opencode_proto::UnauthorizedError
+        opencode_proto::UnauthorizedError,
+        opencode_proto::SessionsResponse,
+        opencode_proto::SessionCursor,
+        opencode_proto::InvalidCursorError,
+        opencode_proto::SessionListError
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -528,6 +638,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/log", post(app_log));
     }
     if state.routes.handles("session") {
+        router = router.route("/api/session", get(v2_session_list));
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
     }
 
@@ -859,5 +970,81 @@ mod tests {
             .unwrap();
         // Unreachable upstream → 502, proving the route is proxied (not served natively).
         assert_eq!(resp.status(), 502);
+    }
+
+    #[test]
+    fn openapi_has_v2_session_list_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/api/session"]["get"];
+        assert_eq!(op["operationId"], "v2.session.list");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/SessionsResponse"
+        );
+        for code in ["400", "401"] {
+            assert!(op["responses"][code].is_object(), "missing {code} response");
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_session_list_returns_ordered_sessions() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        let mut older = test_session_record("ses_a");
+        older.time_created = 100;
+        let mut newer = test_session_record("ses_b");
+        newer.time_created = 300;
+        sessions.insert(older);
+        sessions.insert(newer);
+        let state = ServerState {
+            ctx: AppContext::new(Arc::new(opencode_db::MemoryEventStore::new()), sessions),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Default order is descending by time_created → newest first.
+        assert_eq!(v["data"].as_array().unwrap().len(), 2);
+        assert_eq!(v["data"][0]["id"], "ses_b");
+        assert_eq!(v["data"][1]["id"], "ses_a");
+        // `cursor` is always present (empty here).
+        assert!(v["cursor"].is_object());
+    }
+
+    #[tokio::test]
+    async fn v2_session_list_invalid_order_is_bad_request() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session?order=sideways")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "InvalidRequestError");
     }
 }
