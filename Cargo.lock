@@ -906,6 +906,7 @@ dependencies = [
  "opencode-effect",
  "opencode-events",
  "opencode-proto",
+ "serde_json",
 ]
 
 [[package]]
@@ -917,6 +918,7 @@ dependencies = [
  "opencode-events",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
