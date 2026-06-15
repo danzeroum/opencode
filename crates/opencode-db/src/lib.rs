@@ -1,16 +1,32 @@
-//! Persistence layer (Phase 2): event-store / session-store repositories.
+//! Persistence layer (Phase 2): the single shared SQLite pool, the event-store repositories, the
+//! migration-journal verifier, and the session-store repositories.
 //!
-//! The trait shapes are fixed here with an in-memory implementation (reference + test double). The
-//! sqlx/SQLite-backed implementation — reusing the exact TS DDL/indexes and the migration-journal
-//! compat — lands as a follow-up (it needs the C `libsqlite3-sys`, deferred to keep early CI and
-//! cross-compile simple).
+//! The on-disk schema is **owned by the TypeScript server** during the migration ("TS migrates,
+//! Rust verifies"): Rust opens the same SQLite file, creates only the append-only `event` tables it
+//! needs if they are missing (`IF NOT EXISTS`, a no-op against a TS-created DB), and **verifies** the
+//! migration journal on boot rather than applying migrations (see [`migration`]). Full
+//! migration-apply is deferred to Phase 6.
 
-use std::collections::HashMap;
+pub mod migration;
+pub mod session;
+
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use opencode_events::{EventInput, StoredEvent};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::SqlitePool;
+
+// Re-export the event-store contract types: they appear in this crate's public trait signatures, so
+// downstream callers need them without taking a direct `opencode-events` dependency.
+pub use opencode_events::{EventInput, StoredEvent};
+
+pub use migration::{MigrationReport, EXPECTED_MIGRATIONS};
+pub use session::{
+    SessionContextEpoch, SessionContextEpochRepo, SessionInput, SessionInputRepo,
+    SESSION_CONTEXT_EPOCH_DDL, SESSION_INPUT_DDL,
+};
 
 /// Database / event-store errors.
 #[derive(Debug, thiserror::Error)]
@@ -59,7 +75,7 @@ pub trait EventStore: Send + Sync {
 /// In-memory [`EventStore`] — reference implementation and test double.
 #[derive(Default)]
 pub struct MemoryEventStore {
-    logs: Mutex<HashMap<String, Vec<StoredEvent>>>,
+    logs: std::sync::Mutex<std::collections::HashMap<String, Vec<StoredEvent>>>,
 }
 
 impl MemoryEventStore {
@@ -137,46 +153,115 @@ CREATE TABLE IF NOT EXISTS event (\
 CREATE UNIQUE INDEX IF NOT EXISTS event_aggregate_seq_idx ON event (aggregate_id, seq);\
 CREATE INDEX IF NOT EXISTS event_aggregate_type_seq_idx ON event (aggregate_id, type, seq);";
 
+/// Whether a path string refers to SQLite's in-memory database.
+fn is_memory(path: &Path) -> bool {
+    path.as_os_str() == ":memory:"
+}
+
+/// Open (creating if missing) a SQLite pool at `path`, applying the same per-connection PRAGMAs the
+/// TypeScript server uses (`database.ts`): WAL + `synchronous=NORMAL` + 5s busy timeout + a 64 MiB
+/// page cache + foreign keys. Applying them via [`SqliteConnectOptions`] means every pooled
+/// connection inherits them. In-memory databases cap the pool at one connection (each connection
+/// would otherwise get its own private database) and skip WAL (unsupported for `:memory:`).
+async fn open_pool(path: impl AsRef<Path>) -> Result<SqlitePool, DbError> {
+    let path = path.as_ref();
+    let memory = is_memory(path);
+    let mut opts = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .busy_timeout(Duration::from_secs(5))
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .pragma("cache_size", "-64000");
+    if !memory {
+        opts = opts.journal_mode(SqliteJournalMode::Wal);
+    }
+    let mut pool_opts = SqlitePoolOptions::new();
+    if memory {
+        pool_opts = pool_opts.max_connections(1);
+    }
+    Ok(pool_opts.connect_with(opts).await?)
+}
+
+/// Create the append-only `event` / `event_sequence` tables if they don't already exist.
+async fn ensure_event_schema(pool: &SqlitePool) -> Result<(), DbError> {
+    for stmt in SCHEMA_DDL
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        sqlx::query(stmt).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// The opencode database: a single, shared [`SqlitePool`] plus the repositories built over it.
+///
+/// `sqlx::SqlitePool` is internally reference-counted, so every [`SqlitePool::clone`] handed to a
+/// repository shares the *same* underlying connection pool — satisfying the "one shared pool"
+/// requirement. Construct once at boot via [`Database::connect`], verify the journal with
+/// [`Database::verify_migrations`], then mint repositories ([`Database::event_store`],
+/// [`Database::session_input`], [`Database::session_context_epoch`]).
+#[derive(Clone)]
+pub struct Database {
+    pool: SqlitePool,
+}
+
+impl Database {
+    /// Open (creating if missing) the database at `path`, apply the standard PRAGMAs, and ensure the
+    /// event schema exists. Pass `":memory:"` for an ephemeral database (single connection).
+    pub async fn connect(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        let pool = open_pool(path).await?;
+        ensure_event_schema(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    /// The shared connection pool.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    /// An [`EventStore`] backed by the shared pool.
+    pub fn event_store(&self) -> Arc<dyn EventStore> {
+        Arc::new(SqlxEventStore::from_pool(self.pool.clone()))
+    }
+
+    /// The `session_input` repository, backed by the shared pool.
+    pub fn session_input(&self) -> SessionInputRepo {
+        SessionInputRepo::new(self.pool.clone())
+    }
+
+    /// The `session_context_epoch` repository, backed by the shared pool.
+    pub fn session_context_epoch(&self) -> SessionContextEpochRepo {
+        SessionContextEpochRepo::new(self.pool.clone())
+    }
+
+    /// Verify the migration journal against the migrations this build was compiled with, without
+    /// applying anything (TS owns schema during the migration). See [`migration::verify`].
+    pub async fn verify_migrations(&self) -> Result<MigrationReport, DbError> {
+        migration::verify(&self.pool).await
+    }
+}
+
 /// SQLite-backed [`EventStore`] (sqlx). Reuses the exact TS `event`/`event_sequence` DDL so a TS- or
-/// Rust-written database is interchangeable. During TS↔Rust coexistence TS owns schema evolution;
-/// [`SqlxEventStore::connect_path`] only creates tables that don't already exist (the TS-migrates /
-/// Rust-verifies stance — full migration-apply is deferred to Phase 6).
+/// Rust-written database is interchangeable. Prefer constructing it from a [`Database`] (shared pool)
+/// via [`Database::event_store`]; [`SqlxEventStore::connect_path`] is a standalone convenience that
+/// opens its own pool.
 pub struct SqlxEventStore {
-    pool: sqlx::SqlitePool,
+    pool: SqlitePool,
 }
 
 impl SqlxEventStore {
-    /// Open (creating if missing) a SQLite database at `path`, enabling WAL + foreign keys and
-    /// ensuring the event schema exists.
-    pub async fn connect_path(path: impl AsRef<Path>) -> Result<Self, DbError> {
-        let opts = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect_with(opts)
-            .await?;
-        let store = Self { pool };
-        store.ensure_schema().await?;
-        Ok(store)
+    /// Wrap an existing (shared) pool.
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
-    async fn ensure_schema(&self) -> Result<(), DbError> {
-        // WAL + foreign keys, matching the TS store (many readers + one writer).
-        sqlx::query("PRAGMA journal_mode=WAL;")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("PRAGMA foreign_keys=ON;")
-            .execute(&self.pool)
-            .await?;
-        for stmt in SCHEMA_DDL
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            sqlx::query(stmt).execute(&self.pool).await?;
-        }
-        Ok(())
+    /// Open a standalone database at `path` (own pool), ensuring the event schema exists.
+    pub async fn connect_path(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        let pool = open_pool(path).await?;
+        ensure_event_schema(&pool).await?;
+        Ok(Self::from_pool(pool))
     }
 }
 
@@ -365,5 +450,19 @@ mod tests {
         let store = SqlxEventStore::connect_path(&path).await.unwrap();
         assert_eq!(store.head_seq("ses_1").await.unwrap(), 1);
         assert_eq!(store.read("ses_1", 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn database_shares_one_pool_across_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("opencode.db"))
+            .await
+            .unwrap();
+        // The event store minted from the shared pool reads/writes the same database.
+        let store = db.event_store();
+        assert_eq!(store.append("ses_1", 0, vec![ev("a")]).await.unwrap(), 1);
+        // A second event store over the same pool sees the first one's write.
+        let store2 = db.event_store();
+        assert_eq!(store2.head_seq("ses_1").await.unwrap(), 1);
     }
 }

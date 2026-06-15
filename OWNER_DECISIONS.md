@@ -1,13 +1,13 @@
 # Rust migration — pendências e decisões para o dono (@danzeroum)
 
 > GitHub Issues está desabilitado no repo, então este arquivo serve como o documento de
-> **pendências/decisões** para você revisar quando voltar. Trabalho autônomo em andamento no
-> **PR #14** (branch `claude/affectionate-davinci-05ifmg`). Roadmap: [`RUST_MIGRATION.md`](./RUST_MIGRATION.md). Prévia do EventStore (Fase 2): [`EVENTSTORE_PLAN.md`](./EVENTSTORE_PLAN.md).
+> **pendências/decisões** para você revisar quando voltar. Branch de trabalho `claude/affectionate-davinci-05ifmg`; PRs de cutover entram na branch de integração **`rust-migration`** (PR #14/#15/#16 já mergeados lá; **PR #17** em andamento). Roadmap: [`RUST_MIGRATION.md`](./RUST_MIGRATION.md). Prévia do EventStore (Fase 2): [`EVENTSTORE_PLAN.md`](./EVENTSTORE_PLAN.md).
 
 ## Estado atual (CI verde ✅)
 - **Fase 0** completa: Cargo workspace (`crates/`), seam strangler-fig (proxy reverso gated por `OPENCODE_RUST_ROUTES`), OpenAPI code-first (utoipa), `xtask`, workflow `rust.yml`.
-- **Fase 1** em andamento: `opencode-config` (JSONC + `Config` tipado), `opencode-tools` (`read`/`glob`/`grep` nas libs do ripgrep + `process::run_command`), e o **gate de contrato `openapi-diff`** real.
-- Cada push verificado localmente (check / clippy -D warnings / fmt / testes) e verde no `rust` CI.
+- **Fase 1**: `opencode-config` (JSONC + `Config` tipado), `opencode-tools` (ripgrep libs + `process`), o **gate `openapi-diff`** estrutural, e cutovers reais `global.health`/`path.get`/`find.files`/`find.text`/`app.log`.
+- **Fase 2** em andamento: `opencode-db` com `SqlxEventStore` (SQLite, WAL, concorrência otimista), **injeção de dependência** (`AppContext` carrega `Arc<dyn EventStore>`, montado num `build_app_context()` com pool SQLite único compartilhado), **verificação do journal de migrations no boot** (lê `migration` + bridge read-only de `__drizzle_migrations`), e **modelos+repos** de `session_input`/`session_context_epoch`.
+- Cada push verificado localmente (check / clippy -D warnings / fmt / testes / openapi-diff) e verde no `rust` CI.
 
 ## Pendências / decisões que precisam de você
 
@@ -30,6 +30,12 @@
 9. **Confirmação de escopo (verificado no disco).** Permanecem em TS: `tui`/`ui`/`app`/`web`/`desktop`/`storybook` (frontend), `enterprise` (app web SolidJS), `function` (Cloudflare Worker), `slack` (bot via SDK), `plugin` (SDK de autoria), `sdk` (cliente gerado), `identity` (só assets). Confirme.
 
 10. **Esforço.** ~2–3× a estimativa inicial. Centro de gravidade: Fase 3 (roteador LLM, ~6 protocolos, ~3.959 L) e Fase 4 (runner; `die`/`catchDefect`/`FiberSet` → enum `TurnOutcome` + `ToolExecutor`). Risco técnico nº 1: o fluxo de controle do runner.
+
+11. **Política de verificação de migrations no boot (PR #17) — confirmar.** Adotei "**TS migra, Rust verifica**": no boot, o `opencode-bin` lê o journal `migration` (com bridge *read-only* de `__drizzle_migrations`) e compara com a lista `EXPECTED_MIGRATIONS` embutida no binário (espelha `migration.gen.ts`). Política atual:
+   - **DB atrás** do binário (faltam migrations que o Rust espera) **e** journal presente → **falha o boot** com mensagem clara (suba o server TS para migrar).
+   - **DB à frente** (tem migrations que o Rust não conhece) → apenas **warn** (durante a coexistência o TS costuma estar à frente; falhar aqui recusaria o boot toda vez que o TS publicasse uma migration nova).
+   - **Sem journal** (DB novo/não inicializado) → **warn** e segue (o TS é dono da criação do schema; o Rust só cria as tabelas `event`/`event_sequence` que usa).
+   **Decisão sua:** manter "à frente = warn" (recomendado), ou ser estrito e falhar também quando à frente? E manter "atrás = fatal" só quando há journal, ou sempre? Hoje o Rust só serve rotas que não tocam o DB (health/path/find/log), então o gate é preparatório para os cutovers de sessão/evento (PR #18+).
 
 ## Como estou tocando
 Continuo a implementação autonomamente o máximo possível, mantendo o `rust` CI verde a cada push, atualizando o checklist em `RUST_MIGRATION.md`. Novas pendências/ambiguidades entram **neste arquivo**. Não mergeio o PR sem você.

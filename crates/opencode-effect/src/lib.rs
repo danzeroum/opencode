@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use opencode_db::EventStore;
+
 /// Binary-edge error taxonomy. Libraries return their own `thiserror` enums; these are mapped to
 /// HTTP responses (and to the `opencode_proto::ErrorEnvelope` `_tag` shape) at the server edge.
 #[derive(Debug, thiserror::Error)]
@@ -50,23 +52,35 @@ impl AppError {
 
 /// Shared application context — cheap to clone (`Arc`), threaded through axum via `State`.
 ///
-/// Services (`EventStore`, `Database`, `LlmClient`, `Config`, …) are added here as
-/// `Arc<dyn Trait>` in later phases; for Phase 0 it is intentionally empty.
-#[derive(Clone, Default)]
+/// This is the Rust analog of an Effect `Layer`-provided context: services are held as
+/// `Arc<dyn Trait>` and wired once at the composition root (`build_app_context()` in `opencode-bin`).
+/// More services (`Database` repos, `LlmClient`, `Config`, …) are added here as routes are cut over.
+#[derive(Clone)]
 pub struct AppContext {
-    #[allow(dead_code)]
     inner: Arc<AppContextInner>,
 }
 
-#[derive(Default)]
 struct AppContextInner {
-    // services land here (e.g. `event_store: Arc<dyn opencode_db::EventStore>`).
+    event_store: Arc<dyn EventStore>,
 }
 
 impl AppContext {
-    /// Construct an empty context. Real wiring happens in `build_app_context()` (later phases).
-    pub fn new() -> Self {
-        Self::default()
+    /// Construct a context wired with the given event store. Production wiring (single shared SQLite
+    /// pool, migration verification) happens in `build_app_context()`.
+    pub fn new(event_store: Arc<dyn EventStore>) -> Self {
+        Self {
+            inner: Arc::new(AppContextInner { event_store }),
+        }
+    }
+
+    /// A context backed by an in-memory event store — for tests and ephemeral runs.
+    pub fn in_memory() -> Self {
+        Self::new(Arc::new(opencode_db::MemoryEventStore::new()))
+    }
+
+    /// The wired event store.
+    pub fn event_store(&self) -> &Arc<dyn EventStore> {
+        &self.inner.event_store
     }
 }
 

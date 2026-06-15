@@ -8,6 +8,7 @@ description = "opencode persistence: sqlx pool, migration runner, event-store/se
 
 [dependencies]
 opencode-events.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
