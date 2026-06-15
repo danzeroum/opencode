@@ -76,6 +76,40 @@ pub struct Path {
     pub directory: String,
 }
 
+/// `{ text }` wrapper used throughout the `find.text` match shape.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct TextWrap {
+    /// The text value.
+    pub text: String,
+}
+
+/// A submatch within a `find.text` result line.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct TextSubmatch {
+    /// The matched text.
+    #[serde(rename = "match")]
+    pub r#match: TextWrap,
+    /// Start byte offset within the line.
+    pub start: u64,
+    /// End byte offset within the line.
+    pub end: u64,
+}
+
+/// One `find.text` match (the ripgrep JSON match shape).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct TextSearchMatch {
+    /// File path (`{ text }`).
+    pub path: TextWrap,
+    /// The matching line (`{ text }`).
+    pub lines: TextWrap,
+    /// 1-based line number.
+    pub line_number: u64,
+    /// Absolute byte offset of the line within the file.
+    pub absolute_offset: u64,
+    /// Submatch ranges.
+    pub submatches: Vec<TextSubmatch>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
