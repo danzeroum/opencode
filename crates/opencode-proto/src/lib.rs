@@ -61,6 +61,21 @@ pub struct BadRequestData {
     pub kind: Option<String>,
 }
 
+/// `GET /path` response (`Path` component): the resolved opencode paths for a directory.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Path {
+    /// User home directory.
+    pub home: String,
+    /// opencode state directory.
+    pub state: String,
+    /// opencode config directory.
+    pub config: String,
+    /// Git worktree root for `directory` (falls back to `directory` when not a repo).
+    pub worktree: String,
+    /// The resolved working directory.
+    pub directory: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

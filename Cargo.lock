@@ -980,6 +980,7 @@ dependencies = [
  "opencode-core",
  "opencode-effect",
  "opencode-proto",
+ "opencode-tools",
  "reqwest",
  "serde",
  "serde_json",

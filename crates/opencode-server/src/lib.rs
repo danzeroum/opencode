@@ -11,7 +11,12 @@ pub mod proxy;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use axum::{extract::State, response::Json, routing::get, Router};
+use axum::{
+    extract::{Query, State},
+    response::Json,
+    routing::get,
+    Router,
+};
 use opencode_effect::AppContext;
 use opencode_proto::Health;
 
@@ -113,20 +118,73 @@ async fn global_health() -> Json<opencode_proto::GlobalHealth> {
     })
 }
 
+/// `GET /path` — resolve opencode paths for a directory (group `instance`). Matches the golden
+/// `path.get`: `$ref Path` 200 + `BadRequestError` 400. Path values are computed from the
+/// environment (XDG dirs) + the git worktree of `directory`.
+#[utoipa::path(
+    get,
+    path = "/path",
+    operation_id = "path.get",
+    params(
+        ("directory" = Option<String>, Query, description = "Working directory to resolve (defaults to the server cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Resolved paths", body = opencode_proto::Path),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn path_get(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<opencode_proto::Path> {
+    let directory = params.get("directory").cloned().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let config = format!(
+        "{}/opencode",
+        std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"))
+    );
+    let state = format!(
+        "{}/opencode",
+        std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| format!("{home}/.local/state"))
+    );
+    let worktree = opencode_tools::git::root(std::path::Path::new(&directory))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| directory.clone());
+    Json(opencode_proto::Path {
+        home,
+        state,
+        config,
+        worktree,
+        directory,
+    })
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health, global_health),
+    paths(health, global_health, path_get),
     components(schemas(
         opencode_proto::Health,
         opencode_proto::ErrorEnvelope,
         opencode_proto::BadRequestError,
-        opencode_proto::BadRequestData
+        opencode_proto::BadRequestData,
+        opencode_proto::Path
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
-        (name = "global", description = "Global control-plane routes")
+        (name = "global", description = "Global control-plane routes"),
+        (name = "instance", description = "Instance-scoped routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -181,6 +239,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
+    }
+    if state.routes.handles("instance") {
+        router = router.route("/path", get(path_get));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -245,5 +306,24 @@ mod tests {
         let Json(body) = global_health().await;
         assert!(body.healthy);
         assert_eq!(body.version, VERSION);
+    }
+
+    #[test]
+    fn openapi_has_path_get_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/path"]["get"];
+        assert_eq!(op["operationId"], "path.get");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Path"
+        );
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn path_get_handler_resolves_directory() {
+        let Json(body) = path_get(Query(std::collections::HashMap::new())).await;
+        assert!(!body.directory.is_empty());
+        assert!(body.config.ends_with("/opencode"));
     }
 }

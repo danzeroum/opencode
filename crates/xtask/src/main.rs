@@ -14,7 +14,7 @@ use serde_json::Value;
 /// Contract paths enforced as a hard gate. A route is added here once it is cut over to Rust;
 /// `openapi-diff` then fails if its generated shape diverges from the golden contract. Empty until
 /// the first route cutover, so the gate is green by construction during early phases.
-const CUTOVER_PATHS: &[&str] = &["/global/health"];
+const CUTOVER_PATHS: &[&str] = &["/global/health", "/path"];
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "opencode Rust workspace tasks")]
