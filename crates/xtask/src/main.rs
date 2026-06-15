@@ -3,18 +3,16 @@
 //! Run via `cargo run -p xtask -- <cmd>`. Implements `ci`, `openapi`, and `openapi-diff` — the
 //! contract gate that compares the Rust-generated OpenAPI against `packages/sdk/openapi.json`.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 /// Contract paths enforced as a hard gate. A route is added here once it is cut over to Rust;
-/// `openapi-diff` then fails if its generated shape diverges from the golden contract. Empty until
-/// the first route cutover, so the gate is green by construction during early phases.
-const CUTOVER_PATHS: &[&str] = &["/global/health", "/path", "/find/file"];
+/// `openapi-diff` then fails if its generated shape diverges from the golden contract.
+const CUTOVER_PATHS: &[&str] = &["/global/health", "/path", "/find/file", "/find"];
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "opencode Rust workspace tasks")]
@@ -54,43 +52,109 @@ fn golden_openapi_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/sdk/openapi.json")
 }
 
-/// Collect referenced component names (`$ref` leaf segments) anywhere within `value`, so two
-/// operations can be compared by the *set* of schemas they reference (ignoring `$ref` path prefix).
-fn collect_refs(value: &Value, out: &mut BTreeSet<String>) {
-    match value {
-        Value::Object(map) => {
-            for (key, val) in map {
-                if key == "$ref" {
-                    if let Some(s) = val.as_str() {
-                        out.insert(s.rsplit('/').next().unwrap_or(s).to_string());
-                    }
-                } else {
-                    collect_refs(val, out);
-                }
-            }
-        }
-        Value::Array(items) => items.iter().for_each(|v| collect_refs(v, out)),
-        _ => {}
-    }
-}
-
 /// The set of response status codes declared by an operation.
-fn response_codes(op: &Value) -> BTreeSet<String> {
-    op.get("responses")
+fn response_codes(op: &Value) -> Vec<String> {
+    let mut codes: Vec<String> = op
+        .get("responses")
         .and_then(|r| r.as_object())
         .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    codes.sort();
+    codes
+}
+
+/// The JSON response schema for `code` (or `Null` if none).
+fn response_schema(op: &Value, code: &str) -> Value {
+    op.pointer(&format!(
+        "/responses/{code}/content/application~1json/schema"
+    ))
+    .cloned()
+    .unwrap_or(Value::Null)
+}
+
+/// Normalize a schema to its *structural skeleton* — resolving `$ref` against `components` and
+/// keeping only `type` / `properties` / `required` (as a set) / `items` / `*Of`. Annotations and
+/// value-constraints (`description`, `format`, `enum`, `minimum`, `additionalProperties`, …) are
+/// dropped so that representation differences (e.g. utoipa `$ref` vs an inline object, `u64`'s
+/// `minimum:0`, doc-comment descriptions) don't cause false mismatches.
+fn normalize_schema(schema: &Value, components: &Map<String, Value>, depth: u8) -> Value {
+    if depth == 0 {
+        return json!("<max-depth>");
+    }
+    let Value::Object(map) = schema else {
+        return schema.clone();
+    };
+    if let Some(reference) = map.get("$ref").and_then(|v| v.as_str()) {
+        let name = reference.rsplit('/').next().unwrap_or(reference);
+        return match components.get(name) {
+            Some(def) => normalize_schema(def, components, depth - 1),
+            None => json!({ "$ref": name }),
+        };
+    }
+    let mut out = Map::new();
+    if let Some(t) = map.get("type") {
+        // Treat `[T, "null"]` (OpenAPI 3.1 nullable, e.g. utoipa's `Option<T>`) as just `T` —
+        // optionality is already captured by `required`.
+        let t = match t {
+            Value::Array(arr) => {
+                let mut kept: Vec<Value> = arr
+                    .iter()
+                    .filter(|x| x.as_str() != Some("null"))
+                    .cloned()
+                    .collect();
+                if kept.len() == 1 {
+                    kept.remove(0)
+                } else {
+                    Value::Array(kept)
+                }
+            }
+            other => other.clone(),
+        };
+        out.insert("type".into(), t);
+    }
+    if let Some(props) = map.get("properties").and_then(|v| v.as_object()) {
+        let mut np = Map::new();
+        for (k, v) in props {
+            np.insert(k.clone(), normalize_schema(v, components, depth - 1));
+        }
+        out.insert("properties".into(), Value::Object(np));
+    }
+    if let Some(req) = map.get("required").and_then(|v| v.as_array()) {
+        let mut r: Vec<String> = req
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        r.sort();
+        r.dedup();
+        out.insert("required".into(), json!(r));
+    }
+    if let Some(items) = map.get("items") {
+        out.insert(
+            "items".into(),
+            normalize_schema(items, components, depth - 1),
+        );
+    }
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(arr) = map.get(key).and_then(|v| v.as_array()) {
+            let norm = arr
+                .iter()
+                .map(|s| normalize_schema(s, components, depth - 1))
+                .collect();
+            out.insert(key.into(), Value::Array(norm));
+        }
+    }
+    Value::Object(out)
+}
+
+fn schemas_dir(spec: &Value) -> Map<String, Value> {
+    spec.pointer("/components/schemas")
+        .and_then(|v| v.as_object())
+        .cloned()
         .unwrap_or_default()
 }
 
-/// The set of component schemas an operation references.
-fn refs_of(op: &Value) -> BTreeSet<String> {
-    let mut s = BTreeSet::new();
-    collect_refs(op, &mut s);
-    s
-}
-
-/// Compare the Rust-generated spec against the golden contract, per operation. Fails only for paths
-/// listed in [`CUTOVER_PATHS`] (so the gate stays green until a route is actually migrated).
+/// Compare the Rust-generated spec against the golden contract, per operation, *structurally*.
+/// Fails only for paths in [`CUTOVER_PATHS`] (so the gate stays green until a route is migrated).
 fn openapi_diff() -> anyhow::Result<()> {
     let generated = serde_json::to_value(opencode_server::openapi_document())?;
     let golden_path = golden_openapi_path();
@@ -101,7 +165,9 @@ fn openapi_diff() -> anyhow::Result<()> {
     );
     let golden: Value = serde_json::from_str(&fs::read_to_string(&golden_path)?)?;
 
-    let empty = serde_json::Map::new();
+    let gen_comps = schemas_dir(&generated);
+    let gold_comps = schemas_dir(&golden);
+    let empty = Map::new();
     let gen_paths = generated
         .get("paths")
         .and_then(Value::as_object)
@@ -124,28 +190,35 @@ fn openapi_diff() -> anyhow::Result<()> {
         };
         for (method, gen_op) in methods {
             let enforced = CUTOVER_PATHS.contains(&path.as_str());
-            match gold_paths.get(path).and_then(|m| m.get(method)) {
-                None => {
-                    println!("  ~ {method} {path}: not in golden (new native route)");
-                    if enforced {
-                        violations.push(format!("{method} {path}: missing from golden contract"));
-                    }
+            let Some(gold_op) = gold_paths.get(path).and_then(|m| m.get(method)) else {
+                println!("  ~ {method} {path}: not in golden (new native route)");
+                if enforced {
+                    violations.push(format!("{method} {path}: missing from golden contract"));
                 }
-                Some(gold_op) => {
-                    let id_ok = gen_op.get("operationId") == gold_op.get("operationId");
-                    let codes_ok = response_codes(gen_op) == response_codes(gold_op);
-                    let refs_ok = refs_of(gen_op) == refs_of(gold_op);
-                    let ok = id_ok && codes_ok && refs_ok;
-                    println!(
-                        "  {} {method} {path}: operationId={id_ok} responses={codes_ok} schemas={refs_ok}",
-                        if ok { "ok" } else { "MISMATCH" }
-                    );
-                    if enforced && !ok {
-                        violations.push(format!(
-                            "{method} {path}: mismatch (operationId={id_ok}, responses={codes_ok}, schemas={refs_ok})"
-                        ));
-                    }
-                }
+                continue;
+            };
+
+            let id_ok = gen_op.get("operationId") == gold_op.get("operationId");
+            let gen_codes = response_codes(gen_op);
+            let gold_codes = response_codes(gold_op);
+            let codes_ok = gen_codes == gold_codes;
+            let schemas_ok = gen_codes
+                .iter()
+                .filter(|c| gold_codes.contains(c))
+                .all(|code| {
+                    normalize_schema(&response_schema(gen_op, code), &gen_comps, 32)
+                        == normalize_schema(&response_schema(gold_op, code), &gold_comps, 32)
+                });
+
+            let ok = id_ok && codes_ok && schemas_ok;
+            println!(
+                "  {} {method} {path}: operationId={id_ok} responses={codes_ok} schemas={schemas_ok}",
+                if ok { "ok" } else { "MISMATCH" }
+            );
+            if enforced && !ok {
+                violations.push(format!(
+                    "{method} {path}: mismatch (operationId={id_ok}, responses={codes_ok}, schemas={schemas_ok})"
+                ));
             }
         }
     }

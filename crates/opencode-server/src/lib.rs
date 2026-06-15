@@ -170,6 +170,7 @@ async fn path_get(
 }
 
 /// 400 responder returning the Effect HttpApi `BadRequestError` body (`{name, data}`).
+#[derive(Debug)]
 pub struct ApiBadRequest(pub opencode_proto::BadRequestError);
 
 impl axum::response::IntoResponse for ApiBadRequest {
@@ -228,17 +229,72 @@ async fn find_files(
     Ok(Json(files))
 }
 
+/// `GET /find` — regex text search (group `file`). Matches the golden `find.text`: 200 array of
+/// ripgrep-style match objects + 400 `BadRequestError`. Reuses `opencode_tools::grep_detailed`.
+#[utoipa::path(
+    get,
+    path = "/find",
+    operation_id = "find.text",
+    params(
+        ("directory" = Option<String>, Query, description = "Directory to search (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id"),
+        ("pattern" = String, Query, description = "Regex pattern")
+    ),
+    responses(
+        (status = 200, description = "Matches", body = Vec<opencode_proto::TextSearchMatch>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "file"
+)]
+async fn find_text(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<opencode_proto::TextSearchMatch>>, ApiBadRequest> {
+    let pattern = params
+        .get("pattern")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad_request("missing required query parameter: pattern", "Query"))?;
+    let directory = params.get("directory").cloned().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let matches = opencode_tools::grep_detailed(pattern, std::path::Path::new(&directory))
+        .map_err(|e| bad_request(e.to_string(), "Query"))?;
+    let items = matches
+        .into_iter()
+        .map(|m| opencode_proto::TextSearchMatch {
+            path: opencode_proto::TextWrap { text: m.path },
+            lines: opencode_proto::TextWrap { text: m.line_text },
+            line_number: m.line_number,
+            absolute_offset: m.absolute_offset,
+            submatches: m
+                .submatches
+                .into_iter()
+                .map(|s| opencode_proto::TextSubmatch {
+                    r#match: opencode_proto::TextWrap { text: s.text },
+                    start: s.start as u64,
+                    end: s.end as u64,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(Json(items))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health, global_health, path_get, find_files),
+    paths(health, global_health, path_get, find_files, find_text),
     components(schemas(
         opencode_proto::Health,
         opencode_proto::ErrorEnvelope,
         opencode_proto::BadRequestError,
         opencode_proto::BadRequestData,
-        opencode_proto::Path
+        opencode_proto::Path,
+        opencode_proto::TextSearchMatch,
+        opencode_proto::TextWrap,
+        opencode_proto::TextSubmatch
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -305,6 +361,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
+        router = router.route("/find", get(find_text));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -418,5 +475,37 @@ mod tests {
         );
         let res = find_files(Query(q)).await;
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn openapi_has_find_text_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/find"]["get"];
+        assert_eq!(op["operationId"], "find.text");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+            "array"
+        );
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn find_text_missing_pattern_is_bad_request() {
+        let res = find_text(Query(std::collections::HashMap::new())).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn find_text_with_pattern_returns_matches() {
+        let mut q = std::collections::HashMap::new();
+        q.insert("pattern".to_string(), "find_text".to_string());
+        q.insert(
+            "directory".to_string(),
+            env!("CARGO_MANIFEST_DIR").to_string(),
+        );
+        let Json(matches) = find_text(Query(q)).await.unwrap();
+        // This source file contains "find_text", so there is at least one match with a submatch.
+        assert!(!matches.is_empty());
+        assert!(matches.iter().all(|m| !m.submatches.is_empty()));
     }
 }

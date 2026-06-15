@@ -60,7 +60,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - ✅ Code-first OpenAPI (utoipa) + `xtask` (`ci` / `openapi` / `openapi-diff`)
 - ✅ Error contract: `AppError` → HTTP status + error envelope in `opencode-server` (NB: the placeholder uses a `_tag` shape, but the real Effect HttpApi typed errors are `{name, data}` — see `BadRequestError` in `opencode-proto`; the `ApiError` mapping will adopt `{name, data}` as typed-error routes are cut over)
 - ✅ `rust.yml` CI (fmt + clippy -D warnings + nextest + cargo-deny + openapi gate), side-by-side with TS CI
-- 🟡 `openapi-diff` contract gate: per-operation compare (operationId + response codes + referenced schema names) vs `packages/sdk/openapi.json`, hard-failing only for an explicit cut-over allowlist (`CUTOVER_PATHS`, empty until first cutover) — landed; deeper normalization (nullable vs Option, params) as routes migrate
+- ✅ `openapi-diff` contract gate (**structural**): per-operation compare of operationId + response status codes + **structurally-normalized response schemas** (resolves `$ref`, drops nullable/format/enum/description/additionalProperties), so `$ref`-vs-inline representations compare correctly. Hard-fails for `CUTOVER_PATHS` against `packages/sdk/openapi.json`.
 - ⬜ Audit the MCP patch (`patches/@modelcontextprotocol%2Fsdk@1.29.0.patch`, reconnect/`onsessionexpired`)
 - ⬜ Spikes: `die`/`catchDefect` → `TurnOutcome` enum; `FiberSet` → `ToolExecutor`; `state.ts` `Draft<T>`/replay
 - ⬜ Pin `effect@4.0.0-beta.74`; align with the in-flight V2 refactor (`specs/v2`)
@@ -69,7 +69,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - 🟡 `opencode-config`: JSONC loader (`jsonc-parser`, comment/trailing-comma parity) + typed `Config` (top-level V1 subset; unmodeled keys preserved via `extra`) — landed; remaining config submodules in progress
 - 🟡 `opencode-tools`: `read`/`glob`/`grep` (ripgrep libs), `write`/`edit`/`ls`, `process::run_command` + `run_shell` (shell exec + output cap — bash-tool base), `git` (shells out to the `git` binary — faithful to `git.ts`; no `gix` dep) — landed; PTY next
 - ✅ **First real route cutover** (merged): `GET /global/health` (group `global`) — native axum handler matches the golden contract (operationId/responses/schemas), enforced by `openapi-diff` (`CUTOVER_PATHS`); seam verified (native 200 vs proxied 502).
-- 🟡 Cutovers (batch PR into `rust-migration`): **`GET /path`** (`path.get`, group `instance`) + **`GET /find/file`** (`find.files`, group `file`, reuses `opencode-tools::find_files`; 400 returns the `{name,data}` `BadRequestError` shape) done — all contract-enforced by `openapi-diff`. Next: `find.text` (needs richer grep output: submatches/offsets), `config.get` (model the `Config` component), `app.agents`/`app.skills`.
+- 🟡 Cutovers (batch PR into `rust-migration`): **`/path`** (`path.get`), **`/find/file`** (`find.files`), **`/find`** (`find.text`, reuses new `opencode-tools::grep_detailed` with submatches + byte offsets; 400 → `{name,data}` `BadRequestError`) — all contract-enforced. Next: `config.get` (model the `Config` component), `app.agents`/`command.list` (need enumeration logic).
 
 ### Phase 2 — Persistence + event core 🟡
 - 🟡 `opencode-events` (`EventInput`/`StoredEvent`) + `opencode-db` `EventStore` trait + `MemoryEventStore` (optimistic concurrency via `expected_head`) + `opencode-core::Projector`/`project` fold — landed (in-memory); sqlx/SQLite + migration-compat + `session_context_epoch`/`session_input` next
