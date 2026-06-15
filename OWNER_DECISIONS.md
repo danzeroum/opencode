@@ -31,7 +31,7 @@
 
 10. **Esforço.** ~2–3× a estimativa inicial. Centro de gravidade: Fase 3 (roteador LLM, ~6 protocolos, ~3.959 L) e Fase 4 (runner; `die`/`catchDefect`/`FiberSet` → enum `TurnOutcome` + `ToolExecutor`). Risco técnico nº 1: o fluxo de controle do runner.
 
-11. **Política de verificação de migrations no boot (PR #17) — confirmar.** Adotei "**TS migra, Rust verifica**": no boot, o `opencode-bin` lê o journal `migration` (com bridge *read-only* de `__drizzle_migrations`) e compara com a lista `EXPECTED_MIGRATIONS` embutida no binário (espelha `migration.gen.ts`). Política atual:
+11. **Política de verificação de migrations no boot (PR #17) — APROVADA ✅ (2026-06-15).** Documentada em [`MIGRATION_POLICY.md`](./MIGRATION_POLICY.md). Adotei "**TS migra, Rust verifica**": no boot, o `opencode-bin` lê o journal `migration` (com bridge *read-only* de `__drizzle_migrations`) e compara com a lista `EXPECTED_MIGRATIONS` embutida no binário (espelha `migration.gen.ts`). Política atual:
    - **DB atrás** do binário (faltam migrations que o Rust espera) **e** journal presente → **falha o boot** com mensagem clara (suba o server TS para migrar).
    - **DB à frente** (tem migrations que o Rust não conhece) → apenas **warn** (durante a coexistência o TS costuma estar à frente; falhar aqui recusaria o boot toda vez que o TS publicasse uma migration nova).
    - **Sem journal** (DB novo/não inicializado) → **warn** e segue (o TS é dono da criação do schema; o Rust só cria as tabelas `event`/`event_sequence` que usa).
