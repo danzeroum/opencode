@@ -283,6 +283,47 @@ pub struct UnauthorizedError {
     pub message: String,
 }
 
+/// `InvalidCursorError` — 400 for paginated reads when the cursor can't be decoded.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct InvalidCursorError {
+    /// Always `"InvalidCursorError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// Keyset pagination cursor for `v2.session.list` (`{ previous?, next? }`); always present (possibly
+/// empty) in the response.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionCursor {
+    /// Cursor to the previous page, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+    /// Cursor to the next page, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// 200 body of `v2.session.list`: `{ data: SessionV2Info[], cursor }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionsResponse {
+    /// The page of sessions.
+    pub data: Vec<SessionV2Info>,
+    /// Pagination cursor (always present; fields omitted when there's no adjacent page).
+    pub cursor: SessionCursor,
+}
+
+/// The 400 union for `v2.session.list`: `anyOf[InvalidCursorError, InvalidRequestError]`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum SessionListError {
+    /// The pagination cursor could not be decoded.
+    Cursor(InvalidCursorError),
+    /// The request was otherwise invalid.
+    Invalid(InvalidRequestError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
