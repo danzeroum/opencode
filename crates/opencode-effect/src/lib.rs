@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use opencode_db::EventStore;
+use opencode_db::{EventStore, SessionStore};
 
 /// Binary-edge error taxonomy. Libraries return their own `thiserror` enums; these are mapped to
 /// HTTP responses (and to the `opencode_proto::ErrorEnvelope` `_tag` shape) at the server edge.
@@ -62,25 +62,37 @@ pub struct AppContext {
 
 struct AppContextInner {
     event_store: Arc<dyn EventStore>,
+    sessions: Arc<dyn SessionStore>,
 }
 
 impl AppContext {
-    /// Construct a context wired with the given event store. Production wiring (single shared SQLite
-    /// pool, migration verification) happens in `build_app_context()`.
-    pub fn new(event_store: Arc<dyn EventStore>) -> Self {
+    /// Construct a context wired with the given stores. Production wiring (single shared SQLite pool,
+    /// migration verification) happens in `build_app_context()`.
+    pub fn new(event_store: Arc<dyn EventStore>, sessions: Arc<dyn SessionStore>) -> Self {
         Self {
-            inner: Arc::new(AppContextInner { event_store }),
+            inner: Arc::new(AppContextInner {
+                event_store,
+                sessions,
+            }),
         }
     }
 
-    /// A context backed by an in-memory event store — for tests and ephemeral runs.
+    /// A context backed by in-memory stores — for tests and ephemeral runs.
     pub fn in_memory() -> Self {
-        Self::new(Arc::new(opencode_db::MemoryEventStore::new()))
+        Self::new(
+            Arc::new(opencode_db::MemoryEventStore::new()),
+            Arc::new(opencode_db::MemorySessionStore::new()),
+        )
     }
 
     /// The wired event store.
     pub fn event_store(&self) -> &Arc<dyn EventStore> {
         &self.inner.event_store
+    }
+
+    /// The wired session (projection) store.
+    pub fn sessions(&self) -> &Arc<dyn SessionStore> {
+        &self.inner.sessions
     }
 }
 

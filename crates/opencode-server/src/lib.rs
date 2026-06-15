@@ -310,11 +310,130 @@ async fn app_log(Json(entry): Json<opencode_proto::LogEntry>) -> Json<bool> {
     Json(true)
 }
 
+/// Map a `session` projection row to the `SessionV2Info` wire shape (mirrors TS `session/info.ts`
+/// `fromRow`): integer DB columns widen to the contract's `number`, and the `model` JSON column is
+/// projected to `ModelRef` (variant defaults to `"default"`, as in TS).
+fn session_record_to_info(r: opencode_db::SessionRecord) -> opencode_proto::SessionV2Info {
+    let model = r.model.as_ref().map(|m| opencode_proto::ModelRef {
+        id: m
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        provider_id: m
+            .get("providerID")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        variant: Some(
+            m.get("variant")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string(),
+        ),
+    });
+    opencode_proto::SessionV2Info {
+        id: r.id,
+        parent_id: r.parent_id,
+        project_id: r.project_id,
+        agent: r.agent,
+        model,
+        cost: r.cost,
+        tokens: opencode_proto::SessionTokens {
+            input: r.tokens_input as f64,
+            output: r.tokens_output as f64,
+            reasoning: r.tokens_reasoning as f64,
+            cache: opencode_proto::TokenCache {
+                read: r.tokens_cache_read as f64,
+                write: r.tokens_cache_write as f64,
+            },
+        },
+        time: opencode_proto::SessionTime {
+            created: r.time_created as f64,
+            updated: r.time_updated as f64,
+            archived: r.time_archived.map(|t| t as f64),
+        },
+        title: r.title,
+        location: opencode_proto::LocationRef {
+            directory: r.directory,
+            workspace_id: r.workspace_id,
+        },
+        subpath: r.path,
+    }
+}
+
+/// Error responder for `v2.session.get`: a contract-shaped 404 `SessionNotFoundError`, or a generic
+/// 500 envelope if the store read fails.
+pub enum SessionGetError {
+    /// No session with that id (404).
+    NotFound(String),
+    /// Store read failed (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for SessionGetError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            SessionGetError::NotFound(id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::SessionNotFoundError {
+                    tag: "SessionNotFoundError".to_string(),
+                    message: format!("Session {id} not found"),
+                    session_id: id,
+                }),
+            )
+                .into_response(),
+            SessionGetError::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /api/session/{sessionID}` — fetch a session (group `session`). Matches the golden
+/// `v2.session.get`: 200 `{ data: SessionV2Info }`, 400/401 typed errors, 404 `SessionNotFoundError`.
+/// Reads the shared `session` projection table (TS maintains it via the projector on the write path).
+#[utoipa::path(
+    get,
+    path = "/api/session/{sessionID}",
+    operation_id = "v2.session.get",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Success", body = inline(opencode_proto::SessionGetResponse)),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_get(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::SessionGetResponse>, SessionGetError> {
+    let record = state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| SessionGetError::Internal(e.to_string()))?;
+    match record {
+        Some(record) => Ok(Json(opencode_proto::SessionGetResponse {
+            data: session_record_to_info(record),
+        })),
+        None => Err(SessionGetError::NotFound(session_id)),
+    }
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health, global_health, path_get, find_files, find_text, app_log),
+    paths(health, global_health, path_get, find_files, find_text, app_log, v2_session_get),
     components(schemas(
         opencode_proto::Health,
         opencode_proto::ErrorEnvelope,
@@ -327,13 +446,22 @@ async fn app_log(Json(entry): Json<opencode_proto::LogEntry>) -> Json<bool> {
         opencode_proto::LogEntry,
         opencode_proto::EffectHttpApiBadRequest,
         opencode_proto::InvalidRequestError,
-        opencode_proto::RequestError
+        opencode_proto::RequestError,
+        opencode_proto::SessionV2Info,
+        opencode_proto::ModelRef,
+        opencode_proto::SessionTokens,
+        opencode_proto::TokenCache,
+        opencode_proto::SessionTime,
+        opencode_proto::LocationRef,
+        opencode_proto::SessionNotFoundError,
+        opencode_proto::UnauthorizedError
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
         (name = "global", description = "Global control-plane routes"),
         (name = "instance", description = "Instance-scoped routes"),
-        (name = "file", description = "File routes")
+        (name = "file", description = "File routes"),
+        (name = "sessions", description = "Session routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -398,6 +526,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("control") {
         router = router.route("/log", post(app_log));
+    }
+    if state.routes.handles("session") {
+        router = router.route("/api/session/{sessionID}", get(v2_session_get));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -607,6 +738,126 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    fn test_session_record(id: &str) -> opencode_db::SessionRecord {
+        opencode_db::SessionRecord {
+            id: id.to_string(),
+            project_id: "prj_1".into(),
+            parent_id: None,
+            agent: Some("build".into()),
+            model: Some(serde_json::json!({
+                "id": "claude", "providerID": "anthropic", "variant": "default"
+            })),
+            cost: 1.5,
+            tokens_input: 2,
+            tokens_output: 3,
+            tokens_reasoning: 4,
+            tokens_cache_read: 5,
+            tokens_cache_write: 6,
+            title: "Hello".into(),
+            directory: "/repo".into(),
+            workspace_id: None,
+            path: None,
+            time_created: 100,
+            time_updated: 200,
+            time_archived: None,
+        }
+    }
+
+    #[test]
+    fn openapi_has_v2_session_get_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/api/session/{sessionID}"]["get"];
+        assert_eq!(op["operationId"], "v2.session.get");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]
+                ["$ref"],
+            "#/components/schemas/SessionV2Info"
+        );
+        for code in ["400", "401", "404"] {
+            assert!(op["responses"][code].is_object(), "missing {code} response");
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_session_get_returns_session_when_present() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let state = ServerState {
+            ctx: AppContext::new(Arc::new(opencode_db::MemoryEventStore::new()), sessions),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"]["id"], "ses_1");
+        assert_eq!(v["data"]["projectID"], "prj_1");
+        assert_eq!(v["data"]["model"]["providerID"], "anthropic");
+        assert_eq!(v["data"]["tokens"]["input"], 2.0);
+        assert_eq!(v["data"]["location"]["directory"], "/repo");
+        // Optional/absent fields are omitted (workspaceID, parentID, subpath).
+        assert!(v["data"]["location"].get("workspaceID").is_none());
+    }
+
+    #[tokio::test]
+    async fn v2_session_get_missing_is_not_found() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(), // empty session store
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_missing")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "SessionNotFoundError");
+        assert_eq!(v["sessionID"], "ses_missing");
+    }
+
+    #[tokio::test]
+    async fn v2_session_get_proxies_when_group_disabled() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""), // `session` not enabled → proxy fallback
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Unreachable upstream → 502, proving the route is proxied (not served natively).
         assert_eq!(resp.status(), 502);
     }
 }

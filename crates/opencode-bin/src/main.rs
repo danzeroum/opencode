@@ -103,7 +103,7 @@ async fn build_app_context(db_path: &Path) -> anyhow::Result<AppContext> {
         );
     }
 
-    Ok(AppContext::new(db.event_store()))
+    Ok(AppContext::new(db.event_store(), db.session_store()))
 }
 
 #[tokio::main]
