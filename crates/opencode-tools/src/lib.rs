@@ -13,6 +13,7 @@ use grep::searcher::sinks::UTF8;
 use grep::searcher::Searcher;
 
 pub mod files;
+pub mod git;
 pub mod process;
 
 /// Errors produced while executing a tool.
