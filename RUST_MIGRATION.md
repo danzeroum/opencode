@@ -65,10 +65,10 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - 🟡 `opencode-tools`: `read`/`glob`/`grep` (ripgrep libs), `write`/`edit`/`ls` file mutations, `process::run_command` (tokio, timeout + kill-on-drop) — landed; `git` (gix) / PTY next
 - ⬜ Cutover: `health`, `fs`, `location`, `reference`, `command`, `skill`
 
-### Phase 2 — Persistence + event core ⬜
-- `opencode-db` (sqlx, migration-compat runner, event-store/session-store + `session_context_epoch`/`session_input`)
-- Event registry, projectors, channels (`watch`/`async-broadcast`), SSE `/event`
-- Cutover: `agent`, `project`, `project-copy`, `credential`, `model`, `provider`, then `event`
+### Phase 2 — Persistence + event core 🟡
+- 🟡 `opencode-events` (`EventInput`/`StoredEvent`) + `opencode-db` `EventStore` trait + `MemoryEventStore` (optimistic concurrency via `expected_head`) + `opencode-core::Projector`/`project` fold — landed (in-memory); sqlx/SQLite + migration-compat + `session_context_epoch`/`session_input` next
+- ⬜ Channels (`watch`/`async-broadcast`), SSE `/event`
+- ⬜ Cutover: `agent`, `project`, `project-copy`, `credential`, `model`, `provider`, then `event`
 
 ### Phase 3 — LLM ⬜
 - `opencode-llm` protocol router: anthropic-messages → openai-chat/responses → gemini → bedrock-converse; transports; executor (retry/redaction). Parity via recorded fixtures.

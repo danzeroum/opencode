@@ -35,6 +35,24 @@ pub trait Upcaster: Send + Sync {
     fn upcast(&self, kind: &str, version: u32, payload: serde_json::Value) -> serde_json::Value;
 }
 
+/// A new event to append. `aggregate_id`/`seq` are assigned by the store on append.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventInput {
+    /// Event type discriminator (the `type` column).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Schema version of `payload`.
+    pub version: u32,
+    /// The event payload.
+    pub payload: serde_json::Value,
+    /// Skip non-replayable side effects when applied during replay.
+    #[serde(default)]
+    pub replay: bool,
+}
+
+/// A persisted event with its assigned aggregate/seq and a JSON payload.
+pub type StoredEvent = EventEnvelope<serde_json::Value>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
