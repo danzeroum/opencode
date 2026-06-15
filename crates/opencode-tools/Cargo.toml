@@ -8,3 +8,9 @@ description = "opencode tools (bash/read/edit/glob/grep/git/...) + fs/git/search
 
 [dependencies]
 thiserror.workspace = true
+ignore.workspace = true
+globset.workspace = true
+grep.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -62,6 +62,11 @@ clap = { version = "4", features = ["derive", "env"] }
 async-trait = "0.1"
 ulid = "1"
 jsonc-parser = { version = "0.26", features = ["serde"] }
+# Search/glob — the ripgrep libraries (identical ignore/match semantics to ripgrep.ts).
+ignore = "0.4"
+globset = "0.4"
+grep = "0.3"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

@@ -61,7 +61,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 
 ### Phase 1 — Leaf / low-risk modules 🟡
 - 🟡 `opencode-config`: JSONC loader (`jsonc-parser`, comment/trailing-comma parity) + typed `Config` (top-level V1 subset; unmodeled keys preserved via `extra`) — landed; remaining config submodules in progress
-- ⬜ `opencode-tools` (fs/glob/grep via ripgrep libs, git via gix)
+- 🟡 `opencode-tools`: `read`/`glob`/`grep` on the ripgrep libs (`ignore`/`grep`/`globset`) — landed; `git` (gix) / PTY / process spawning next
 - ⬜ Cutover: `health`, `fs`, `location`, `reference`, `command`, `skill`
 
 ### Phase 2 — Persistence + event core ⬜
