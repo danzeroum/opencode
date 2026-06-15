@@ -11,6 +11,7 @@ thiserror.workspace = true
 ignore.workspace = true
 globset.workspace = true
 grep.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
