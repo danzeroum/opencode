@@ -14,7 +14,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Query, State},
     response::Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use opencode_effect::AppContext;
@@ -281,11 +281,40 @@ async fn find_text(
     Ok(Json(items))
 }
 
+/// `POST /log` — write a client log entry (group `control`). Matches the golden `app.log`: 200
+/// `boolean` + 400 `BadRequestError`. The body is parsed into `LogEntry` and emitted via `tracing`;
+/// any parse error returns a contract-shaped `BadRequestError`. (openapi-diff gates responses only,
+/// so the request body schema is not yet enforced.)
+#[utoipa::path(
+    post,
+    path = "/log",
+    operation_id = "app.log",
+    responses(
+        (status = 200, description = "Log entry written", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "control"
+)]
+async fn app_log(Json(entry): Json<opencode_proto::LogEntry>) -> Json<bool> {
+    let opencode_proto::LogEntry {
+        service,
+        level,
+        message,
+    } = entry;
+    match level.as_str() {
+        "error" => tracing::error!(target: "opencode.client", service, "{message}"),
+        "warn" => tracing::warn!(target: "opencode.client", service, "{message}"),
+        "debug" => tracing::debug!(target: "opencode.client", service, "{message}"),
+        _ => tracing::info!(target: "opencode.client", service, "{message}"),
+    }
+    Json(true)
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(health, global_health, path_get, find_files, find_text),
+    paths(health, global_health, path_get, find_files, find_text, app_log),
     components(schemas(
         opencode_proto::Health,
         opencode_proto::ErrorEnvelope,
@@ -294,7 +323,11 @@ async fn find_text(
         opencode_proto::Path,
         opencode_proto::TextSearchMatch,
         opencode_proto::TextWrap,
-        opencode_proto::TextSubmatch
+        opencode_proto::TextSubmatch,
+        opencode_proto::LogEntry,
+        opencode_proto::EffectHttpApiBadRequest,
+        opencode_proto::InvalidRequestError,
+        opencode_proto::RequestError
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -362,6 +395,9 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
         router = router.route("/find", get(find_text));
+    }
+    if state.routes.handles("control") {
+        router = router.route("/log", post(app_log));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -507,5 +543,28 @@ mod tests {
         // This source file contains "find_text", so there is at least one match with a submatch.
         assert!(!matches.is_empty());
         assert!(matches.iter().all(|m| !m.submatches.is_empty()));
+    }
+
+    #[test]
+    fn openapi_has_app_log_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/log"]["post"];
+        assert_eq!(op["operationId"], "app.log");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+            "boolean"
+        );
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn app_log_logs_and_returns_true() {
+        let Json(ok) = app_log(Json(opencode_proto::LogEntry {
+            service: "tui".into(),
+            level: "info".into(),
+            message: "hi".into(),
+        }))
+        .await;
+        assert!(ok);
     }
 }

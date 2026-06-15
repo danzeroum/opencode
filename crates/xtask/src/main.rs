@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 
 /// Contract paths enforced as a hard gate. A route is added here once it is cut over to Rust;
 /// `openapi-diff` then fails if its generated shape diverges from the golden contract.
-const CUTOVER_PATHS: &[&str] = &["/global/health", "/path", "/find/file", "/find"];
+const CUTOVER_PATHS: &[&str] = &["/global/health", "/path", "/find/file", "/find", "/log"];
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "opencode Rust workspace tasks")]
@@ -134,14 +134,28 @@ fn normalize_schema(schema: &Value, components: &Map<String, Value>, depth: u8) 
             normalize_schema(items, components, depth - 1),
         );
     }
-    for key in ["oneOf", "anyOf", "allOf"] {
+    // Collapse `oneOf`/`anyOf` into a single order-independent union (utoipa emits `oneOf` for
+    // untagged enums where the golden spec uses `anyOf`). `allOf` (intersection) stays separate.
+    let mut union: Vec<Value> = Vec::new();
+    for key in ["oneOf", "anyOf"] {
         if let Some(arr) = map.get(key).and_then(|v| v.as_array()) {
-            let norm = arr
-                .iter()
-                .map(|s| normalize_schema(s, components, depth - 1))
-                .collect();
-            out.insert(key.into(), Value::Array(norm));
+            union.extend(
+                arr.iter()
+                    .map(|s| normalize_schema(s, components, depth - 1)),
+            );
         }
+    }
+    if !union.is_empty() {
+        union.sort_by_key(Value::to_string);
+        out.insert("anyOf".into(), Value::Array(union));
+    }
+    if let Some(arr) = map.get("allOf").and_then(|v| v.as_array()) {
+        let mut all: Vec<Value> = arr
+            .iter()
+            .map(|s| normalize_schema(s, components, depth - 1))
+            .collect();
+        all.sort_by_key(Value::to_string);
+        out.insert("allOf".into(), Value::Array(all));
     }
     Value::Object(out)
 }

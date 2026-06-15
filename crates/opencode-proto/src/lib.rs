@@ -110,6 +110,53 @@ pub struct TextSearchMatch {
     pub submatches: Vec<TextSubmatch>,
 }
 
+/// Request body of `POST /log` (`app.log`). (An optional `extra` object in the golden body is
+/// accepted but ignored by serde, so it's not modeled here.)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LogEntry {
+    /// Service name for the log entry.
+    pub service: String,
+    /// Log level: `debug` | `info` | `warn` | `error`.
+    pub level: String,
+    /// Log message.
+    pub message: String,
+}
+
+/// `effect_HttpApiError_BadRequest` — Effect's generic HttpApi bad-request error (`{ _tag }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(as = effect_HttpApiError_BadRequest)]
+pub struct EffectHttpApiBadRequest {
+    /// Always `"BadRequest"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+}
+
+/// `InvalidRequestError` — schema-validation error (`{ _tag, message, kind?, field? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct InvalidRequestError {
+    /// Always `"InvalidRequestError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Which part of the request was invalid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The offending field, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+/// The 400 union used by mutation routes: `anyOf[effect_HttpApiError_BadRequest, InvalidRequestError]`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RequestError {
+    /// Generic bad request.
+    BadRequest(EffectHttpApiBadRequest),
+    /// Schema validation error.
+    Invalid(InvalidRequestError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
