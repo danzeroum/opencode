@@ -111,6 +111,39 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     ApiDoc::openapi()
 }
 
+/// HTTP wrapper for [`opencode_effect::AppError`]. Maps domain errors to a status code plus the
+/// `_tag` error envelope so error responses match the TypeScript server. Handlers return
+/// `Result<T, ApiError>`; `?` converts an `AppError` automatically.
+pub struct ApiError(pub opencode_effect::AppError);
+
+impl From<opencode_effect::AppError> for ApiError {
+    fn from(err: opencode_effect::AppError) -> Self {
+        Self(err)
+    }
+}
+
+impl ApiError {
+    /// The HTTP status code and serialized error envelope for this error.
+    fn parts(&self) -> (u16, opencode_proto::ErrorEnvelope) {
+        (
+            self.0.status_code(),
+            opencode_proto::ErrorEnvelope {
+                tag: self.0.tag().to_string(),
+                message: self.0.to_string(),
+            },
+        )
+    }
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, body) = self.parts();
+        let status = axum::http::StatusCode::from_u16(status)
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(body)).into_response()
+    }
+}
+
 /// Build the axum router: always-native liveness + cut-over contract routes + proxy fallback.
 pub fn build_router(state: ServerState) -> Router {
     let mut router = Router::new().route("/_rust/health", get(rust_health));
@@ -154,5 +187,17 @@ mod tests {
             json["paths"]["/health"].is_object(),
             "health path must be present"
         );
+    }
+
+    #[test]
+    fn api_error_maps_status_and_tag() {
+        let (status, env) = ApiError(opencode_effect::AppError::NotFound("ses_1".into())).parts();
+        assert_eq!(status, 404);
+        assert_eq!(env.tag, "NotFoundError");
+        assert!(env.message.contains("ses_1"));
+
+        let (status, env) = ApiError(opencode_effect::AppError::Conflict("dup".into())).parts();
+        assert_eq!(status, 409);
+        assert_eq!(env.tag, "ConflictError");
     }
 }

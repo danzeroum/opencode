@@ -53,6 +53,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - ✅ Cargo workspace + all crate skeletons; toolchain/deny/nextest config
 - ✅ Reverse-proxy seam (`OPENCODE_RUST_ROUTES`) + native `/_rust/health`
 - ✅ Code-first OpenAPI (utoipa) + `xtask` (`ci` / `openapi` / `openapi-diff`)
+- ✅ Error contract: `AppError` → HTTP status + `ErrorEnvelope` (`_tag`) in `opencode-server`
 - ✅ `rust.yml` CI (fmt + clippy -D warnings + nextest + cargo-deny + openapi gate), side-by-side with TS CI
 - 🟡 `openapi-diff` contract gate: per-operation compare (operationId + response codes + referenced schema names) vs `packages/sdk/openapi.json`, hard-failing only for an explicit cut-over allowlist (`CUTOVER_PATHS`, empty until first cutover) — landed; deeper normalization (nullable vs Option, params) as routes migrate
 - ⬜ Audit the MCP patch (`patches/@modelcontextprotocol%2Fsdk@1.29.0.patch`, reconnect/`onsessionexpired`)
@@ -61,7 +62,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 
 ### Phase 1 — Leaf / low-risk modules 🟡
 - 🟡 `opencode-config`: JSONC loader (`jsonc-parser`, comment/trailing-comma parity) + typed `Config` (top-level V1 subset; unmodeled keys preserved via `extra`) — landed; remaining config submodules in progress
-- 🟡 `opencode-tools`: `read`/`glob`/`grep` (ripgrep libs) + `process::run_command` (tokio, timeout + kill-on-drop) — landed; `git` (gix) / PTY next
+- 🟡 `opencode-tools`: `read`/`glob`/`grep` (ripgrep libs), `write`/`edit`/`ls` file mutations, `process::run_command` (tokio, timeout + kill-on-drop) — landed; `git` (gix) / PTY next
 - ⬜ Cutover: `health`, `fs`, `location`, `reference`, `command`, `skill`
 
 ### Phase 2 — Persistence + event core ⬜
