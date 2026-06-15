@@ -46,7 +46,7 @@ pub fn project<P: Projector>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencode_events::{EventEnvelope, StoredEvent};
+    use opencode_events::StoredEvent;
 
     /// Toy projector: counts events and concatenates their `type`s.
     struct Counter;
@@ -64,13 +64,12 @@ mod tests {
     }
 
     fn stored(seq: i64, kind: &str) -> StoredEvent {
-        EventEnvelope {
+        StoredEvent {
+            id: format!("evt_{seq}"),
             aggregate_id: "ses_1".to_string(),
             seq,
             kind: kind.to_string(),
-            version: 1,
-            payload: serde_json::Value::Null,
-            replay: false,
+            data: serde_json::Value::Null,
         }
     }
 
