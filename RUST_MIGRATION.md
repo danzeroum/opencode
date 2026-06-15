@@ -6,6 +6,11 @@ stay TypeScript. Strategy: **strangler-fig** behind the existing HTTP/OpenAPI co
 
 > Status legend: ✅ done · 🟡 in progress · ⬜ not started
 
+> **Branching (decided 2026-06-15):** cutover PRs target a long-lived **`rust-migration`** integration
+> branch (NOT `dev`), promoted to `dev` only at deliberate milestones — because pushing to `dev`
+> triggers `publish.yml` (release) + `deploy.yml` (deploy). PR #14 (Phase 0/1 + `global.health`) is
+> **merged into `rust-migration`**. Merge cadence: ~weekly per cutover PR; CI is the gate.
+
 ## Fixed decisions
 
 1. **Strategy:** incremental strangler-fig, behind the same HTTP/OpenAPI contract.
@@ -63,7 +68,8 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 ### Phase 1 — Leaf / low-risk modules 🟡
 - 🟡 `opencode-config`: JSONC loader (`jsonc-parser`, comment/trailing-comma parity) + typed `Config` (top-level V1 subset; unmodeled keys preserved via `extra`) — landed; remaining config submodules in progress
 - 🟡 `opencode-tools`: `read`/`glob`/`grep` (ripgrep libs), `write`/`edit`/`ls`, `process::run_command` + `run_shell` (shell exec + output cap — bash-tool base), `git` (shells out to the `git` binary — faithful to `git.ts`; no `gix` dep) — landed; PTY next
-- 🟡 **First real route cutover**: `GET /global/health` (group `global`) — native axum handler matches the golden contract (operationId/responses/schemas), enforced by `openapi-diff` (`CUTOVER_PATHS`); seam verified (native 200 vs proxied 502). More routes (`config.get`, `path.get`, `app.*`, `file.*`, `find.*`…) next.
+- ✅ **First real route cutover** (merged): `GET /global/health` (group `global`) — native axum handler matches the golden contract (operationId/responses/schemas), enforced by `openapi-diff` (`CUTOVER_PATHS`); seam verified (native 200 vs proxied 502).
+- ⬜ Next cutovers need a small **instance/project context** layer first: the remaining "simple" routes (`path.get`, `config.get`, `find.text`/`find.files`, `app.agents`/`app.skills`) are tagged `instance`/`app` and resolve `directory`/`worktree` + services. Plan: add a minimal instance-context resolver, then cut these over (reusing `grep`/`glob`/`git`/`config`), one batch per PR into `rust-migration`.
 
 ### Phase 2 — Persistence + event core 🟡
 - 🟡 `opencode-events` (`EventInput`/`StoredEvent`) + `opencode-db` `EventStore` trait + `MemoryEventStore` (optimistic concurrency via `expected_head`) + `opencode-core::Projector`/`project` fold — landed (in-memory); sqlx/SQLite + migration-compat + `session_context_epoch`/`session_input` next
