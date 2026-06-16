@@ -326,7 +326,8 @@ async fn drive_one_turn(
         .map_err(|e| e.to_string())?;
     let secondary = BusSink::new(ctx.event_bus().clone(), session_id);
     let sink = FanOutSink::new(primary, secondary);
-    run_gated(
+    let started = std::time::Instant::now();
+    let result = run_gated(
         engine.as_ref(),
         tools,
         &sink,
@@ -335,8 +336,24 @@ async fn drive_one_turn(
         vec![Message::user_text(prompt)],
         cancel,
     )
-    .await
-    .map_err(|e| e.to_string())
+    .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(run) => {
+            let steps = match run.outcome {
+                SessionOutcome::Completed { steps }
+                | SessionOutcome::StepLimitReached { steps }
+                | SessionOutcome::AwaitingPermission { steps }
+                | SessionOutcome::Cancelled { steps } => steps as u64,
+            };
+            ctx.metrics().record_turn(steps, latency_ms);
+            if matches!(run.outcome, SessionOutcome::Cancelled { .. }) {
+                ctx.metrics().record_cancellation();
+            }
+        }
+        Err(_) => ctx.metrics().record_error(),
+    }
+    result.map_err(|e| e.to_string())
 }
 
 /// Always-native internal liveness/readiness route (not part of the public OpenAPI contract).
@@ -346,6 +363,27 @@ async fn rust_health() -> Json<Health> {
         backend: "rust".to_string(),
         version: VERSION.to_string(),
     })
+}
+
+/// Always-native internal metrics snapshot (`/_rust/metrics`, not part of the contract): the runner's
+/// in-process counters + turn-latency percentiles + total events published on the bus, as JSON.
+async fn rust_metrics(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    let m = state.ctx.metrics().snapshot();
+    Json(serde_json::json!({
+        "prompts_total": m.prompts,
+        "turns_total": m.turns,
+        "steps_total": m.steps,
+        "errors_total": m.errors,
+        "cancellations_total": m.cancellations,
+        "events_total": state.ctx.event_bus().published_count(),
+        "turn_latency_ms": {
+            "count": m.latency_count,
+            "p50": m.latency_p50_ms,
+            "p95": m.latency_p95_ms,
+            "p99": m.latency_p99_ms,
+            "max": m.latency_max_ms,
+        },
+    }))
 }
 
 /// Always-native internal SSE stream of the in-process event bus (`/_rust/event`). This is **not**
@@ -466,6 +504,7 @@ async fn rust_session_prompt(
     Json(payload): Json<PromptPayload>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
+    state.ctx.metrics().record_prompt();
     // Validate the model up front so a bad request fails fast (before scheduling a task).
     split_model(&payload.model).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -957,6 +996,7 @@ async fn v2_session_prompt(
     axum::extract::Path(session_id): axum::extract::Path<String>,
     Json(request): Json<opencode_proto::SessionPromptRequest>,
 ) -> Result<Json<opencode_proto::SessionPromptResponse>, SessionPromptError> {
+    state.ctx.metrics().record_prompt();
     // The session must exist and carry a model (the request doesn't include one).
     let record = state
         .ctx
@@ -1581,7 +1621,8 @@ impl axum::response::IntoResponse for ApiError {
 pub fn build_router(state: ServerState) -> Router {
     let mut router = Router::new()
         .route("/_rust/health", get(rust_health))
-        .route("/_rust/event", get(rust_event));
+        .route("/_rust/event", get(rust_event))
+        .route("/_rust/metrics", get(rust_metrics));
 
     // Native contract routes are enabled here as they are cut over, gated by the route table.
     if state.routes.handles("health") {
@@ -2636,6 +2677,57 @@ mod tests {
                 serde_json::json!({ "model": model, "prompt": prompt }).to_string(),
             ))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_runner_activity() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = exec_state(url, dir.path().to_path_buf());
+        let metrics_req = || {
+            axum::extract::Request::builder()
+                .uri("/_rust/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        // Zero before any activity.
+        let resp = build_router(state.clone())
+            .oneshot(metrics_req())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["turns_total"], 0);
+        assert_eq!(v["events_total"], 0);
+
+        // Drive one turn via the internal execute route.
+        let resp = build_router(state.clone())
+            .oneshot(exec_request(
+                "ses_m",
+                "anthropic/claude-haiku-4-5-20251001",
+                "hi",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Metrics now reflect the run (one turn, one step, events published, one latency sample).
+        let resp = build_router(state.clone())
+            .oneshot(metrics_req())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["turns_total"], 1);
+        assert_eq!(v["steps_total"], 1);
+        assert!(v["events_total"].as_u64().unwrap() >= 1);
+        assert_eq!(v["turn_latency_ms"]["count"], 1);
     }
 
     #[tokio::test]
