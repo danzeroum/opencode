@@ -1212,6 +1212,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "opencode-core",
  "opencode-db",
  "opencode-effect",
