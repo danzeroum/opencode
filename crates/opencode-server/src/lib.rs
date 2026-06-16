@@ -181,7 +181,8 @@ struct LiveTurnRunner {
 #[async_trait]
 impl TurnRunner for LiveTurnRunner {
     async fn run(&self, session_id: &str, prompt: AdmittedPrompt) {
-        if let Err(error) = drive_one_turn(
+        tracing::info!(session = session_id, model = %prompt.model, "background turn started");
+        match drive_one_turn(
             &self.ctx,
             &self.runner,
             session_id,
@@ -192,7 +193,10 @@ impl TurnRunner for LiveTurnRunner {
         )
         .await
         {
-            tracing::warn!(session = session_id, %error, "background turn failed");
+            Ok(run) => {
+                tracing::info!(session = session_id, outcome = ?run.outcome, "background turn finished")
+            }
+            Err(error) => tracing::warn!(session = session_id, %error, "background turn failed"),
         }
     }
 }
@@ -900,13 +904,47 @@ async fn v2_session_prompt(
             SessionPromptError::Internal(format!("session {session_id} has no model"))
         })?;
 
+    let delivery = request.delivery.unwrap_or(opencode_proto::Delivery::Steer);
+    let prompt = request.prompt;
+    let now = now_ms();
+    let prompt_value =
+        serde_json::to_value(&prompt).map_err(|e| SessionPromptError::Internal(e.to_string()))?;
+    let delivery_value =
+        serde_json::to_value(delivery).map_err(|e| SessionPromptError::Internal(e.to_string()))?;
+
+    // Idempotency: a re-sent admission (the caller supplied an `id` already admitted) replays the
+    // original `Admitted`; the same `id` with a *different* prompt is a 409 (per the contract). Scanning
+    // the log is fine here (admissions are infrequent); a projection/index is a later optimization.
+    if let Some(id) = request.id.as_deref() {
+        let log = state
+            .ctx
+            .event_store()
+            .read(&session_id, 0)
+            .await
+            .map_err(|e| SessionPromptError::Internal(e.to_string()))?;
+        if let Some(existing) = log.iter().find(|e| {
+            e.kind == "session.next.prompt.admitted.1"
+                && e.data.get("messageID").and_then(|v| v.as_str()) == Some(id)
+        }) {
+            if existing.data.get("prompt") == Some(&prompt_value)
+                && existing.data.get("delivery") == Some(&delivery_value)
+            {
+                tracing::info!(session = %session_id, message = %id, "prompt admission replayed (idempotent)");
+                let data = admitted_from_event(existing, &session_id)
+                    .map_err(SessionPromptError::Internal)?;
+                return Ok(Json(opencode_proto::SessionPromptResponse { data }));
+            }
+            tracing::warn!(session = %session_id, message = %id, "prompt admission conflict: a different prompt under an existing id");
+            return Err(SessionPromptError::Conflict(format!(
+                "message {id} was already admitted with a different prompt"
+            )));
+        }
+    }
+
     let message_id = request
         .id
         .clone()
         .unwrap_or_else(|| format!("msg_{}", ulid::Ulid::new()));
-    let delivery = request.delivery.unwrap_or(opencode_proto::Delivery::Steer);
-    let prompt = request.prompt;
-    let now = now_ms();
 
     // Durably admit: append the lifecycle event; its aggregate sequence is `admittedSeq`. Retry on an
     // optimistic-concurrency conflict (the background runner appends to the same aggregate).
@@ -916,10 +954,8 @@ async fn v2_session_prompt(
             "timestamp": now,
             "sessionID": session_id,
             "messageID": message_id,
-            "prompt": serde_json::to_value(&prompt)
-                .map_err(|e| SessionPromptError::Internal(e.to_string()))?,
-            "delivery": serde_json::to_value(delivery)
-                .map_err(|e| SessionPromptError::Internal(e.to_string()))?,
+            "prompt": prompt_value,
+            "delivery": delivery_value,
         }),
     );
     let mut admitted_seq = None;
@@ -966,6 +1002,8 @@ async fn v2_session_prompt(
         );
     }
 
+    tracing::info!(session = %session_id, message = %message_id, admitted_seq, "prompt admitted");
+
     Ok(Json(opencode_proto::SessionPromptResponse {
         data: opencode_proto::SessionInputAdmitted {
             admitted_seq,
@@ -977,6 +1015,36 @@ async fn v2_session_prompt(
             promoted_seq: None,
         },
     }))
+}
+
+/// Reconstruct a [`opencode_proto::SessionInputAdmitted`] from a persisted
+/// `session.next.prompt.admitted.1` event — used to replay an idempotent re-admission.
+fn admitted_from_event(
+    event: &opencode_db::StoredEvent,
+    session_id: &str,
+) -> Result<opencode_proto::SessionInputAdmitted, String> {
+    let prompt = serde_json::from_value(event.data.get("prompt").cloned().unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    let delivery = serde_json::from_value(event.data.get("delivery").cloned().unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    Ok(opencode_proto::SessionInputAdmitted {
+        admitted_seq: event.seq,
+        id: event
+            .data
+            .get("messageID")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        session_id: session_id.to_string(),
+        prompt,
+        delivery,
+        time_created: event
+            .data
+            .get("timestamp")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        promoted_seq: None,
+    })
 }
 
 /// Wrap an in-process [`opencode_effect::BusEvent`] as the contract live event envelope
@@ -1793,6 +1861,70 @@ mod tests {
         let stored = state.ctx.event_store().read("ses_cut", 0).await.unwrap();
         assert_eq!(stored[0].kind, "session.next.prompt.admitted.1");
         assert!(stored.iter().any(|e| e.kind == "session.next.text.ended"));
+    }
+
+    #[tokio::test]
+    async fn v2_session_prompt_is_idempotent_on_message_id() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = contract_state(url, dir.path().to_path_buf(), "ses_idem");
+
+        let post = |text: &str| {
+            axum::extract::Request::builder()
+                .method("POST")
+                .uri("/api/session/ses_idem/prompt")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "id": "msg_fixed", "prompt": { "text": text } })
+                        .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // First admission lands at seq 1 (and schedules the background run).
+        let r1 = build_router(state.clone())
+            .oneshot(post("hello"))
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), 200);
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(v1["data"]["admittedSeq"], 1);
+
+        // Re-sent with the same id + prompt → idempotent replay (same seq, no new admit).
+        let r2 = build_router(state.clone())
+            .oneshot(post("hello"))
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), 200);
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(v2["data"]["admittedSeq"], 1);
+
+        // Same id, different prompt → 409 ConflictError.
+        let r3 = build_router(state.clone())
+            .oneshot(post("different"))
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), 409);
+        let b3 = axum::body::to_bytes(r3.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+        assert_eq!(v3["_tag"], "ConflictError");
+
+        // Exactly one admission was persisted (the replay didn't append a duplicate).
+        let stored = state.ctx.event_store().read("ses_idem", 0).await.unwrap();
+        let admits = stored
+            .iter()
+            .filter(|e| e.kind == "session.next.prompt.admitted.1")
+            .count();
+        assert_eq!(admits, 1);
     }
 
     #[tokio::test]
