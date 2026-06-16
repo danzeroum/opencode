@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opencode_db::{DbError, EventStore};
+use opencode_events::EventInput;
 use opencode_llm::{
     ContentPart, Generation, LlmError, LlmEvent, LlmRequest, Message, Role, ToolChoice,
     ToolDefinition, Usage,
@@ -92,12 +94,26 @@ struct ToolCallRecord {
     input: Value,
 }
 
-/// Drive a session to completion: run turns while the model keeps issuing tool calls, stopping when a
-/// turn finishes with none ([`TurnOutcome::Done`](crate::runner::TurnOutcome::Done)) or the step limit
-/// is hit. `seed` is the initial conversation (e.g. the user's prompt).
+/// Drive a session to completion without persisting (ephemeral run): run turns while the model keeps
+/// issuing tool calls, stopping when a turn finishes with none
+/// ([`TurnOutcome::Done`](crate::runner::TurnOutcome::Done)) or the step limit is hit. `seed` is the
+/// initial conversation (e.g. the user's prompt). Equivalent to [`run_with_sink`] with a [`NoopSink`].
 pub async fn run(
     engine: &dyn LlmEngine,
     tools: Arc<dyn ToolBox>,
+    session: &Session,
+    seed: Vec<Message>,
+) -> Result<SessionRun, RunError> {
+    run_with_sink(engine, tools, &NoopSink, session, seed).await
+}
+
+/// Like [`run`], but streams each turn's events — and the final outcome — to `sink` as durable batches,
+/// one [`SessionSink::record`] call per atomic turn. Persistence is a sink ([`EventStoreSink`]); the
+/// event bus will be another. The returned [`SessionRun`] is unchanged; the sink is a side channel.
+pub async fn run_with_sink(
+    engine: &dyn LlmEngine,
+    tools: Arc<dyn ToolBox>,
+    sink: &dyn SessionSink,
     session: &Session,
     seed: Vec<Message>,
 ) -> Result<SessionRun, RunError> {
@@ -124,6 +140,9 @@ pub async fn run(
         let (text, calls) = fold_turn(&events, &mut usage);
         transcript.extend(events);
 
+        // The durable record of this turn (assistant message; tool results appended below).
+        let assistant = assistant_event(&text, &calls);
+
         // Record the assistant turn (text first, then any tool calls), mirroring the message order the
         // provider streamed.
         let mut content = Vec::new();
@@ -142,28 +161,36 @@ pub async fn run(
             content,
         });
 
-        // No tool calls ⇒ the model is done.
+        // No tool calls ⇒ the model is done: persist the turn, then the outcome.
         if calls.is_empty() {
+            sink.record(vec![assistant]).await?;
+            let outcome = SessionOutcome::Completed { steps: step + 1 };
+            sink.record(vec![finished_event(&outcome, &usage)]).await?;
             return Ok(SessionRun {
-                outcome: SessionOutcome::Completed { steps: step + 1 },
+                outcome,
                 messages,
                 transcript,
                 usage,
             });
         }
 
-        // Run the tool calls and feed the results back as a `tool` message, then continue.
+        // Run the tool calls, persist the turn (assistant + tool results) as one atomic batch, and feed
+        // the results back as a `tool` message before the next turn.
         let results = execute_tools(&tools, &calls).await?;
+        let tool_results = tool_results_event(&results);
+        sink.record(vec![assistant, tool_results]).await?;
         messages.push(Message {
             role: Role::Tool,
             content: results,
         });
     }
 
+    let outcome = SessionOutcome::StepLimitReached {
+        steps: session.step_limit,
+    };
+    sink.record(vec![finished_event(&outcome, &usage)]).await?;
     Ok(SessionRun {
-        outcome: SessionOutcome::StepLimitReached {
-            steps: session.step_limit,
-        },
+        outcome,
         messages,
         transcript,
         usage,
@@ -247,9 +274,125 @@ async fn execute_tools(
         .collect())
 }
 
+// ---- Durable persistence (the runner as an event producer) ----
+
+/// The event types the runner appends, versioned `name.N` (the TS `versionedType` convention).
+pub mod event_kinds {
+    /// An assistant turn — `data`: `{ "text": string, "tool_calls": [{id,name,input}] }`.
+    pub const ASSISTANT_MESSAGE: &str = "message.assistant.1";
+    /// A turn's tool results — `data`: `{ "results": [{id,name,result}] }`.
+    pub const TOOL_RESULTS: &str = "message.tool_results.1";
+    /// The run outcome — `data`: `{ "outcome": "completed"|"step_limit", "steps": n, "usage": {…} }`.
+    pub const SESSION_FINISHED: &str = "session.finished.1";
+}
+
+fn assistant_event(text: &str, calls: &[ToolCallRecord]) -> EventInput {
+    let tool_calls: Vec<Value> = calls
+        .iter()
+        .map(|c| serde_json::json!({ "id": c.id, "name": c.name, "input": c.input }))
+        .collect();
+    EventInput::new(
+        event_kinds::ASSISTANT_MESSAGE,
+        serde_json::json!({ "text": text, "tool_calls": tool_calls }),
+    )
+}
+
+fn tool_results_event(results: &[ContentPart]) -> EventInput {
+    let items: Vec<Value> = results
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolResult { id, name, result } => {
+                Some(serde_json::json!({ "id": id, "name": name, "result": result }))
+            }
+            _ => None,
+        })
+        .collect();
+    EventInput::new(
+        event_kinds::TOOL_RESULTS,
+        serde_json::json!({ "results": items }),
+    )
+}
+
+fn finished_event(outcome: &SessionOutcome, usage: &Usage) -> EventInput {
+    let (label, steps) = match outcome {
+        SessionOutcome::Completed { steps } => ("completed", *steps),
+        SessionOutcome::StepLimitReached { steps } => ("step_limit", *steps),
+    };
+    EventInput::new(
+        event_kinds::SESSION_FINISHED,
+        serde_json::json!({ "outcome": label, "steps": steps, "usage": usage }),
+    )
+}
+
+/// Receives the runner's durable events as a run progresses — one [`record`](SessionSink::record) call
+/// per atomic batch (each turn's events, then the outcome). The seam that decouples the turn loop from
+/// where events go: [`EventStoreSink`] persists them; an event-bus sink (Phase 4) will publish them.
+#[async_trait]
+pub trait SessionSink: Send + Sync {
+    /// Persist (or otherwise handle) one atomic batch of events. Returning `Err` aborts the run.
+    async fn record(&self, events: Vec<EventInput>) -> Result<(), RunError>;
+}
+
+/// A sink that discards events — the default for ephemeral [`run`]s.
+pub struct NoopSink;
+
+#[async_trait]
+impl SessionSink for NoopSink {
+    async fn record(&self, _events: Vec<EventInput>) -> Result<(), RunError> {
+        Ok(())
+    }
+}
+
+/// A [`SessionSink`] that appends each batch to an [`EventStore`] under the session's aggregate id,
+/// advancing the optimistic-concurrency head across batches. A conflict (another writer advanced the
+/// aggregate) surfaces as a [`RunError`] — concurrent-writer handling (steering / compaction restart)
+/// is a later increment; here the runner is the sole writer.
+pub struct EventStoreSink {
+    store: Arc<dyn EventStore>,
+    aggregate_id: String,
+    head: std::sync::Mutex<i64>,
+}
+
+impl EventStoreSink {
+    /// Build a sink for `aggregate_id`, seeding the head from the store's current head so appends
+    /// continue an existing log.
+    pub async fn new(
+        store: Arc<dyn EventStore>,
+        aggregate_id: impl Into<String>,
+    ) -> Result<Self, DbError> {
+        let aggregate_id = aggregate_id.into();
+        let head = store.head_seq(&aggregate_id).await?;
+        Ok(Self {
+            store,
+            aggregate_id,
+            head: std::sync::Mutex::new(head),
+        })
+    }
+}
+
+#[async_trait]
+impl SessionSink for EventStoreSink {
+    async fn record(&self, events: Vec<EventInput>) -> Result<(), RunError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        // The runner records sequentially, so the head is read and updated around the append without
+        // holding the lock across the await.
+        let expected = *self.head.lock().expect("event sink mutex poisoned");
+        let new_head = self
+            .store
+            .append(&self.aggregate_id, expected, events)
+            .await
+            .map_err(|e| RunError::Attempt(format!("persist: {e}")))?;
+        *self.head.lock().expect("event sink mutex poisoned") = new_head;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencode_db::MemoryEventStore;
     use opencode_llm::{FinishReason, Message};
     use serde_json::json;
     use std::sync::Mutex;
@@ -560,5 +703,145 @@ mod tests {
         assert!(answer.contains("sunny"));
         // Usage summed across both real turns (10/5 + 20/7).
         assert_eq!(run.usage, usage(30, 12));
+    }
+
+    // ---- Durable persistence ----
+
+    #[tokio::test]
+    async fn persists_turn_events_to_the_store() {
+        let engine = ScriptedEngine::new(vec![
+            tool_turn(
+                "call_1",
+                "get_weather",
+                json!({ "city": "Paris" }),
+                usage(10, 5),
+            ),
+            text_turn("It's sunny.", FinishReason::Stop, usage(30, 8)),
+        ]);
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.tools = vec![ToolDefinition {
+            name: "get_weather".into(),
+            description: None,
+            input_schema: json!({ "type": "object" }),
+        }];
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let sink = EventStoreSink::new(store.clone(), "ses_persist")
+            .await
+            .unwrap();
+
+        let run = run_with_sink(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &session,
+            vec![Message::user_text("weather?")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.outcome, SessionOutcome::Completed { steps: 2 });
+
+        let stored = store.read("ses_persist", 0).await.unwrap();
+        let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                event_kinds::ASSISTANT_MESSAGE, // turn 0: assistant (tool call)
+                event_kinds::TOOL_RESULTS,      // turn 0: tool results
+                event_kinds::ASSISTANT_MESSAGE, // turn 1: assistant (text)
+                event_kinds::SESSION_FINISHED,  // outcome
+            ]
+        );
+        // Sequence numbers are monotonic from 1.
+        assert_eq!(
+            stored.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        // The first assistant event carries the tool call; the tool-results event carries the output.
+        assert_eq!(stored[0].data["tool_calls"][0]["name"], "get_weather");
+        assert!(stored[1].data["results"][0]["result"]
+            .as_str()
+            .unwrap()
+            .contains("sunny"));
+        // The outcome event snapshots the summed usage + step count.
+        assert_eq!(stored[3].data["outcome"], "completed");
+        assert_eq!(stored[3].data["steps"], 2);
+        assert_eq!(stored[3].data["usage"]["input"], 40);
+        assert_eq!(stored[3].data["usage"]["output"], 13);
+    }
+
+    #[tokio::test]
+    async fn continues_an_existing_event_log() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        // A pre-existing event (e.g. `session.created`) already occupies seq 1.
+        store
+            .append(
+                "ses_resume",
+                0,
+                vec![EventInput::new("session.created.1", json!({}))],
+            )
+            .await
+            .unwrap();
+
+        let engine = ScriptedEngine::new(vec![text_turn("Hi", FinishReason::Stop, usage(5, 2))]);
+        let session = Session::new("claude-haiku-4-5-20251001", 8);
+        let sink = EventStoreSink::new(store.clone(), "ses_resume")
+            .await
+            .unwrap();
+        run_with_sink(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &session,
+            vec![Message::user_text("hi")],
+        )
+        .await
+        .unwrap();
+
+        // The run's events were appended after the existing one — seqs continue, no conflict.
+        let stored = store.read("ses_resume", 0).await.unwrap();
+        let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "session.created.1",
+                event_kinds::ASSISTANT_MESSAGE,
+                event_kinds::SESSION_FINISHED,
+            ]
+        );
+        assert_eq!(
+            stored.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn sink_surfaces_a_concurrent_write_conflict() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let sink = EventStoreSink::new(store.clone(), "ses_conflict")
+            .await
+            .unwrap(); // seeds head = 0
+                       // A concurrent writer advances the aggregate after the sink seeded its head.
+        store
+            .append(
+                "ses_conflict",
+                0,
+                vec![EventInput::new("other.1", json!({}))],
+            )
+            .await
+            .unwrap();
+        // The sink still expects head 0, so its append conflicts.
+        let err = sink
+            .record(vec![EventInput::new(
+                event_kinds::ASSISTANT_MESSAGE,
+                json!({}),
+            )])
+            .await
+            .unwrap_err();
+        match err {
+            RunError::Attempt(message) => {
+                assert!(message.contains("conflict"), "got {message}")
+            }
+            other => panic!("expected a persist conflict, got {other:?}"),
+        }
     }
 }
