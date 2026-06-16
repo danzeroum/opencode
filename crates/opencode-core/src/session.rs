@@ -198,11 +198,17 @@ pub async fn run_gated(
         let (text, calls, finish) = fold_turn(&events, &mut usage);
         transcript.extend(events);
 
-        // The durable record of this turn (assistant message; tool results appended below).
-        let assistant = assistant_event(&text, &calls);
+        // Each step is a fresh assistant message: open it with the contract step + text boundaries.
+        let message_id = new_id("msg_");
+        let mut batch = vec![step_started_event(session, &message_id)];
+        if !text.is_empty() {
+            let text_id = new_id("txt_");
+            batch.push(text_started_event(&session.id, &message_id, &text_id));
+            batch.push(text_ended_event(&session.id, &message_id, &text_id, &text));
+        }
 
-        // Record the assistant turn (text first, then any tool calls), mirroring the message order the
-        // provider streamed.
+        // Record the assistant turn in the conversation (text first, then any tool calls), mirroring the
+        // message order the provider streamed.
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(ContentPart::Text(text.clone()));
@@ -219,17 +225,8 @@ pub async fn run_gated(
             content,
         });
 
-        // No tool calls ⇒ the model is done: emit the turn's contract lifecycle events (step + text
-        // boundaries), then return. Tool turns and the step-limit outcome still use the legacy events
-        // (converted with the public `/event` cutover, the next increment).
+        // No tool calls ⇒ the model is done: close the step and return.
         if calls.is_empty() {
-            let message_id = new_id("msg_");
-            let mut batch = vec![step_started_event(session, &message_id)];
-            if !text.is_empty() {
-                let text_id = new_id("txt_");
-                batch.push(text_started_event(&session.id, &message_id, &text_id));
-                batch.push(text_ended_event(&session.id, &message_id, &text_id, &text));
-            }
             batch.push(step_ended_event(&session.id, &message_id, finish, &usage));
             sink.record(batch).await?;
             return Ok(SessionRun {
@@ -240,13 +237,37 @@ pub async fn run_gated(
             });
         }
 
+        // The model issued tool calls: emit the input + called events (raw input echoed as `text`).
+        for call in &calls {
+            batch.push(tool_input_started_event(
+                &session.id,
+                &message_id,
+                &call.id,
+                &call.name,
+            ));
+            batch.push(tool_input_ended_event(
+                &session.id,
+                &message_id,
+                &call.id,
+                &call.input,
+            ));
+            batch.push(tool_called_event(
+                &session.id,
+                &message_id,
+                &call.id,
+                &call.name,
+                &call.input,
+            ));
+        }
+
         // Gate each tool call before running it (permission / question flow).
         let mut decisions = Vec::with_capacity(calls.len());
         for call in &calls {
             decisions.push(gate.check(&session.id, &call.name, &call.input).await);
         }
 
-        // `Ask` suspends the run: record the request and yield, awaiting a user decision.
+        // `Ask` suspends the run: record what we have plus a (legacy) `permission.requested` event and
+        // yield, awaiting a user decision. Contract permission events are a later increment.
         if decisions.contains(&Decision::Ask) {
             let requested: Vec<Value> = calls
                 .iter()
@@ -254,14 +275,11 @@ pub async fn run_gated(
                 .filter(|(_, d)| **d == Decision::Ask)
                 .map(|(c, _)| serde_json::json!({ "id": c.id, "name": c.name, "input": c.input }))
                 .collect();
-            sink.record(vec![
-                assistant,
-                EventInput::new(
-                    event_kinds::PERMISSION_REQUESTED,
-                    serde_json::json!({ "calls": requested }),
-                ),
-            ])
-            .await?;
+            batch.push(EventInput::new(
+                event_kinds::PERMISSION_REQUESTED,
+                serde_json::json!({ "calls": requested }),
+            ));
+            sink.record(batch).await?;
             return Ok(SessionRun {
                 outcome: SessionOutcome::AwaitingPermission { steps: step + 1 },
                 messages,
@@ -279,30 +297,29 @@ pub async fn run_gated(
             .collect();
         let outputs = run_tools(&tools, &allowed).await?;
 
-        // The turn's atomic batch: the assistant message, a `permission.denied` event per denied call,
-        // then the tool results (executed output for allowed calls, the denial reason for denied ones —
-        // fed back so the model sees what happened).
-        let mut batch = vec![assistant];
+        // Each call's result (executed output for allowed calls, the denial reason for denied ones — fed
+        // back so the model sees what happened) becomes a `tool.success` event. The success/failed
+        // distinction is a later increment (tool errors currently surface in the result text).
         let mut results = Vec::with_capacity(calls.len());
         for (call, decision) in calls.iter().zip(&decisions) {
             let result = match decision {
-                Decision::Deny(reason) => {
-                    batch.push(EventInput::new(
-                        event_kinds::PERMISSION_DENIED,
-                        serde_json::json!({ "id": call.id, "name": call.name, "reason": reason }),
-                    ));
-                    format!("Permission denied: {reason}")
-                }
+                Decision::Deny(reason) => format!("Permission denied: {reason}"),
                 // `Allow` (`Ask` is handled above).
                 _ => outputs.get(&call.id).cloned().unwrap_or_default(),
             };
+            batch.push(tool_success_event(
+                &session.id,
+                &message_id,
+                &call.id,
+                &result,
+            ));
             results.push(ContentPart::ToolResult {
                 id: call.id.clone(),
                 name: call.name.clone(),
                 result: Value::String(result),
             });
         }
-        batch.push(tool_results_event(&results));
+        batch.push(step_ended_event(&session.id, &message_id, finish, &usage));
         sink.record(batch).await?;
         messages.push(Message {
             role: Role::Tool,
@@ -310,12 +327,11 @@ pub async fn run_gated(
         });
     }
 
-    let outcome = SessionOutcome::StepLimitReached {
-        steps: session.step_limit,
-    };
-    sink.record(vec![finished_event(&outcome, &usage)]).await?;
+    // Step limit reached: the last step already emitted its `step.ended`; just return the outcome.
     Ok(SessionRun {
-        outcome,
+        outcome: SessionOutcome::StepLimitReached {
+            steps: session.step_limit,
+        },
         messages,
         transcript,
         usage,
@@ -425,50 +441,17 @@ pub mod event_kinds {
     pub const TEXT_STARTED: &str = "session.next.text.started";
     /// Assistant text block closes — `data`: the `EventSessionNextTextEnded` properties.
     pub const TEXT_ENDED: &str = "session.next.text.ended";
+    /// A tool call's raw-input stream opens — `data`: the `EventSessionNextToolInputStarted` properties.
+    pub const TOOL_INPUT_STARTED: &str = "session.next.tool.input.started";
+    /// A tool call's raw-input stream closes — `data`: the `EventSessionNextToolInputEnded` properties.
+    pub const TOOL_INPUT_ENDED: &str = "session.next.tool.input.ended";
+    /// A tool call is dispatched — `data`: the `EventSessionNextToolCalled` properties.
+    pub const TOOL_CALLED: &str = "session.next.tool.called";
+    /// A tool call settled successfully — `data`: the `EventSessionNextToolSuccess` properties.
+    pub const TOOL_SUCCESS: &str = "session.next.tool.success";
 }
 
-fn assistant_event(text: &str, calls: &[ToolCallRecord]) -> EventInput {
-    let tool_calls: Vec<Value> = calls
-        .iter()
-        .map(|c| serde_json::json!({ "id": c.id, "name": c.name, "input": c.input }))
-        .collect();
-    EventInput::new(
-        event_kinds::ASSISTANT_MESSAGE,
-        serde_json::json!({ "text": text, "tool_calls": tool_calls }),
-    )
-}
-
-fn tool_results_event(results: &[ContentPart]) -> EventInput {
-    let items: Vec<Value> = results
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::ToolResult { id, name, result } => {
-                Some(serde_json::json!({ "id": id, "name": name, "result": result }))
-            }
-            _ => None,
-        })
-        .collect();
-    EventInput::new(
-        event_kinds::TOOL_RESULTS,
-        serde_json::json!({ "results": items }),
-    )
-}
-
-fn finished_event(outcome: &SessionOutcome, usage: &Usage) -> EventInput {
-    let (label, steps) = match outcome {
-        SessionOutcome::Completed { steps } => ("completed", *steps),
-        SessionOutcome::StepLimitReached { steps } => ("step_limit", *steps),
-        // A suspended run records `permission.requested` instead of a finish; this arm only keeps the
-        // match exhaustive.
-        SessionOutcome::AwaitingPermission { steps } => ("awaiting_permission", *steps),
-    };
-    EventInput::new(
-        event_kinds::SESSION_FINISHED,
-        serde_json::json!({ "outcome": label, "steps": steps, "usage": usage }),
-    )
-}
-
-// ---- Contract lifecycle events (the `/event` vocabulary, emitted for a completed text turn) ----
+// ---- Contract lifecycle events (the `/event` vocabulary the runner emits per step) ----
 
 /// Current wall-clock time in milliseconds since the epoch (the contract's `timestamp`).
 fn now_ms() -> f64 {
@@ -564,6 +547,90 @@ fn step_ended_event(
                 "reasoning": 0,
                 "cache": { "read": usage.cache_read, "write": usage.cache_write },
             },
+        }),
+    )
+}
+
+/// `session.next.tool.input.started` — a tool call's raw-input stream opens.
+fn tool_input_started_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    name: &str,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::TOOL_INPUT_STARTED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "callID": call_id,
+            "name": name,
+        }),
+    )
+}
+
+/// `session.next.tool.input.ended` — the replayable raw-input boundary (`text` = the input JSON).
+fn tool_input_ended_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    input: &Value,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::TOOL_INPUT_ENDED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "callID": call_id,
+            "text": input.to_string(),
+        }),
+    )
+}
+
+/// `session.next.tool.called` — the tool is dispatched with its decoded input. `provider.executed` is
+/// false: the tool runs locally, not provider-side.
+fn tool_called_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    name: &str,
+    input: &Value,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::TOOL_CALLED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "callID": call_id,
+            "tool": name,
+            "input": input,
+            "provider": { "executed": false },
+        }),
+    )
+}
+
+/// `session.next.tool.success` — a tool call settled. The plain-text result becomes a single
+/// `ToolTextContent` (and is echoed in `result`); structured output is a later increment.
+fn tool_success_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    result: &str,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::TOOL_SUCCESS,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "callID": call_id,
+            "structured": {},
+            "content": [{ "type": "text", "text": result }],
+            "result": result,
+            "provider": { "executed": false },
         }),
     )
 }
@@ -853,6 +920,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_turn_emits_contract_lifecycle_events() {
+        let engine = ScriptedEngine::new(vec![
+            tool_turn(
+                "call_1",
+                "get_weather",
+                json!({ "city": "Paris" }),
+                usage(10, 5),
+            ),
+            text_turn("Sunny.", FinishReason::Stop, usage(20, 4)),
+        ]);
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.id = "ses_t".into();
+        session.tools = vec![ToolDefinition {
+            name: "get_weather".into(),
+            description: None,
+            input_schema: json!({ "type": "object" }),
+        }];
+        let sink = RecordingSink::default();
+        run_with_sink(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &session,
+            vec![Message::user_text("weather?")],
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events.lock().unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "session.next.step.started",
+                "session.next.tool.input.started",
+                "session.next.tool.input.ended",
+                "session.next.tool.called",
+                "session.next.tool.success",
+                "session.next.step.ended",
+                "session.next.step.started",
+                "session.next.text.started",
+                "session.next.text.ended",
+                "session.next.step.ended",
+            ]
+        );
+
+        // The tool step shares one assistantMessageID + callID; payloads are contract-faithful.
+        let msg0 = events[0].data["assistantMessageID"].as_str().unwrap();
+        let input_started = &events[1].data;
+        assert_eq!(input_started["assistantMessageID"], msg0);
+        assert_eq!(input_started["callID"], "call_1");
+        assert_eq!(input_started["name"], "get_weather");
+        assert_eq!(
+            events[2].data["text"].as_str().unwrap(),
+            r#"{"city":"Paris"}"#
+        );
+        let called = &events[3].data;
+        assert_eq!(called["tool"], "get_weather");
+        assert_eq!(called["input"]["city"], "Paris");
+        assert_eq!(called["provider"]["executed"], false);
+        let success = &events[4].data;
+        assert_eq!(success["callID"], "call_1");
+        assert_eq!(success["content"][0]["type"], "text");
+        assert!(success["result"].as_str().unwrap().contains("sunny"));
+        assert_eq!(events[5].data["finish"], "tool-calls");
+
+        // The next step is a distinct assistant message.
+        let msg1 = events[6].data["assistantMessageID"].as_str().unwrap();
+        assert_ne!(msg0, msg1);
+    }
+
+    #[tokio::test]
     async fn runs_a_tool_loop_to_completion() {
         // Turn 0 calls the tool; turn 1 answers in text.
         let engine = ScriptedEngine::new(vec![
@@ -1118,30 +1257,35 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                event_kinds::ASSISTANT_MESSAGE, // turn 0: assistant (tool call)
-                event_kinds::TOOL_RESULTS,      // turn 0: tool results
-                event_kinds::STEP_STARTED,      // turn 1 (text completion): step opens
-                event_kinds::TEXT_STARTED,      // turn 1: text block opens
-                event_kinds::TEXT_ENDED,        // turn 1: text block closes
-                event_kinds::STEP_ENDED,        // turn 1: step closes (outcome)
+                // turn 0: the tool step
+                event_kinds::STEP_STARTED,
+                event_kinds::TOOL_INPUT_STARTED,
+                event_kinds::TOOL_INPUT_ENDED,
+                event_kinds::TOOL_CALLED,
+                event_kinds::TOOL_SUCCESS,
+                event_kinds::STEP_ENDED,
+                // turn 1: the text-completion step
+                event_kinds::STEP_STARTED,
+                event_kinds::TEXT_STARTED,
+                event_kinds::TEXT_ENDED,
+                event_kinds::STEP_ENDED,
             ]
         );
         // Sequence numbers are monotonic from 1.
         assert_eq!(
             stored.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6]
+            (1i64..=10).collect::<Vec<_>>()
         );
-        // The first assistant event carries the tool call; the tool-results event carries the output.
-        assert_eq!(stored[0].data["tool_calls"][0]["name"], "get_weather");
-        assert!(stored[1].data["results"][0]["result"]
-            .as_str()
-            .unwrap()
-            .contains("sunny"));
-        // The completion turn: the text block carries the answer; step.ended snapshots summed usage.
-        assert_eq!(stored[4].data["text"], "It's sunny.");
-        assert_eq!(stored[5].data["finish"], "stop");
-        assert_eq!(stored[5].data["tokens"]["input"], 40);
-        assert_eq!(stored[5].data["tokens"]["output"], 13);
+        // Turn 0: the tool was dispatched with its input, and its output came back in tool.success.
+        assert_eq!(stored[3].data["tool"], "get_weather");
+        assert_eq!(stored[3].data["input"]["city"], "Paris");
+        assert_eq!(stored[5].data["finish"], "tool-calls");
+        assert!(stored[4].data["result"].as_str().unwrap().contains("sunny"));
+        // Turn 1: the text block carries the answer; step.ended snapshots summed usage + finish reason.
+        assert_eq!(stored[8].data["text"], "It's sunny.");
+        assert_eq!(stored[9].data["finish"], "stop");
+        assert_eq!(stored[9].data["tokens"]["input"], 40);
+        assert_eq!(stored[9].data["tokens"]["output"], 13);
     }
 
     #[tokio::test]
@@ -1414,14 +1558,10 @@ mod tests {
             }
             other => panic!("expected tool result, got {other:?}"),
         }
-        // The denial is audited in the event log.
+        // The denial surfaces to the model as the tool's result (a `tool.success` event).
         let stored = store.read("ses_gate", 0).await.unwrap();
-        assert!(
-            stored
-                .iter()
-                .any(|e| e.kind == event_kinds::PERMISSION_DENIED
-                    && e.data["reason"] == "not allowed")
-        );
+        assert!(stored.iter().any(|e| e.kind == event_kinds::TOOL_SUCCESS
+            && e.data["result"] == "Permission denied: not allowed"));
     }
 
     #[tokio::test]
@@ -1460,11 +1600,14 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                event_kinds::ASSISTANT_MESSAGE,
-                event_kinds::PERMISSION_REQUESTED
+                event_kinds::STEP_STARTED,
+                event_kinds::TOOL_INPUT_STARTED,
+                event_kinds::TOOL_INPUT_ENDED,
+                event_kinds::TOOL_CALLED,
+                event_kinds::PERMISSION_REQUESTED,
             ]
         );
-        assert_eq!(stored[1].data["calls"][0]["name"], "get_weather");
+        assert_eq!(stored[4].data["calls"][0]["name"], "get_weather");
         // Only turn 0 was consumed, so usage reflects just that turn.
         assert_eq!(run.usage, usage(10, 5));
     }
