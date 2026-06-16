@@ -2107,21 +2107,25 @@ mod tests {
 
         let stored = state.ctx.event_store().read("ses_tool", 0).await.unwrap();
         let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
-        // Turn 0 (tool call) still uses the legacy events; the text-completion turn uses the contract
-        // lifecycle events (tool turns convert with the public `/event` cutover).
         assert_eq!(
             kinds,
             vec![
-                "message.assistant.1",
-                "message.tool_results.1",
+                // turn 0: the tool step
+                "session.next.step.started",
+                "session.next.tool.input.started",
+                "session.next.tool.input.ended",
+                "session.next.tool.called",
+                "session.next.tool.success",
+                "session.next.step.ended",
+                // turn 1: the text-completion step
                 "session.next.step.started",
                 "session.next.text.started",
                 "session.next.text.ended",
                 "session.next.step.ended",
             ]
         );
-        // The bash tool actually ran in the toolbox root; its stdout is in the tool-results event.
-        let result = stored[1].data["results"][0]["result"].as_str().unwrap();
+        // The bash tool actually ran in the toolbox root; its stdout is in the tool.success result.
+        let result = stored[4].data["result"].as_str().unwrap();
         assert!(result.contains("marker-xyz"));
     }
 
