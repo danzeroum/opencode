@@ -504,6 +504,34 @@ async fn rust_session_abort(
     Json(serde_json::json!({ "session": session_id, "cancelled": cancelled }))
 }
 
+/// `POST /session/{sessionID}/abort` — request cancellation of a session (group `instance`; the first
+/// V1 instance-route cutover). Matches the golden `session.abort`: 200 `true`, 400 union. Sets the
+/// cooperative cancel token (the runner stops at the next step boundary, recording the interrupt) and
+/// acks with `true` — cancellation is best-effort and idempotent (a no-op for an idle session).
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/abort",
+    operation_id = "session.abort",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Directory context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Aborted session", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "session"
+)]
+async fn session_abort(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Json<bool> {
+    let cancelled = state.coordinator.cancel(&session_id);
+    tracing::info!(session = %session_id, cancelled, "session abort (contract)");
+    Json(true)
+}
+
 /// `GET /health` — first contract route cut over natively (gated by the route table).
 #[utoipa::path(
     get,
@@ -1457,7 +1485,8 @@ async fn project_current(
         v2_session_prompt,
         project_list,
         project_current,
-        v2_event_subscribe
+        v2_event_subscribe,
+        session_abort
     ),
     components(schemas(
         opencode_proto::Health,
@@ -1563,6 +1592,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("instance") {
         router = router.route("/path", get(path_get));
+        router = router.route("/session/{sessionID}/abort", post(session_abort));
     }
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
@@ -2846,6 +2876,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 502);
+    }
+
+    #[tokio::test]
+    async fn session_abort_contract_route_acks_and_is_gated() {
+        use tower::ServiceExt;
+        let req = || {
+            axum::extract::Request::builder()
+                .method("POST")
+                .uri("/session/ses_x/abort")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        // Group `instance` enabled → 200 `true` (the contract's boolean ack).
+        let on = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("instance"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(on).oneshot(req()).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!(true));
+        // Group disabled → proxied → 502.
+        let off = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(off).oneshot(req()).await.unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[test]
+    fn openapi_has_session_abort_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/session/{sessionID}/abort"]["post"];
+        assert_eq!(op["operationId"], "session.abort");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+            "boolean"
+        );
+        assert!(op["responses"]["400"].is_object());
     }
 
     #[tokio::test]

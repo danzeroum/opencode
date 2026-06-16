@@ -22,6 +22,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/api/session/{sessionID}",
     "/api/session/{sessionID}/prompt",
     "/api/event",
+    "/session/{sessionID}/abort",
     "/project",
     "/project/current",
 ];
