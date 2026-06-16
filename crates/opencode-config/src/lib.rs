@@ -5,6 +5,8 @@
 //! commas behave identically. [`Config`] currently models the confirmed top-level fields; any other
 //! keys round-trip through [`Config::extra`] so nothing is lost while the schema port continues.
 
+pub mod catalog;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
