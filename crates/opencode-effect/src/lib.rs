@@ -7,12 +7,14 @@
 //! - `Effect.withSpan` / `Effect.fn("Name")` → `#[tracing::instrument]` (see [`init_tracing`]).
 
 pub mod bus;
+pub mod metrics;
 
 use std::sync::Arc;
 
 use opencode_db::{EventStore, ProjectStore, SessionStore};
 
 pub use bus::{BusEvent, EventBus};
+pub use metrics::{AppMetrics, MetricsSnapshot};
 
 /// Binary-edge error taxonomy. Libraries return their own `thiserror` enums; these are mapped to
 /// HTTP responses (and to the `opencode_proto::ErrorEnvelope` `_tag` shape) at the server edge.
@@ -70,6 +72,8 @@ pub struct AppServices {
     pub projects: Arc<dyn ProjectStore>,
     /// In-process event bus (global stream + per-aggregate watch).
     pub event_bus: Arc<EventBus>,
+    /// In-process runner metrics (counters + turn-latency percentiles).
+    pub metrics: Arc<AppMetrics>,
 }
 
 impl Default for AppServices {
@@ -79,6 +83,7 @@ impl Default for AppServices {
             sessions: Arc::new(opencode_db::MemorySessionStore::new()),
             projects: Arc::new(opencode_db::MemoryProjectStore::new()),
             event_bus: Arc::new(EventBus::new()),
+            metrics: Arc::new(AppMetrics::default()),
         }
     }
 }
@@ -120,6 +125,11 @@ impl AppContext {
     /// The in-process event bus.
     pub fn event_bus(&self) -> &Arc<EventBus> {
         &self.inner.event_bus
+    }
+
+    /// The in-process runner metrics.
+    pub fn metrics(&self) -> &Arc<AppMetrics> {
+        &self.inner.metrics
     }
 }
 

@@ -15,6 +15,7 @@
 //! route, but the contract `/event` stays proxied to TS until the runner is in Rust.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,8 @@ pub struct EventBus {
     // `publish` never fails with "closed".
     _keepalive: async_broadcast::InactiveReceiver<BusEvent>,
     aggregates: Mutex<HashMap<String, watch::Sender<u64>>>,
+    /// Total events published over the bus's lifetime (observability).
+    published: AtomicU64,
 }
 
 impl Default for EventBus {
@@ -94,6 +97,7 @@ impl EventBus {
             global: tx,
             _keepalive: rx.deactivate(),
             aggregates: Mutex::new(HashMap::new()),
+            published: AtomicU64::new(0),
         }
     }
 
@@ -105,11 +109,17 @@ impl EventBus {
 
     /// Publish an event to the global stream (and bump its aggregate's watch, if scoped).
     pub fn publish(&self, event: BusEvent) {
+        self.published.fetch_add(1, Ordering::Relaxed);
         if let Some(aggregate_id) = event.aggregate_id.clone() {
             self.notify_aggregate(&aggregate_id);
         }
         // overflow=true → never blocks or errors on a full buffer; the keepalive prevents "closed".
         let _ = self.global.try_broadcast(event);
+    }
+
+    /// Total events published to the bus over its lifetime (observability / metrics).
+    pub fn published_count(&self) -> u64 {
+        self.published.load(Ordering::Relaxed)
     }
 
     /// A sliding-1 notification handle for `aggregate_id`: the receiver observes a monotonically
