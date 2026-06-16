@@ -47,8 +47,42 @@ pub trait ToolBox: Send + Sync {
     async fn invoke(&self, name: &str, input: Value) -> Result<String, String>;
 }
 
+/// A permission decision for a tool call — the `permission`/`question` gate's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Run the tool.
+    Allow,
+    /// Refuse to run it; `reason` is fed back to the model as the tool's (error) result.
+    Deny(String),
+    /// Suspend the run pending a user decision — records a `permission.requested` event and returns
+    /// [`SessionOutcome::AwaitingPermission`](crate::runner::SessionOutcome::AwaitingPermission).
+    Ask,
+}
+
+/// Decides whether a tool call may run, consulted by the runner **before** it executes the call — the
+/// seam for the `permission`/`question` flow. The default ([`AllowAll`]) permits everything; a real impl
+/// consults the permissions store (a later increment).
+#[async_trait]
+pub trait PermissionGate: Send + Sync {
+    /// Decide whether `tool` (with `input`) may run in `session_id`.
+    async fn check(&self, session_id: &str, tool: &str, input: &Value) -> Decision;
+}
+
+/// A gate that permits every tool call — preserves pre-gate behavior; the default for [`run`] /
+/// [`run_with_sink`].
+pub struct AllowAll;
+
+#[async_trait]
+impl PermissionGate for AllowAll {
+    async fn check(&self, _session_id: &str, _tool: &str, _input: &Value) -> Decision {
+        Decision::Allow
+    }
+}
+
 /// The static inputs of a session run plus its limits — the conversation itself is passed to [`run`].
 pub struct Session {
+    /// Session id — the event-store aggregate and the subject of permission checks.
+    pub id: String,
     /// Model id sent on every turn.
     pub model: String,
     /// System prompt parts.
@@ -62,9 +96,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session for `model` with a step limit and otherwise empty inputs.
+    /// A session for `model` with a step limit and otherwise empty inputs (empty id).
     pub fn new(model: impl Into<String>, step_limit: usize) -> Self {
         Self {
+            id: String::new(),
             model: model.into(),
             system: Vec::new(),
             tools: Vec::new(),
@@ -110,11 +145,29 @@ pub async fn run(
 
 /// Like [`run`], but streams each turn's events — and the final outcome — to `sink` as durable batches,
 /// one [`SessionSink::record`] call per atomic turn. Persistence is a sink ([`EventStoreSink`]); the
-/// event bus will be another. The returned [`SessionRun`] is unchanged; the sink is a side channel.
+/// event bus is another. The returned [`SessionRun`] is unchanged; the sink is a side channel.
+/// Equivalent to [`run_gated`] with an [`AllowAll`] gate.
 pub async fn run_with_sink(
     engine: &dyn LlmEngine,
     tools: Arc<dyn ToolBox>,
     sink: &dyn SessionSink,
+    session: &Session,
+    seed: Vec<Message>,
+) -> Result<SessionRun, RunError> {
+    run_gated(engine, tools, sink, &AllowAll, session, seed).await
+}
+
+/// Like [`run_with_sink`], but consults `gate` before executing each tool call (the
+/// `permission`/`question` flow). [`Decision::Allow`] runs the tool; [`Decision::Deny`] skips it and
+/// feeds the reason back to the model as an error result (recording a `permission.denied` event);
+/// [`Decision::Ask`] suspends the run, recording a `permission.requested` event and returning
+/// [`SessionOutcome::AwaitingPermission`](crate::runner::SessionOutcome::AwaitingPermission) (the resume
+/// path is a later increment). Every decision is audited through `sink`.
+pub async fn run_gated(
+    engine: &dyn LlmEngine,
+    tools: Arc<dyn ToolBox>,
+    sink: &dyn SessionSink,
+    gate: &dyn PermissionGate,
     session: &Session,
     seed: Vec<Message>,
 ) -> Result<SessionRun, RunError> {
@@ -175,11 +228,70 @@ pub async fn run_with_sink(
             });
         }
 
-        // Run the tool calls, persist the turn (assistant + tool results) as one atomic batch, and feed
-        // the results back as a `tool` message before the next turn.
-        let results = execute_tools(&tools, &calls).await?;
-        let tool_results = tool_results_event(&results);
-        sink.record(vec![assistant, tool_results]).await?;
+        // Gate each tool call before running it (permission / question flow).
+        let mut decisions = Vec::with_capacity(calls.len());
+        for call in &calls {
+            decisions.push(gate.check(&session.id, &call.name, &call.input).await);
+        }
+
+        // `Ask` suspends the run: record the request and yield, awaiting a user decision.
+        if decisions.contains(&Decision::Ask) {
+            let requested: Vec<Value> = calls
+                .iter()
+                .zip(&decisions)
+                .filter(|(_, d)| **d == Decision::Ask)
+                .map(|(c, _)| serde_json::json!({ "id": c.id, "name": c.name, "input": c.input }))
+                .collect();
+            sink.record(vec![
+                assistant,
+                EventInput::new(
+                    event_kinds::PERMISSION_REQUESTED,
+                    serde_json::json!({ "calls": requested }),
+                ),
+            ])
+            .await?;
+            return Ok(SessionRun {
+                outcome: SessionOutcome::AwaitingPermission { steps: step + 1 },
+                messages,
+                transcript,
+                usage,
+            });
+        }
+
+        // Execute the allowed calls (denied ones are not run).
+        let allowed: Vec<&ToolCallRecord> = calls
+            .iter()
+            .zip(&decisions)
+            .filter(|(_, d)| **d == Decision::Allow)
+            .map(|(call, _)| call)
+            .collect();
+        let outputs = run_tools(&tools, &allowed).await?;
+
+        // The turn's atomic batch: the assistant message, a `permission.denied` event per denied call,
+        // then the tool results (executed output for allowed calls, the denial reason for denied ones —
+        // fed back so the model sees what happened).
+        let mut batch = vec![assistant];
+        let mut results = Vec::with_capacity(calls.len());
+        for (call, decision) in calls.iter().zip(&decisions) {
+            let result = match decision {
+                Decision::Deny(reason) => {
+                    batch.push(EventInput::new(
+                        event_kinds::PERMISSION_DENIED,
+                        serde_json::json!({ "id": call.id, "name": call.name, "reason": reason }),
+                    ));
+                    format!("Permission denied: {reason}")
+                }
+                // `Allow` (`Ask` is handled above).
+                _ => outputs.get(&call.id).cloned().unwrap_or_default(),
+            };
+            results.push(ContentPart::ToolResult {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                result: Value::String(result),
+            });
+        }
+        batch.push(tool_results_event(&results));
+        sink.record(batch).await?;
         messages.push(Message {
             role: Role::Tool,
             content: results,
@@ -225,13 +337,13 @@ fn fold_turn(events: &[LlmEvent], usage: &mut Usage) -> (String, Vec<ToolCallRec
     (text, calls)
 }
 
-/// Run all of a turn's tool calls concurrently on the [`ToolExecutor`], returning their results as
-/// `tool_result` content in the original call order. A panicking tool task aborts the run; a tool that
-/// returns an error is fed back to the model as an error result.
-async fn execute_tools(
+/// Run `calls` concurrently on the [`ToolExecutor`], returning each call's output keyed by tool-call id.
+/// A panicking tool task aborts the run; a tool that returns an error yields its message as the output
+/// (fed back to the model, not fatal).
+async fn run_tools(
     tools: &Arc<dyn ToolBox>,
-    calls: &[ToolCallRecord],
-) -> Result<Vec<ContentPart>, RunError> {
+    calls: &[&ToolCallRecord],
+) -> Result<HashMap<String, String>, RunError> {
     let mut exec = ToolExecutor::new();
     for call in calls {
         let tools = tools.clone();
@@ -264,15 +376,7 @@ async fn execute_tools(
             )));
         }
     }
-
-    Ok(calls
-        .iter()
-        .map(|call| ContentPart::ToolResult {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            result: Value::String(outputs.remove(&call.id).unwrap_or_default()),
-        })
-        .collect())
+    Ok(outputs)
 }
 
 // ---- Durable persistence (the runner as an event producer) ----
@@ -283,6 +387,10 @@ pub mod event_kinds {
     pub const ASSISTANT_MESSAGE: &str = "message.assistant.1";
     /// A turn's tool results — `data`: `{ "results": [{id,name,result}] }`.
     pub const TOOL_RESULTS: &str = "message.tool_results.1";
+    /// A tool call the gate refused — `data`: `{ "id", "name", "reason" }`.
+    pub const PERMISSION_DENIED: &str = "permission.denied.1";
+    /// Tool calls awaiting a user decision — `data`: `{ "calls": [{id,name,input}] }`.
+    pub const PERMISSION_REQUESTED: &str = "permission.requested.1";
     /// The run outcome — `data`: `{ "outcome": "completed"|"step_limit", "steps": n, "usage": {…} }`.
     pub const SESSION_FINISHED: &str = "session.finished.1";
 }
@@ -318,6 +426,9 @@ fn finished_event(outcome: &SessionOutcome, usage: &Usage) -> EventInput {
     let (label, steps) = match outcome {
         SessionOutcome::Completed { steps } => ("completed", *steps),
         SessionOutcome::StepLimitReached { steps } => ("step_limit", *steps),
+        // A suspended run records `permission.requested` instead of a finish; this arm only keeps the
+        // match exhaustive.
+        SessionOutcome::AwaitingPermission { steps } => ("awaiting_permission", *steps),
     };
     EventInput::new(
         event_kinds::SESSION_FINISHED,
@@ -1006,5 +1117,146 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(store.read("ses_soft", 0).await.unwrap().len(), 1);
+    }
+
+    // ---- Permission / question gating ----
+
+    struct FixedGate(Decision);
+
+    #[async_trait]
+    impl PermissionGate for FixedGate {
+        async fn check(&self, _session_id: &str, _tool: &str, _input: &Value) -> Decision {
+            self.0.clone()
+        }
+    }
+
+    fn weather_session() -> Session {
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.id = "ses_gate".into();
+        session.tools = vec![ToolDefinition {
+            name: "get_weather".into(),
+            description: None,
+            input_schema: json!({ "type": "object" }),
+        }];
+        session
+    }
+
+    #[tokio::test]
+    async fn allow_runs_the_tool() {
+        let engine = ScriptedEngine::new(vec![
+            tool_turn(
+                "call_1",
+                "get_weather",
+                json!({ "city": "Paris" }),
+                usage(10, 5),
+            ),
+            text_turn("It's sunny.", FinishReason::Stop, usage(20, 4)),
+        ]);
+        let run = run_gated(
+            &engine,
+            Arc::new(WeatherTools),
+            &NoopSink,
+            &FixedGate(Decision::Allow),
+            &weather_session(),
+            vec![Message::user_text("weather?")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.outcome, SessionOutcome::Completed { steps: 2 });
+        // The tool ran: its executed output is fed back (not a denial).
+        match &run.messages[2].content[0] {
+            ContentPart::ToolResult { result, .. } => {
+                assert!(result.as_str().unwrap().contains("sunny"))
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_skips_the_tool_and_audits() {
+        let engine = ScriptedEngine::new(vec![
+            tool_turn(
+                "call_1",
+                "get_weather",
+                json!({ "city": "Paris" }),
+                usage(10, 5),
+            ),
+            text_turn("Understood.", FinishReason::Stop, usage(20, 4)),
+        ]);
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let sink = EventStoreSink::new(store.clone(), "ses_gate")
+            .await
+            .unwrap();
+        let run = run_gated(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &FixedGate(Decision::Deny("not allowed".into())),
+            &weather_session(),
+            vec![Message::user_text("weather?")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.outcome, SessionOutcome::Completed { steps: 2 });
+        // The model sees the denial instead of an executed result.
+        match &run.messages[2].content[0] {
+            ContentPart::ToolResult { result, .. } => {
+                assert_eq!(result.as_str().unwrap(), "Permission denied: not allowed")
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+        // The denial is audited in the event log.
+        let stored = store.read("ses_gate", 0).await.unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|e| e.kind == event_kinds::PERMISSION_DENIED
+                    && e.data["reason"] == "not allowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_suspends_and_records_request() {
+        // Turn 1 must NOT be consumed — the run suspends after turn 0's tool call.
+        let engine = ScriptedEngine::new(vec![
+            tool_turn(
+                "call_1",
+                "get_weather",
+                json!({ "city": "Paris" }),
+                usage(10, 5),
+            ),
+            text_turn("should not run", FinishReason::Stop, usage(99, 99)),
+        ]);
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let sink = EventStoreSink::new(store.clone(), "ses_gate")
+            .await
+            .unwrap();
+        let run = run_gated(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &FixedGate(Decision::Ask),
+            &weather_session(),
+            vec![Message::user_text("weather?")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.outcome, SessionOutcome::AwaitingPermission { steps: 1 });
+        // No tool message was produced (the tool did not run); the conversation ends at the assistant
+        // turn that requested the call.
+        assert_eq!(run.messages.last().unwrap().role, Role::Assistant);
+        // The pending request is recorded; no `session.finished` (the run is suspended, not finished).
+        let stored = store.read("ses_gate", 0).await.unwrap();
+        let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                event_kinds::ASSISTANT_MESSAGE,
+                event_kinds::PERMISSION_REQUESTED
+            ]
+        );
+        assert_eq!(stored[1].data["calls"][0]["name"], "get_weather");
+        // Only turn 0 was consumed, so usage reflects just that turn.
+        assert_eq!(run.usage, usage(10, 5));
     }
 }

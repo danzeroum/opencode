@@ -130,6 +130,14 @@ pub enum SessionOutcome {
         /// The step limit that was reached.
         steps: usize,
     },
+    /// The run suspended after `steps` turns awaiting a permission decision on a tool call (the `Ask`
+    /// gate decision). The pending request is recorded as an event; a future resume re-enters with the
+    /// user's decision. (The pure [`run_session`] driver never yields this; the async session runner
+    /// does.)
+    AwaitingPermission {
+        /// Number of turns executed before suspending.
+        steps: usize,
+    },
 }
 
 /// The outer, step-limited continuation loop: run turns while each returns [`TurnOutcome::Continue`],
