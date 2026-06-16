@@ -1221,8 +1221,11 @@ dependencies = [
  "opencode-events",
  "opencode-llm",
  "opencode-proto",
+ "opencode-tools",
  "reqwest",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]
