@@ -11,7 +11,7 @@ use std::sync::Arc;
 use clap::Parser;
 use opencode_db::Database;
 use opencode_effect::{init_tracing, AppContext, AppServices};
-use opencode_server::{proxy::Upstream, RouteTable, ServerState};
+use opencode_server::{proxy::Upstream, RouteTable, RunnerServices, ServerState};
 
 #[derive(Parser, Debug)]
 #[command(name = "opencode", version, about = "opencode backend (Rust)")]
@@ -119,10 +119,13 @@ async fn main() -> anyhow::Result<()> {
     let db_path = resolve_db_path(cli.db.as_deref(), &data_dir());
     let ctx = build_app_context(&db_path).await?;
 
+    // The native tools resolve relative paths against the server's working directory.
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let state = ServerState {
         ctx,
         routes: RouteTable::from_env(),
         proxy: Arc::new(Upstream::new(cli.upstream.clone())),
+        runner: RunnerServices::from_env(root)?,
     };
     tracing::info!(
         bind = %cli.bind,

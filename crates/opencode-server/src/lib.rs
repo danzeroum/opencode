@@ -17,7 +17,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use opencode_core::native_tools::{self, NativeToolBox};
+use opencode_core::provider::{
+    split_model, DefaultRegistry, EngineError, EngineSettings, EnvCredentials, ProviderRegistry,
+};
+use opencode_core::runner::SessionOutcome;
+use opencode_core::session::{
+    run_gated, AllowAll, BusSink, EventStoreSink, FanOutSink, LlmEngine, PermissionGate, Session,
+    ToolBox,
+};
 use opencode_effect::AppContext;
+use opencode_llm::{ContentPart, Generation, Message, Role};
 use opencode_proto::Health;
 
 /// Server version, taken from this crate's Cargo version.
@@ -66,12 +76,77 @@ impl RouteTable {
 /// Shared axum state.
 #[derive(Clone)]
 pub struct ServerState {
-    /// Application/DI context (services land here in later phases).
+    /// Application/DI context (event store, projections, bus).
     pub ctx: AppContext,
     /// Native-vs-proxy routing decisions.
     pub routes: RouteTable,
     /// Upstream TypeScript server used for proxied routes.
     pub proxy: Arc<proxy::Upstream>,
+    /// Session-runner collaborators (engine factory, permission gate, tools root).
+    pub runner: RunnerServices,
+}
+
+/// Builds the per-request [`LlmEngine`] from a `provider/model` id — the execute route's injection
+/// seam. Production resolves environment credentials through the provider registry; tests return a
+/// fixed engine pointed at a local server.
+pub(crate) trait EngineFactory: Send + Sync {
+    fn build(&self, model: &str) -> Result<Arc<dyn LlmEngine>, EngineError>;
+}
+
+/// Production [`EngineFactory`]: resolve settings from environment credentials, then build via the
+/// provider registry.
+pub(crate) struct EnvEngineFactory {
+    registry: Arc<dyn ProviderRegistry>,
+    endpoint: Option<String>,
+}
+
+impl EngineFactory for EnvEngineFactory {
+    fn build(&self, model: &str) -> Result<Arc<dyn LlmEngine>, EngineError> {
+        let settings = EngineSettings::resolve(model, self.endpoint.clone(), &EnvCredentials)?;
+        self.registry.engine(&settings)
+    }
+}
+
+/// The session runner's collaborators, constructed at the composition root and threaded through
+/// [`ServerState`]. These live here (not in `opencode-effect`'s `AppServices`) because the runner's
+/// traits are defined in `opencode-core`, which already depends on `opencode-effect` — housing them in
+/// `AppServices` would form a dependency cycle.
+#[derive(Clone)]
+pub struct RunnerServices {
+    /// Builds the per-turn engine from the request's `provider/model`.
+    pub(crate) engines: Arc<dyn EngineFactory>,
+    /// Permission gate consulted before each tool call.
+    pub(crate) gate: Arc<dyn PermissionGate>,
+    /// Working directory the native tools resolve relative paths against.
+    pub(crate) root: std::path::PathBuf,
+}
+
+impl RunnerServices {
+    /// Production wiring: a real HTTPS provider registry with environment credentials, an allow-all
+    /// gate (a DB-backed gate is a later increment), and `root` as the native tools' working directory.
+    pub fn from_env(root: impl Into<std::path::PathBuf>) -> Result<Self, EngineError> {
+        Ok(Self {
+            engines: Arc::new(EnvEngineFactory {
+                registry: Arc::new(DefaultRegistry::new()?),
+                endpoint: None,
+            }),
+            gate: Arc::new(AllowAll),
+            root: root.into(),
+        })
+    }
+}
+
+impl Default for RunnerServices {
+    fn default() -> Self {
+        Self {
+            engines: Arc::new(EnvEngineFactory {
+                registry: Arc::new(DefaultRegistry::with_client(reqwest::Client::new())),
+                endpoint: None,
+            }),
+            gate: Arc::new(AllowAll),
+            root: std::path::PathBuf::from("."),
+        }
+    }
 }
 
 /// Always-native internal liveness/readiness route (not part of the public OpenAPI contract).
@@ -100,6 +175,103 @@ async fn rust_event(
             .data(data))
     });
     axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+/// Request body for the internal session-execute proving route.
+#[derive(serde::Deserialize)]
+struct ExecutePayload {
+    /// `provider/model` id (e.g. `anthropic/claude-...`).
+    model: String,
+    /// The user's prompt for this single turn.
+    prompt: String,
+    /// Optional system-prompt parts.
+    #[serde(default)]
+    system: Vec<String>,
+    /// Max turns before stopping (the continuation step limit).
+    #[serde(default = "default_step_limit")]
+    step_limit: usize,
+}
+
+fn default_step_limit() -> usize {
+    16
+}
+
+/// `POST /_rust/session/{sessionID}/execute` — internal, gated (`session-exec`) proving route for the
+/// Phase-4 runner. Builds the `AppContext`-wired runner (engine from the provider registry, native
+/// tools, permission gate) and drives **one** user turn to completion, persisting each turn's events to
+/// the store and announcing them on the bus (observable live on `/_rust/event`). This is **not** the
+/// contract `/api/session/{id}/prompt` cutover (which durably admits the input + schedules a background
+/// agent loop); it proves the runner end-to-end inside the server.
+async fn rust_session_execute(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(payload): Json<ExecutePayload>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+
+    // The engine is built from the full `provider/model`; the turn request carries the bare model id.
+    let (_, model_id) =
+        split_model(&payload.model).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let model_id = model_id.to_string();
+
+    let engine = state
+        .runner
+        .engines
+        .build(&payload.model)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let tools: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(state.runner.root.clone()));
+
+    let session = Session {
+        id: session_id.clone(),
+        model: model_id,
+        system: payload.system,
+        tools: native_tools::tool_definitions(),
+        generation: Generation::default(),
+        step_limit: payload.step_limit,
+    };
+
+    // Persist (authoritative) then announce (best-effort) — the runner's fan-out sink.
+    let primary = EventStoreSink::new(state.ctx.event_store().clone(), session_id.as_str())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let secondary = BusSink::new(state.ctx.event_bus().clone(), session_id.as_str());
+    let sink = FanOutSink::new(primary, secondary);
+
+    let run = run_gated(
+        engine.as_ref(),
+        tools,
+        &sink,
+        state.runner.gate.as_ref(),
+        &session,
+        vec![Message::user_text(payload.prompt)],
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let (outcome, steps) = match &run.outcome {
+        SessionOutcome::Completed { steps } => ("completed", *steps),
+        SessionOutcome::StepLimitReached { steps } => ("step_limit_reached", *steps),
+        SessionOutcome::AwaitingPermission { steps } => ("awaiting_permission", *steps),
+    };
+    let text = run
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant)
+        .and_then(|m| {
+            m.content.iter().find_map(|part| match part {
+                ContentPart::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+        });
+
+    Ok(Json(serde_json::json!({
+        "session": session_id,
+        "outcome": outcome,
+        "steps": steps,
+        "text": text,
+        "usage": { "input": run.usage.input, "output": run.usage.output },
+    })))
 }
 
 /// `GET /health` — first contract route cut over natively (gated by the route table).
@@ -884,6 +1056,13 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/project", get(project_list));
         router = router.route("/project/current", get(project_current));
     }
+    // Internal Phase-4 proving route (not a contract path): build the runner and drive one turn.
+    if state.routes.handles("session-exec") {
+        router = router.route(
+            "/_rust/session/{sessionID}/execute",
+            post(rust_session_execute),
+        );
+    }
 
     router.fallback(proxy::proxy_handler).with_state(state)
 }
@@ -1062,6 +1241,7 @@ mod tests {
             // Only the `global` group is cut over natively here.
             routes: RouteTable::parse("global"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let app = build_router(state);
 
@@ -1148,6 +1328,7 @@ mod tests {
             }),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1179,6 +1360,7 @@ mod tests {
             ctx: AppContext::in_memory(), // empty session store
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1205,6 +1387,7 @@ mod tests {
             ctx: AppContext::in_memory(),
             routes: RouteTable::parse(""), // `session` not enabled → proxy fallback
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1250,6 +1433,7 @@ mod tests {
             }),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1280,6 +1464,7 @@ mod tests {
             ctx: AppContext::in_memory(),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1314,6 +1499,7 @@ mod tests {
             }),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let app = build_router(state);
 
@@ -1357,6 +1543,7 @@ mod tests {
             ctx: AppContext::in_memory(),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         // Valid base64url ("aGVsbG8" = "hello") but not a JSON cursor payload.
         let resp = build_router(state)
@@ -1421,6 +1608,7 @@ mod tests {
             }),
             routes: RouteTable::parse("project"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1457,6 +1645,7 @@ mod tests {
             ctx: AppContext::in_memory(),
             routes: RouteTable::parse(""),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1506,6 +1695,7 @@ mod tests {
             }),
             routes: RouteTable::parse("project"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1532,6 +1722,7 @@ mod tests {
             ctx: AppContext::in_memory(), // empty project store
             routes: RouteTable::parse("project"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1557,6 +1748,7 @@ mod tests {
             ctx: AppContext::in_memory(),
             routes: RouteTable::parse(""), // `project` not enabled → proxy fallback
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1565,6 +1757,168 @@ mod tests {
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ---- Phase 4: the internal session-execute proving route (engine factory injected) ----
+
+    /// An [`EngineFactory`] returning an `anthropic-messages` engine pointed at a local test server, so
+    /// the runner drives a real transport round-trip with no network/TLS/credentials.
+    struct TestEngines {
+        url: String,
+    }
+
+    impl EngineFactory for TestEngines {
+        fn build(&self, _model: &str) -> Result<Arc<dyn LlmEngine>, EngineError> {
+            Ok(Arc::new(opencode_core::provider::AnthropicEngine::new(
+                reqwest::Client::new(),
+                self.url.clone(),
+                "test".to_string(),
+            )))
+        }
+    }
+
+    const EXEC_TEXT_SSE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":20,\"output_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"It is sunny in Paris.\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":20,\"output_tokens\":7}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    const EXEC_TOOL_SSE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"echo marker-xyz\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    /// Spawn a local anthropic-style SSE server returning `bodies` in order (last repeats).
+    async fn spawn_anthropic(bodies: &'static [&'static str]) -> String {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let calls = calls.clone();
+                async move {
+                    let i = calls.fetch_add(1, Ordering::SeqCst).min(bodies.len() - 1);
+                    ([("content-type", "text/event-stream")], bodies[i])
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1/messages")
+    }
+
+    fn exec_state(url: String, root: std::path::PathBuf) -> ServerState {
+        ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session-exec"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices {
+                engines: Arc::new(TestEngines { url }),
+                gate: Arc::new(AllowAll),
+                root,
+            },
+        }
+    }
+
+    fn exec_request(session: &str, model: &str, prompt: &str) -> axum::extract::Request {
+        axum::extract::Request::builder()
+            .method("POST")
+            .uri(format!("/_rust/session/{session}/execute"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "model": model, "prompt": prompt }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn execute_runs_a_turn_and_persists_and_publishes() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = exec_state(url, dir.path().to_path_buf());
+        // Subscribe before the run so we observe the announced events.
+        let mut bus = state.ctx.event_bus().subscribe();
+
+        let resp = build_router(state.clone())
+            .oneshot(exec_request(
+                "ses_exec",
+                "anthropic/claude-haiku-4-5-20251001",
+                "weather in Paris?",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["outcome"], "completed");
+        assert_eq!(v["steps"], 1);
+        assert!(v["text"].as_str().unwrap().contains("sunny"));
+
+        // Persisted under the session aggregate.
+        let stored = state.ctx.event_store().read("ses_exec", 0).await.unwrap();
+        let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["message.assistant.1", "session.finished.1"]);
+
+        // Announced on the bus.
+        let mut seen = Vec::new();
+        while let Ok(ev) = bus.try_recv() {
+            seen.push(ev.kind);
+        }
+        assert!(seen.iter().any(|k| k.as_str() == "message.assistant.1"));
+        assert!(seen.iter().any(|k| k.as_str() == "session.finished.1"));
+    }
+
+    #[tokio::test]
+    async fn execute_drives_a_native_tool_loop() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TOOL_SSE, EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = exec_state(url, dir.path().to_path_buf());
+
+        let resp = build_router(state.clone())
+            .oneshot(exec_request(
+                "ses_tool",
+                "anthropic/claude-haiku-4-5-20251001",
+                "run echo",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["outcome"], "completed");
+        assert_eq!(v["steps"], 2);
+
+        let stored = state.ctx.event_store().read("ses_tool", 0).await.unwrap();
+        let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "message.assistant.1",
+                "message.tool_results.1",
+                "message.assistant.1",
+                "session.finished.1",
+            ]
+        );
+        // The bash tool actually ran in the toolbox root; its stdout is in the tool-results event.
+        let result = stored[1].data["results"][0]["result"].as_str().unwrap();
+        assert!(result.contains("marker-xyz"));
+    }
+
+    #[tokio::test]
+    async fn execute_is_gated_behind_session_exec() {
+        use tower::ServiceExt;
+        // `session-exec` not enabled → route not registered → proxy fallback → 502 (upstream down).
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(exec_request("ses_x", "anthropic/x", "hi"))
             .await
             .unwrap();
         assert_eq!(resp.status(), 502);
