@@ -21,6 +21,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/api/session",
     "/api/session/{sessionID}",
     "/project",
+    "/project/current",
 ];
 
 #[derive(Parser)]
