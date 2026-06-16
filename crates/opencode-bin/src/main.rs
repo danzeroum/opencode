@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use opencode_db::Database;
-use opencode_effect::{init_tracing, AppContext};
+use opencode_effect::{init_tracing, AppContext, AppServices};
 use opencode_server::{proxy::Upstream, RouteTable, ServerState};
 
 #[derive(Parser, Debug)]
@@ -103,7 +103,11 @@ async fn build_app_context(db_path: &Path) -> anyhow::Result<AppContext> {
         );
     }
 
-    Ok(AppContext::new(db.event_store(), db.session_store()))
+    Ok(AppContext::new(AppServices {
+        event_store: db.event_store(),
+        sessions: db.session_store(),
+        projects: db.project_store(),
+    }))
 }
 
 #[tokio::main]

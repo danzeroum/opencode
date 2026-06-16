@@ -624,6 +624,70 @@ async fn v2_session_list(
     Ok(Json(opencode_proto::SessionsResponse { data, cursor }))
 }
 
+/// Map a `project` projection row to the `Project` wire shape (the `icon_*` columns fold into one
+/// `icon` object; `commands`/`sandboxes` come from JSON columns).
+fn project_record_to_info(r: opencode_db::ProjectRecord) -> opencode_proto::Project {
+    let icon = if r.icon_url.is_some() || r.icon_url_override.is_some() || r.icon_color.is_some() {
+        Some(opencode_proto::ProjectIcon {
+            url: r.icon_url,
+            override_: r.icon_url_override,
+            color: r.icon_color,
+        })
+    } else {
+        None
+    };
+    let commands = r
+        .commands
+        .as_ref()
+        .map(|c| opencode_proto::ProjectCommands {
+            start: c.get("start").and_then(|v| v.as_str()).map(String::from),
+        });
+    opencode_proto::Project {
+        id: r.id,
+        worktree: r.worktree,
+        vcs: r.vcs,
+        name: r.name,
+        icon,
+        commands,
+        time: opencode_proto::ProjectTime {
+            created: r.time_created,
+            updated: r.time_updated,
+            initialized: r.time_initialized,
+        },
+        sandboxes: r.sandboxes,
+    }
+}
+
+/// `GET /project` — list projects (group `project`). Matches the golden `project.list`:
+/// 200 `array<Project>` + 400 `BadRequestError`. Reads the shared `project` projection table — the
+/// second entity proving the `AppContext → Store → projection` pattern generalizes. Returns all
+/// projects; `directory`/`workspace` scoping is accepted but not yet applied (a documented follow-up).
+#[utoipa::path(
+    get,
+    path = "/project",
+    operation_id = "project.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Directory context (not yet applied)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id (not yet applied)")
+    ),
+    responses(
+        (status = 200, description = "Projects", body = Vec<opencode_proto::Project>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "project"
+)]
+async fn project_list(
+    State(state): State<ServerState>,
+) -> Result<Json<Vec<opencode_proto::Project>>, ApiError> {
+    let records = state.ctx.projects().list().await.map_err(|e| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))
+    })?;
+    let data = records.into_iter().map(project_record_to_info).collect();
+    Ok(Json(data))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
@@ -636,7 +700,8 @@ async fn v2_session_list(
         find_text,
         app_log,
         v2_session_get,
-        v2_session_list
+        v2_session_list,
+        project_list
     ),
     components(schemas(
         opencode_proto::Health,
@@ -662,14 +727,19 @@ async fn v2_session_list(
         opencode_proto::SessionsResponse,
         opencode_proto::SessionCursor,
         opencode_proto::InvalidCursorError,
-        opencode_proto::SessionListError
+        opencode_proto::SessionListError,
+        opencode_proto::Project,
+        opencode_proto::ProjectIcon,
+        opencode_proto::ProjectCommands,
+        opencode_proto::ProjectTime
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
         (name = "global", description = "Global control-plane routes"),
         (name = "instance", description = "Instance-scoped routes"),
         (name = "file", description = "File routes"),
-        (name = "sessions", description = "Session routes")
+        (name = "sessions", description = "Session routes"),
+        (name = "project", description = "Project routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -739,6 +809,9 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/session", get(v2_session_list));
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
     }
+    if state.routes.handles("project") {
+        router = router.route("/project", get(project_list));
+    }
 
     router.fallback(proxy::proxy_handler).with_state(state)
 }
@@ -755,6 +828,7 @@ pub async fn serve(state: ServerState, bind: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencode_effect::AppServices;
 
     #[test]
     fn route_table_parses_and_matches() {
@@ -996,7 +1070,10 @@ mod tests {
         let sessions = Arc::new(opencode_db::MemorySessionStore::new());
         sessions.insert(test_session_record("ses_1"));
         let state = ServerState {
-            ctx: AppContext::new(Arc::new(opencode_db::MemoryEventStore::new()), sessions),
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
         };
@@ -1095,7 +1172,10 @@ mod tests {
         sessions.insert(older);
         sessions.insert(newer);
         let state = ServerState {
-            ctx: AppContext::new(Arc::new(opencode_db::MemoryEventStore::new()), sessions),
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
         };
@@ -1156,7 +1236,10 @@ mod tests {
             sessions.insert(r);
         }
         let state = ServerState {
-            ctx: AppContext::new(Arc::new(opencode_db::MemoryEventStore::new()), sessions),
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
         };
@@ -1219,5 +1302,99 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["_tag"], "InvalidCursorError");
+    }
+
+    fn test_project_record(id: &str) -> opencode_db::ProjectRecord {
+        opencode_db::ProjectRecord {
+            id: id.to_string(),
+            worktree: "/repo".into(),
+            vcs: Some("git".into()),
+            name: Some("Repo".into()),
+            icon_url: Some("http://icon".into()),
+            icon_url_override: None,
+            icon_color: None,
+            time_created: 100,
+            time_updated: 200,
+            time_initialized: Some(150),
+            sandboxes: vec!["/repo/sb".into()],
+            commands: Some(serde_json::json!({ "start": "bun dev" })),
+        }
+    }
+
+    #[test]
+    fn openapi_has_project_list_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/project"]["get"];
+        assert_eq!(op["operationId"], "project.list");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+            "array"
+        );
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+            "#/components/schemas/Project"
+        );
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn project_list_returns_projects() {
+        use tower::ServiceExt;
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("project"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/project")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        let p = &v[0];
+        assert_eq!(p["id"], "prj_1");
+        assert_eq!(p["worktree"], "/repo");
+        assert_eq!(p["vcs"], "git");
+        // icon_* columns folded into one object.
+        assert_eq!(p["icon"]["url"], "http://icon");
+        assert!(p["icon"].get("override").is_none());
+        assert_eq!(p["commands"]["start"], "bun dev");
+        assert_eq!(p["time"]["created"], 100);
+        assert_eq!(p["time"]["initialized"], 150);
+        assert_eq!(p["sandboxes"][0], "/repo/sb");
+    }
+
+    #[tokio::test]
+    async fn project_list_proxies_when_group_disabled() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""), // `project` not enabled → proxy fallback
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/project")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
     }
 }
