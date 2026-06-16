@@ -6,9 +6,13 @@
 //!   that wires concrete services into [`AppContext`] (held as `Arc<dyn Trait>`).
 //! - `Effect.withSpan` / `Effect.fn("Name")` → `#[tracing::instrument]` (see [`init_tracing`]).
 
+pub mod bus;
+
 use std::sync::Arc;
 
 use opencode_db::{EventStore, ProjectStore, SessionStore};
+
+pub use bus::{BusEvent, EventBus};
 
 /// Binary-edge error taxonomy. Libraries return their own `thiserror` enums; these are mapped to
 /// HTTP responses (and to the `opencode_proto::ErrorEnvelope` `_tag` shape) at the server edge.
@@ -64,6 +68,8 @@ pub struct AppServices {
     pub sessions: Arc<dyn SessionStore>,
     /// `project` projection read store.
     pub projects: Arc<dyn ProjectStore>,
+    /// In-process event bus (global stream + per-aggregate watch).
+    pub event_bus: Arc<EventBus>,
 }
 
 impl Default for AppServices {
@@ -72,6 +78,7 @@ impl Default for AppServices {
             event_store: Arc::new(opencode_db::MemoryEventStore::new()),
             sessions: Arc::new(opencode_db::MemorySessionStore::new()),
             projects: Arc::new(opencode_db::MemoryProjectStore::new()),
+            event_bus: Arc::new(EventBus::new()),
         }
     }
 }
@@ -108,6 +115,11 @@ impl AppContext {
     /// The wired project (projection) store.
     pub fn projects(&self) -> &Arc<dyn ProjectStore> {
         &self.inner.projects
+    }
+
+    /// The in-process event bus.
+    pub fn event_bus(&self) -> &Arc<EventBus> {
+        &self.inner.event_bus
     }
 }
 

@@ -107,6 +107,7 @@ async fn build_app_context(db_path: &Path) -> anyhow::Result<AppContext> {
         event_store: db.event_store(),
         sessions: db.session_store(),
         projects: db.project_store(),
+        ..Default::default()
     }))
 }
 

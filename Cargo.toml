@@ -63,6 +63,8 @@ async-trait = "0.1"
 ulid = "1"
 # base64url for the opaque keyset pagination cursor (zero-dependency, MIT/Apache).
 base64 = "0.22"
+# Lossless broadcast channel for the in-process event bus (backpressure, unlike tokio::broadcast).
+async-broadcast = "0.7"
 jsonc-parser = { version = "0.26", features = ["serde"] }
 # Search/glob — the ripgrep libraries (identical ignore/match semantics to ripgrep.ts).
 ignore = "0.4"
