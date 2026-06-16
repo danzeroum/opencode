@@ -7,6 +7,7 @@
 pub use opencode_effect::{AppContext, AppError};
 
 pub mod runner;
+pub mod session;
 
 /// Folds events into read-model state — the projector pattern (`session/projector.ts`). Implementors
 /// derive aggregate state from the event log; `replay`-flagged events skip non-replayable side
