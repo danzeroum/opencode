@@ -8,12 +8,173 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::{FinishReason, LlmError, LlmEvent, Protocol, Usage};
+use crate::{
+    ContentPart, FinishReason, Generation, LlmError, LlmEvent, LlmRequest, Message, Protocol, Role,
+    ToolChoice, Usage,
+};
 
 /// The `anthropic-messages` protocol.
 pub struct AnthropicMessages;
+
+/// Anthropic requires `max_tokens`; default it when the request leaves it unset.
+const DEFAULT_MAX_TOKENS: u64 = 4096;
+
+// ---- Request body (the `body.from` lowering target) ----
+
+/// The Anthropic Messages request body (`AnthropicMessagesBody`), core subset.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct AnthropicBody {
+    model: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<AnthropicText>,
+    messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<AnthropicTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<AnthropicToolChoice>,
+    stream: bool,
+    max_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stop_sequences: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct AnthropicText {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct AnthropicMessage {
+    role: &'static str,
+    content: Vec<AnthropicContentBlock>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(tag = "type")]
+enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct AnthropicTool {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    input_schema: Value,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(tag = "type")]
+enum AnthropicToolChoice {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "any")]
+    Any,
+    #[serde(rename = "tool")]
+    Tool { name: String },
+}
+
+fn text_block(text: String) -> AnthropicText {
+    AnthropicText { kind: "text", text }
+}
+
+/// Render a tool result as Anthropic `tool_result` content (a string; rich/media results deferred).
+fn result_to_string(result: &Value) -> String {
+    match result {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn lower_tool_choice(choice: &ToolChoice) -> Option<AnthropicToolChoice> {
+    match choice {
+        ToolChoice::Auto => Some(AnthropicToolChoice::Auto),
+        ToolChoice::Required => Some(AnthropicToolChoice::Any),
+        ToolChoice::Tool(name) => Some(AnthropicToolChoice::Tool { name: name.clone() }),
+        // "none" is expressed by simply omitting tools/tool_choice.
+        ToolChoice::None => None,
+    }
+}
+
+fn lower_message(message: &Message) -> AnthropicMessage {
+    // Anthropic messages are only `user`/`assistant`; system prompt is top-level and tool results
+    // are delivered in a `user` message.
+    let role = match message.role {
+        Role::Assistant => "assistant",
+        Role::System | Role::User | Role::Tool => "user",
+    };
+    let content = message
+        .content
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text(text) => AnthropicContentBlock::Text { text: text.clone() },
+            ContentPart::ToolCall { id, name, input } => AnthropicContentBlock::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
+            ContentPart::ToolResult { id, result, .. } => AnthropicContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: result_to_string(result),
+            },
+        })
+        .collect();
+    AnthropicMessage { role, content }
+}
+
+fn lower_body(request: &LlmRequest) -> AnthropicBody {
+    let Generation {
+        max_tokens,
+        temperature,
+        top_p,
+        top_k,
+        stop,
+    } = request.generation.clone();
+    AnthropicBody {
+        model: request.model.clone(),
+        system: request.system.iter().cloned().map(text_block).collect(),
+        messages: request.messages.iter().map(lower_message).collect(),
+        tools: request
+            .tools
+            .iter()
+            .map(|t| AnthropicTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+            })
+            .collect(),
+        tool_choice: request.tool_choice.as_ref().and_then(lower_tool_choice),
+        stream: true,
+        max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        temperature,
+        top_p,
+        top_k,
+        stop_sequences: stop,
+    }
+}
 
 // ---- Provider event shapes (only the fields the decoder reads; unknown fields are ignored) ----
 
@@ -181,11 +342,16 @@ fn merge_usage(into: &mut Usage, usage: &AnthropicUsage) {
 }
 
 impl Protocol for AnthropicMessages {
+    type Body = AnthropicBody;
     type Event = AnthropicEvent;
     type State = AnthropicState;
 
     fn name(&self) -> &'static str {
         "anthropic-messages"
+    }
+
+    fn build_body(&self, request: &LlmRequest) -> Result<AnthropicBody, LlmError> {
+        Ok(lower_body(request))
     }
 
     fn initial(&self) -> AnthropicState {
@@ -299,7 +465,8 @@ impl Protocol for AnthropicMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode_sse;
+    use crate::{decode_sse, Generation, LlmRequest, Message, ToolChoice, ToolDefinition};
+    use serde_json::json;
 
     // Recorded SSE bodies from `packages/llm/test/fixtures/recordings/anthropic-messages/`
     // (`streams-text.json` and `streams-tool-call.json`) — the http-recorder cassettes, byte-faithful.
@@ -444,5 +611,152 @@ data: {"type":"message_stop"     }
                 message: "Overloaded".to_string()
             }]
         );
+    }
+
+    // ---- request lowering (`body.from`), parity with the cassettes' recorded request bodies ----
+
+    fn body_value(request: &LlmRequest) -> serde_json::Value {
+        serde_json::to_value(AnthropicMessages.build_body(request).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn lowers_text_request_to_cassette_body() {
+        // Matches `streams-text.json` interactions[0].request.body.
+        let request = LlmRequest {
+            model: "claude-haiku-4-5-20251001".into(),
+            system: vec!["You are concise.".into()],
+            messages: vec![Message::user_text("Reply with exactly: Hello!")],
+            generation: Generation {
+                max_tokens: Some(20),
+                temperature: Some(0.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let body = body_value(&request);
+        assert_eq!(body["model"], "claude-haiku-4-5-20251001");
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "You are concise."}])
+        );
+        assert_eq!(
+            body["messages"],
+            json!([{"role": "user", "content": [{"type": "text", "text": "Reply with exactly: Hello!"}]}])
+        );
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], 20);
+        assert_eq!(body["temperature"].as_f64(), Some(0.0));
+        // No tools → tools/tool_choice omitted.
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn lowers_tool_request_to_cassette_body() {
+        // Matches `streams-tool-call.json` interactions[0].request.body.
+        let schema = json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"],
+            "additionalProperties": false
+        });
+        let request = LlmRequest {
+            model: "claude-haiku-4-5-20251001".into(),
+            system: vec!["Call tools exactly as requested.".into()],
+            messages: vec![Message::user_text(
+                "Call get_weather with city exactly Paris.",
+            )],
+            tools: vec![ToolDefinition {
+                name: "get_weather".into(),
+                description: Some("Get current weather for a city.".into()),
+                input_schema: schema.clone(),
+            }],
+            tool_choice: Some(ToolChoice::Tool("get_weather".into())),
+            generation: Generation {
+                max_tokens: Some(80),
+                temperature: Some(0.0),
+                ..Default::default()
+            },
+        };
+        let body = body_value(&request);
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "name": "get_weather",
+                "description": "Get current weather for a city.",
+                "input_schema": schema
+            }])
+        );
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "tool", "name": "get_weather"})
+        );
+        assert_eq!(body["max_tokens"], 80);
+    }
+
+    #[test]
+    fn lowers_assistant_tool_use_and_tool_result() {
+        let request = LlmRequest {
+            model: "m".into(),
+            messages: vec![
+                Message::user_text("weather?"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentPart::ToolCall {
+                        id: "toolu_1".into(),
+                        name: "get_weather".into(),
+                        input: json!({ "city": "Paris" }),
+                    }],
+                },
+                Message {
+                    role: Role::Tool,
+                    content: vec![ContentPart::ToolResult {
+                        id: "toolu_1".into(),
+                        name: "get_weather".into(),
+                        result: json!("sunny"),
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        let body = body_value(&request);
+        assert_eq!(
+            body["messages"][1],
+            json!({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}}]
+            })
+        );
+        assert_eq!(
+            body["messages"][2],
+            json!({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"}]
+            })
+        );
+        // max_tokens defaulted when unset.
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn tool_choice_mapping() {
+        let with = |choice: Option<ToolChoice>| {
+            body_value(&LlmRequest {
+                model: "m".into(),
+                tool_choice: choice,
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            with(Some(ToolChoice::Auto))["tool_choice"],
+            json!({"type": "auto"})
+        );
+        assert_eq!(
+            with(Some(ToolChoice::Required))["tool_choice"],
+            json!({"type": "any"})
+        );
+        // `none` and absent both omit tool_choice.
+        assert!(with(Some(ToolChoice::None)).get("tool_choice").is_none());
+        assert!(with(None).get("tool_choice").is_none());
     }
 }
