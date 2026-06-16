@@ -12,6 +12,7 @@
 //! openai-responses → gemini → bedrock-converse.
 
 pub mod anthropic;
+pub mod executor;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
@@ -128,9 +129,11 @@ pub enum LlmError {
     Status {
         /// HTTP status code.
         code: u16,
-        /// Whether the request is worth retrying (the executor uses this; Phase 3 follow-up).
+        /// Whether the request is worth retrying (the executor consumes this).
         retryable: bool,
-        /// Response body / error message.
+        /// `Retry-After` delay in seconds, if the provider sent the header.
+        retry_after: Option<u64>,
+        /// Response body / error message (secret-redacted).
         message: String,
     },
 }
