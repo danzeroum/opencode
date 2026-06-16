@@ -11,7 +11,9 @@ use std::sync::Arc;
 use clap::Parser;
 use opencode_db::Database;
 use opencode_effect::{init_tracing, AppContext, AppServices};
-use opencode_server::{proxy::Upstream, RouteTable, RunnerServices, ServerState};
+use opencode_server::{
+    proxy::Upstream, RouteTable, RunnerServices, ServerState, SessionCoordinator,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "opencode", version, about = "opencode backend (Rust)")]
@@ -126,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         routes: RouteTable::from_env(),
         proxy: Arc::new(Upstream::new(cli.upstream.clone())),
         runner: RunnerServices::from_env(root)?,
+        coordinator: SessionCoordinator::default(),
     };
     tracing::info!(
         bind = %cli.bind,

@@ -8,9 +8,11 @@
 
 pub mod proxy;
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     response::Json,
@@ -24,7 +26,7 @@ use opencode_core::provider::{
 use opencode_core::runner::SessionOutcome;
 use opencode_core::session::{
     run_gated, AllowAll, BusSink, EventStoreSink, FanOutSink, LlmEngine, PermissionGate, Session,
-    ToolBox,
+    SessionRun, ToolBox,
 };
 use opencode_effect::AppContext;
 use opencode_llm::{ContentPart, Generation, Message, Role};
@@ -84,6 +86,8 @@ pub struct ServerState {
     pub proxy: Arc<proxy::Upstream>,
     /// Session-runner collaborators (engine factory, permission gate, tools root).
     pub runner: RunnerServices,
+    /// Per-session background execution (admit + wake-coalesced drain).
+    pub coordinator: SessionCoordinator,
 }
 
 /// Builds the per-request [`LlmEngine`] from a `provider/model` id — the execute route's injection
@@ -149,6 +153,157 @@ impl Default for RunnerServices {
     }
 }
 
+/// One prompt admitted to a session's inbox (the internal proving-route shape; the public contract's
+/// richer `Prompt` / `SessionInput` types land with the `/api/session/{id}/prompt` cutover).
+#[derive(Clone)]
+pub(crate) struct AdmittedPrompt {
+    pub(crate) model: String,
+    pub(crate) prompt: String,
+    pub(crate) system: Vec<String>,
+    pub(crate) step_limit: usize,
+}
+
+/// Runs one admitted prompt to completion — the injection seam between the [`SessionCoordinator`]'s
+/// scheduling and the actual turn loop. Production drives the real runner; tests inject a controllable
+/// one to exercise the coordinator's concurrency in isolation.
+#[async_trait]
+pub(crate) trait TurnRunner: Send + Sync {
+    async fn run(&self, session_id: &str, prompt: AdmittedPrompt);
+}
+
+/// Production [`TurnRunner`]: build the engine + native tools + sink and drive one turn (the same
+/// machinery the synchronous `/_rust/session/{id}/execute` route uses).
+struct LiveTurnRunner {
+    ctx: AppContext,
+    runner: RunnerServices,
+}
+
+#[async_trait]
+impl TurnRunner for LiveTurnRunner {
+    async fn run(&self, session_id: &str, prompt: AdmittedPrompt) {
+        if let Err(error) = drive_one_turn(
+            &self.ctx,
+            &self.runner,
+            session_id,
+            &prompt.model,
+            prompt.prompt,
+            prompt.system,
+            prompt.step_limit,
+        )
+        .await
+        {
+            tracing::warn!(session = session_id, %error, "background turn failed");
+        }
+    }
+}
+
+/// A session's inbox slot: whether a drain task currently owns it, and the queued prompts a running
+/// task will pick up (wake-coalescing).
+#[derive(Default)]
+struct Slot {
+    running: bool,
+    pending: VecDeque<AdmittedPrompt>,
+}
+
+/// Per-session background execution with **wake-coalescing**: an admit spawns a drain task when the
+/// session is idle, otherwise queues the prompt for the task already draining it — at most one task per
+/// session at a time, processing its inbox in order. In-memory for now (durable `session_input`
+/// admission lands with the public `/prompt` cutover).
+#[derive(Clone, Default)]
+pub struct SessionCoordinator {
+    slots: Arc<Mutex<HashMap<String, Slot>>>,
+    spawns: Arc<AtomicU64>,
+}
+
+impl SessionCoordinator {
+    /// Admit `prompt` for `session_id` and ensure a drain task (using `runner`) is processing it. If a
+    /// task already owns the session, the prompt is queued for it (coalesced) and `runner` is unused.
+    pub(crate) fn admit(
+        &self,
+        runner: Arc<dyn TurnRunner>,
+        session_id: String,
+        prompt: AdmittedPrompt,
+    ) {
+        let mut slots = self.slots.lock().expect("coordinator mutex poisoned");
+        let slot = slots.entry(session_id.clone()).or_default();
+        slot.pending.push_back(prompt);
+        if slot.running {
+            return;
+        }
+        slot.running = true;
+        drop(slots);
+        self.spawns.fetch_add(1, Ordering::SeqCst);
+        let coordinator = self.clone();
+        tokio::spawn(async move { coordinator.drain(runner, session_id).await });
+    }
+
+    /// Drain a session's inbox to completion, then drop the slot and release ownership (so a later
+    /// admit respawns).
+    async fn drain(&self, runner: Arc<dyn TurnRunner>, session_id: String) {
+        loop {
+            let next = {
+                let mut slots = self.slots.lock().expect("coordinator mutex poisoned");
+                let popped = slots
+                    .get_mut(&session_id)
+                    .and_then(|slot| slot.pending.pop_front());
+                match popped {
+                    Some(prompt) => prompt,
+                    None => {
+                        // Inbox empty: release ownership atomically under the lock.
+                        slots.remove(&session_id);
+                        return;
+                    }
+                }
+            };
+            runner.run(&session_id, next).await;
+        }
+    }
+
+    /// Number of drain tasks spawned over this coordinator's lifetime (observability).
+    pub fn spawn_count(&self) -> u64 {
+        self.spawns.load(Ordering::SeqCst)
+    }
+}
+
+/// Build the engine + native tools + persist-then-announce sink and drive one user turn to completion.
+/// Shared by the synchronous execute route and the background [`LiveTurnRunner`].
+async fn drive_one_turn(
+    ctx: &AppContext,
+    runner: &RunnerServices,
+    session_id: &str,
+    model: &str,
+    prompt: String,
+    system: Vec<String>,
+    step_limit: usize,
+) -> Result<SessionRun, String> {
+    let (_, model_id) = split_model(model).map_err(|e| e.to_string())?;
+    let engine = runner.engines.build(model).map_err(|e| e.to_string())?;
+    let tools: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(runner.root.clone()));
+    let session = Session {
+        id: session_id.to_string(),
+        model: model_id.to_string(),
+        system,
+        tools: native_tools::tool_definitions(),
+        generation: Generation::default(),
+        step_limit,
+    };
+    let primary = EventStoreSink::new(ctx.event_store().clone(), session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let secondary = BusSink::new(ctx.event_bus().clone(), session_id);
+    let sink = FanOutSink::new(primary, secondary);
+    run_gated(
+        engine.as_ref(),
+        tools,
+        &sink,
+        runner.gate.as_ref(),
+        &session,
+        vec![Message::user_text(prompt)],
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Always-native internal liveness/readiness route (not part of the public OpenAPI contract).
 async fn rust_health() -> Json<Health> {
     Json(Health {
@@ -208,45 +363,17 @@ async fn rust_session_execute(
     Json(payload): Json<ExecutePayload>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
-
-    // The engine is built from the full `provider/model`; the turn request carries the bare model id.
-    let (_, model_id) =
-        split_model(&payload.model).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let model_id = model_id.to_string();
-
-    let engine = state
-        .runner
-        .engines
-        .build(&payload.model)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let tools: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(state.runner.root.clone()));
-
-    let session = Session {
-        id: session_id.clone(),
-        model: model_id,
-        system: payload.system,
-        tools: native_tools::tool_definitions(),
-        generation: Generation::default(),
-        step_limit: payload.step_limit,
-    };
-
-    // Persist (authoritative) then announce (best-effort) — the runner's fan-out sink.
-    let primary = EventStoreSink::new(state.ctx.event_store().clone(), session_id.as_str())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let secondary = BusSink::new(state.ctx.event_bus().clone(), session_id.as_str());
-    let sink = FanOutSink::new(primary, secondary);
-
-    let run = run_gated(
-        engine.as_ref(),
-        tools,
-        &sink,
-        state.runner.gate.as_ref(),
-        &session,
-        vec![Message::user_text(payload.prompt)],
+    let run = drive_one_turn(
+        &state.ctx,
+        &state.runner,
+        &session_id,
+        &payload.model,
+        payload.prompt,
+        payload.system,
+        payload.step_limit,
     )
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let (outcome, steps) = match &run.outcome {
         SessionOutcome::Completed { steps } => ("completed", *steps),
@@ -271,6 +398,59 @@ async fn rust_session_execute(
         "steps": steps,
         "text": text,
         "usage": { "input": run.usage.input, "output": run.usage.output },
+    })))
+}
+
+/// Request body for the internal session-prompt proving route (`model` + `prompt` text; the public
+/// contract's richer `Prompt` / `delivery` / `resume` land with the cutover).
+#[derive(serde::Deserialize)]
+struct PromptPayload {
+    /// `provider/model` id (e.g. `anthropic/claude-...`).
+    model: String,
+    /// The user's prompt text.
+    prompt: String,
+    /// Optional system-prompt parts.
+    #[serde(default)]
+    system: Vec<String>,
+    /// Max turns before stopping (the continuation step limit).
+    #[serde(default = "default_step_limit")]
+    step_limit: usize,
+}
+
+/// `POST /_rust/session/{sessionID}/prompt` — internal, gated (`session-prompt`) proving route for the
+/// background coordinator: admit the prompt to the session's inbox and **return immediately** while a
+/// background task drives the turn(s), persisting events to the store and announcing them on the bus
+/// (observable on `/_rust/event`). Concurrent admits to the same session are wake-coalesced into one
+/// task. This is the `admit + schedule` half of the eventual `POST /api/session/{id}/prompt` contract
+/// cutover (which adds durable `session_input`, the rich `Prompt` type, idempotency, and `/event`).
+async fn rust_session_prompt(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(payload): Json<PromptPayload>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    // Validate the model up front so a bad request fails fast (before scheduling a task).
+    split_model(&payload.model).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let live: Arc<dyn TurnRunner> = Arc::new(LiveTurnRunner {
+        ctx: state.ctx.clone(),
+        runner: state.runner.clone(),
+    });
+    state.coordinator.admit(
+        live,
+        session_id.clone(),
+        AdmittedPrompt {
+            model: payload.model,
+            prompt: payload.prompt,
+            system: payload.system,
+            step_limit: payload.step_limit,
+        },
+    );
+
+    Ok(Json(serde_json::json!({
+        "session": session_id,
+        "delivery": "steer",
+        "status": "admitted",
     })))
 }
 
@@ -1063,6 +1243,13 @@ pub fn build_router(state: ServerState) -> Router {
             post(rust_session_execute),
         );
     }
+    // Internal Phase-4 proving route: admit a prompt + drive turns in a background task.
+    if state.routes.handles("session-prompt") {
+        router = router.route(
+            "/_rust/session/{sessionID}/prompt",
+            post(rust_session_prompt),
+        );
+    }
 
     router.fallback(proxy::proxy_handler).with_state(state)
 }
@@ -1242,6 +1429,7 @@ mod tests {
             routes: RouteTable::parse("global"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let app = build_router(state);
 
@@ -1329,6 +1517,7 @@ mod tests {
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1361,6 +1550,7 @@ mod tests {
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1388,6 +1578,7 @@ mod tests {
             routes: RouteTable::parse(""), // `session` not enabled → proxy fallback
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1434,6 +1625,7 @@ mod tests {
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1465,6 +1657,7 @@ mod tests {
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1500,6 +1693,7 @@ mod tests {
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let app = build_router(state);
 
@@ -1544,6 +1738,7 @@ mod tests {
             routes: RouteTable::parse("session"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         // Valid base64url ("aGVsbG8" = "hello") but not a JSON cursor payload.
         let resp = build_router(state)
@@ -1609,6 +1804,7 @@ mod tests {
             routes: RouteTable::parse("project"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1646,6 +1842,7 @@ mod tests {
             routes: RouteTable::parse(""),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1696,6 +1893,7 @@ mod tests {
             routes: RouteTable::parse("project"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1723,6 +1921,7 @@ mod tests {
             routes: RouteTable::parse("project"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1749,6 +1948,7 @@ mod tests {
             routes: RouteTable::parse(""), // `project` not enabled → proxy fallback
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(
@@ -1807,13 +2007,14 @@ mod tests {
     fn exec_state(url: String, root: std::path::PathBuf) -> ServerState {
         ServerState {
             ctx: AppContext::in_memory(),
-            routes: RouteTable::parse("session-exec"),
+            routes: RouteTable::parse("session-exec,session-prompt"),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices {
                 engines: Arc::new(TestEngines { url }),
                 gate: Arc::new(AllowAll),
                 root,
             },
+            coordinator: SessionCoordinator::default(),
         }
     }
 
@@ -1916,9 +2117,166 @@ mod tests {
             routes: RouteTable::parse(""),
             proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
             runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
         };
         let resp = build_router(state)
             .oneshot(exec_request("ses_x", "anthropic/x", "hi"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ---- Phase 4: the background session coordinator ----
+
+    fn admitted(text: &str) -> AdmittedPrompt {
+        AdmittedPrompt {
+            model: "anthropic/x".to_string(),
+            prompt: text.to_string(),
+            system: Vec::new(),
+            step_limit: 1,
+        }
+    }
+
+    /// A [`TurnRunner`] that reports each completed prompt on a channel.
+    struct ReportingRunner {
+        done: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl TurnRunner for ReportingRunner {
+        async fn run(&self, _session_id: &str, prompt: AdmittedPrompt) {
+            let _ = self.done.send(prompt.prompt);
+        }
+    }
+
+    /// A [`TurnRunner`] that signals when each prompt starts and blocks until released, so a test can
+    /// deterministically admit a second prompt while the first is mid-run.
+    struct BlockingRunner {
+        started: tokio::sync::mpsc::UnboundedSender<String>,
+        done: tokio::sync::mpsc::UnboundedSender<String>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait]
+    impl TurnRunner for BlockingRunner {
+        async fn run(&self, _session_id: &str, prompt: AdmittedPrompt) {
+            let _ = self.started.send(prompt.prompt.clone());
+            let _permit = self.release.acquire().await.unwrap();
+            let _ = self.done.send(prompt.prompt);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_spawns_drains_and_respawns_after_idle() {
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let runner: Arc<dyn TurnRunner> = Arc::new(ReportingRunner { done: done_tx });
+        let coord = SessionCoordinator::default();
+
+        coord.admit(runner.clone(), "ses".to_string(), admitted("p1"));
+        assert_eq!(done_rx.recv().await.unwrap(), "p1");
+        assert_eq!(coord.spawn_count(), 1);
+
+        // The first task drained to empty and released; a later admit spawns a fresh task.
+        coord.admit(runner, "ses".to_string(), admitted("p2"));
+        assert_eq!(done_rx.recv().await.unwrap(), "p2");
+        assert_eq!(coord.spawn_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn coordinator_coalesces_admits_while_running() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner: Arc<dyn TurnRunner> = Arc::new(BlockingRunner {
+            started: started_tx,
+            done: done_tx,
+            release: release.clone(),
+        });
+        let coord = SessionCoordinator::default();
+
+        coord.admit(runner.clone(), "ses".to_string(), admitted("p1"));
+        assert_eq!(started_rx.recv().await.unwrap(), "p1"); // p1 is mid-run; the task owns the session
+
+        // Admitted while the task owns the session → coalesced into the same task, no new spawn.
+        coord.admit(runner, "ses".to_string(), admitted("p2"));
+        assert_eq!(coord.spawn_count(), 1);
+
+        release.add_permits(2); // let both finish
+        assert_eq!(done_rx.recv().await.unwrap(), "p1");
+        assert_eq!(done_rx.recv().await.unwrap(), "p2");
+        assert_eq!(coord.spawn_count(), 1); // one task processed both
+    }
+
+    fn prompt_request(session: &str, model: &str, prompt: &str) -> axum::extract::Request {
+        axum::extract::Request::builder()
+            .method("POST")
+            .uri(format!("/_rust/session/{session}/prompt"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "model": model, "prompt": prompt }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prompt_runs_in_background_and_publishes() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = exec_state(url, dir.path().to_path_buf());
+        let mut bus = state.ctx.event_bus().subscribe();
+
+        let resp = build_router(state.clone())
+            .oneshot(prompt_request(
+                "ses_bg",
+                "anthropic/claude-haiku-4-5-20251001",
+                "hello",
+            ))
+            .await
+            .unwrap();
+        // Admitted immediately (the turn runs in the background).
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["status"], "admitted");
+
+        // Await the background turn's events on the bus.
+        let mut saw_assistant = false;
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), bus.recv())
+                .await
+                .expect("a bus event before timeout")
+                .expect("bus open");
+            if event.kind == "message.assistant.1" {
+                saw_assistant = true;
+            }
+            if event.kind == "session.finished.1" {
+                break;
+            }
+        }
+        assert!(saw_assistant);
+
+        // Persisted under the session aggregate too.
+        let stored = state.ctx.event_store().read("ses_bg", 0).await.unwrap();
+        let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["message.assistant.1", "session.finished.1"]);
+    }
+
+    #[tokio::test]
+    async fn prompt_is_gated_behind_session_prompt() {
+        use tower::ServiceExt;
+        // `session-prompt` not enabled → route not registered → proxy fallback → 502.
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(prompt_request("ses_x", "anthropic/x", "hi"))
             .await
             .unwrap();
         assert_eq!(resp.status(), 502);
