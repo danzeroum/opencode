@@ -1175,6 +1175,8 @@ dependencies = [
  "opencode-events",
  "opencode-proto",
  "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

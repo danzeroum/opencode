@@ -62,7 +62,7 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 - ✅ `rust.yml` CI (fmt + clippy -D warnings + nextest + cargo-deny + openapi gate), side-by-side with TS CI
 - ✅ `openapi-diff` contract gate (**structural**): per-operation compare of operationId + response status codes + **structurally-normalized response schemas** (resolves `$ref`, drops nullable/format/enum/description/additionalProperties), so `$ref`-vs-inline representations compare correctly. Hard-fails for `CUTOVER_PATHS` against `packages/sdk/openapi.json`.
 - ⬜ Audit the MCP patch (`patches/@modelcontextprotocol%2Fsdk@1.29.0.patch`, reconnect/`onsessionexpired`)
-- ⬜ Spikes: `die`/`catchDefect` → `TurnOutcome` enum; `FiberSet` → `ToolExecutor`; `state.ts` `Draft<T>`/replay
+- 🟡 Spikes: ✅ `die`/`catchDefect` → explicit restart driver + `FiberSet` → `ToolExecutor` landed (PR #24, `opencode-core::runner`); ⬜ `state.ts` `Draft<T>`/replay still open
 - ⬜ Pin `effect@4.0.0-beta.74`; align with the in-flight V2 refactor (`specs/v2`)
 
 ### Phase 1 — Leaf / low-risk modules 🟡
@@ -87,9 +87,10 @@ cargo-dist · cargo-deny. **Out of scope:** tree-sitter (TUI-only).
 ### Phase 3 — LLM ⬜
 - `opencode-llm` protocol router: anthropic-messages → openai-chat/responses → gemini → bedrock-converse; transports; executor (retry/redaction). Parity via recorded fixtures.
 
-### Phase 4 — Session runner ⬜
-- `session/runner/*` (loop via `TurnOutcome` + `ToolExecutor`), `permission`, `question`, `message`
-- Cutover: `session`, `message`, `permission`, `question`
+### Phase 4 — Session runner 🟡
+- ✅ **Control-flow spike** (PR #24, pure logic — no IO/cutover): `opencode-core::runner` proves the `session/runner/llm.ts` control flow maps to panic-free Rust. `die(TurnTransitionError)`/`catchDefect` → `TurnTransition` (`RebuildPreparedTurn{promotion}` / `ContinueAfterOverflowCompaction`) returned as `Err` + the `run_turn` restart driver (flips `OverflowRecovery` `Enabled→Disabled`; a second overflow is `DoubleOverflow`); `needsContinuation` → `TurnOutcome::{Continue,Done}`; the outer continuation loop → `run_session` (step-limited); `FiberSet` + `raceFirst(join,awaitEmpty)` → `ToolExecutor` (over `tokio::task::JoinSet`) with `drain` (fail-fast vs all-settled) + `cancel_all`. 14 unit tests exercise every transition + tool race/timeout/cancel.
+- ⬜ Port the real `session/runner/*` over this skeleton (LLM stream → persist incrementally → tool exec via `ToolExecutor` → project history → next turn), `permission`, `question`, `message`; depends on Phase 3 (LLM) + the `session_context_epoch`/`session_input` tables.
+- ⬜ Cutover: `session`, `message`, `permission`, `question`, and finally the real `/event` (Rust now produces events)
 
 ### Phase 5 — Plugins, MCP, integrations + instance routes ⬜
 - JS plugin host (third-party) + `rmcp`; `background-job`, github/gitlab/slack
