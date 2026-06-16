@@ -8,6 +8,7 @@
 //! migration-apply is deferred to Phase 6.
 
 pub mod migration;
+pub mod project;
 pub mod session;
 
 use std::path::Path;
@@ -23,6 +24,7 @@ use sqlx::SqlitePool;
 pub use opencode_events::{EventInput, StoredEvent};
 
 pub use migration::{MigrationReport, EXPECTED_MIGRATIONS};
+pub use project::{MemoryProjectStore, ProjectRecord, ProjectStore, SqlxProjectStore, PROJECT_DDL};
 pub use session::{
     ListAnchor, ListDirection, MemorySessionStore, SessionContextEpoch, SessionContextEpochRepo,
     SessionInput, SessionInputRepo, SessionListQuery, SessionRecord, SessionStore,
@@ -230,6 +232,11 @@ impl Database {
     /// A [`SessionStore`] (read model over the `session` projection table), backed by the shared pool.
     pub fn session_store(&self) -> Arc<dyn SessionStore> {
         Arc::new(SqlxSessionStore::new(self.pool.clone()))
+    }
+
+    /// A [`ProjectStore`] (read model over the `project` projection table), backed by the shared pool.
+    pub fn project_store(&self) -> Arc<dyn ProjectStore> {
+        Arc::new(SqlxProjectStore::new(self.pool.clone()))
     }
 
     /// The `session_input` repository, backed by the shared pool.

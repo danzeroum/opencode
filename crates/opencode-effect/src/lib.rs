@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use opencode_db::{EventStore, SessionStore};
+use opencode_db::{EventStore, ProjectStore, SessionStore};
 
 /// Binary-edge error taxonomy. Libraries return their own `thiserror` enums; these are mapped to
 /// HTTP responses (and to the `opencode_proto::ErrorEnvelope` `_tag` shape) at the server edge.
@@ -50,39 +50,49 @@ impl AppError {
     }
 }
 
-/// Shared application context — cheap to clone (`Arc`), threaded through axum via `State`.
+/// The services wired into an [`AppContext`] (the Rust analog of an Effect `Layer`-provided context).
 ///
-/// This is the Rust analog of an Effect `Layer`-provided context: services are held as
-/// `Arc<dyn Trait>` and wired once at the composition root (`build_app_context()` in `opencode-bin`).
-/// More services (`Database` repos, `LlmClient`, `Config`, …) are added here as routes are cut over.
+/// `Default` provides in-memory stores (tests / ephemeral runs); the composition root
+/// (`build_app_context()` in `opencode-bin`) overrides the fields it has real backings for via
+/// struct-update syntax — `AppServices { event_store: db.event_store(), ..Default::default() }` — so
+/// adding a new store doesn't churn every call site.
 #[derive(Clone)]
-pub struct AppContext {
-    inner: Arc<AppContextInner>,
+pub struct AppServices {
+    /// Append-only event store.
+    pub event_store: Arc<dyn EventStore>,
+    /// `session` projection read store.
+    pub sessions: Arc<dyn SessionStore>,
+    /// `project` projection read store.
+    pub projects: Arc<dyn ProjectStore>,
 }
 
-struct AppContextInner {
-    event_store: Arc<dyn EventStore>,
-    sessions: Arc<dyn SessionStore>,
+impl Default for AppServices {
+    fn default() -> Self {
+        Self {
+            event_store: Arc::new(opencode_db::MemoryEventStore::new()),
+            sessions: Arc::new(opencode_db::MemorySessionStore::new()),
+            projects: Arc::new(opencode_db::MemoryProjectStore::new()),
+        }
+    }
+}
+
+/// Shared application context — cheap to clone (`Arc`), threaded through axum via `State`.
+#[derive(Clone)]
+pub struct AppContext {
+    inner: Arc<AppServices>,
 }
 
 impl AppContext {
-    /// Construct a context wired with the given stores. Production wiring (single shared SQLite pool,
-    /// migration verification) happens in `build_app_context()`.
-    pub fn new(event_store: Arc<dyn EventStore>, sessions: Arc<dyn SessionStore>) -> Self {
+    /// Construct a context from a wired [`AppServices`].
+    pub fn new(services: AppServices) -> Self {
         Self {
-            inner: Arc::new(AppContextInner {
-                event_store,
-                sessions,
-            }),
+            inner: Arc::new(services),
         }
     }
 
-    /// A context backed by in-memory stores — for tests and ephemeral runs.
+    /// A context backed entirely by in-memory stores — for tests and ephemeral runs.
     pub fn in_memory() -> Self {
-        Self::new(
-            Arc::new(opencode_db::MemoryEventStore::new()),
-            Arc::new(opencode_db::MemorySessionStore::new()),
-        )
+        Self::new(AppServices::default())
     }
 
     /// The wired event store.
@@ -93,6 +103,11 @@ impl AppContext {
     /// The wired session (projection) store.
     pub fn sessions(&self) -> &Arc<dyn SessionStore> {
         &self.inner.sessions
+    }
+
+    /// The wired project (projection) store.
+    pub fn projects(&self) -> &Arc<dyn ProjectStore> {
+        &self.inner.projects
     }
 }
 

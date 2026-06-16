@@ -324,6 +324,70 @@ pub enum SessionListError {
     Invalid(InvalidRequestError),
 }
 
+// ---------------------------------------------------------------------------
+// Project read contract (`project.list` — GET /project). `Project` mirrors
+// `packages/core/src/project/sql.ts`; the `icon_*` columns fold into `icon`.
+// ---------------------------------------------------------------------------
+
+/// A project's icon (`{ url?, override?, color? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectIcon {
+    /// Icon URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Icon URL override.
+    #[serde(rename = "override", skip_serializing_if = "Option::is_none")]
+    pub override_: Option<String>,
+    /// Icon color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// Project commands (`{ start? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectCommands {
+    /// Startup script run when creating a new workspace (worktree).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+}
+
+/// Project timestamps (ms since epoch; `integer` in the contract).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectTime {
+    /// Creation time.
+    pub created: i64,
+    /// Last-updated time.
+    pub updated: i64,
+    /// Initialization time, if initialized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initialized: Option<i64>,
+}
+
+/// `Project` — an entry of `project.list`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Project {
+    /// Project id.
+    pub id: String,
+    /// Absolute worktree path.
+    pub worktree: String,
+    /// Version-control system (e.g. `"git"`), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<String>,
+    /// Display name, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Icon, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ProjectIcon>,
+    /// Commands, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<ProjectCommands>,
+    /// Timestamps.
+    pub time: ProjectTime,
+    /// Sandbox worktree paths.
+    pub sandboxes: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
