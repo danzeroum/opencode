@@ -138,6 +138,12 @@ pub enum SessionOutcome {
         /// Number of turns executed before suspending.
         steps: usize,
     },
+    /// The run was cancelled after `steps` completed turns — cooperative cancellation observed at a
+    /// step boundary. The runner records a `session.next.interrupt.requested` event and stops cleanly.
+    Cancelled {
+        /// Number of turns completed before cancellation.
+        steps: usize,
+    },
 }
 
 /// The outer, step-limited continuation loop: run turns while each returns [`TurnOutcome::Continue`],

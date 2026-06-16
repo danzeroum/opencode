@@ -9,7 +9,7 @@
 pub mod proxy;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -168,7 +168,7 @@ pub(crate) struct AdmittedPrompt {
 /// one to exercise the coordinator's concurrency in isolation.
 #[async_trait]
 pub(crate) trait TurnRunner: Send + Sync {
-    async fn run(&self, session_id: &str, prompt: AdmittedPrompt);
+    async fn run(&self, session_id: &str, prompt: AdmittedPrompt, cancel: Arc<AtomicBool>);
 }
 
 /// Production [`TurnRunner`]: build the engine + native tools + sink and drive one turn (the same
@@ -180,7 +180,7 @@ struct LiveTurnRunner {
 
 #[async_trait]
 impl TurnRunner for LiveTurnRunner {
-    async fn run(&self, session_id: &str, prompt: AdmittedPrompt) {
+    async fn run(&self, session_id: &str, prompt: AdmittedPrompt, cancel: Arc<AtomicBool>) {
         tracing::info!(session = session_id, model = %prompt.model, "background turn started");
         match drive_one_turn(
             &self.ctx,
@@ -190,6 +190,7 @@ impl TurnRunner for LiveTurnRunner {
             prompt.prompt,
             prompt.system,
             prompt.step_limit,
+            Some(cancel),
         )
         .await
         {
@@ -207,6 +208,8 @@ impl TurnRunner for LiveTurnRunner {
 struct Slot {
     running: bool,
     pending: VecDeque<AdmittedPrompt>,
+    /// Cooperative-cancellation token, shared with the drain task + the runner; set by `cancel`.
+    cancel: Arc<AtomicBool>,
 }
 
 /// Per-session background execution with **wake-coalescing**: an admit spawns a drain task when the
@@ -235,22 +238,33 @@ impl SessionCoordinator {
             return;
         }
         slot.running = true;
+        let cancel = slot.cancel.clone();
         drop(slots);
         self.spawns.fetch_add(1, Ordering::SeqCst);
         let coordinator = self.clone();
-        tokio::spawn(async move { coordinator.drain(runner, session_id).await });
+        tokio::spawn(async move { coordinator.drain(runner, session_id, cancel).await });
     }
 
     /// Drain a session's inbox to completion, then drop the slot and release ownership (so a later
     /// admit respawns).
-    async fn drain(&self, runner: Arc<dyn TurnRunner>, session_id: String) {
+    async fn drain(
+        &self,
+        runner: Arc<dyn TurnRunner>,
+        session_id: String,
+        cancel: Arc<AtomicBool>,
+    ) {
         loop {
             let next = {
                 let mut slots = self.slots.lock().expect("coordinator mutex poisoned");
-                let popped = slots
-                    .get_mut(&session_id)
-                    .and_then(|slot| slot.pending.pop_front());
-                match popped {
+                let slot = match slots.get_mut(&session_id) {
+                    Some(slot) => slot,
+                    None => return,
+                };
+                // A cancel request clears queued work so the session drains to a stop.
+                if cancel.load(Ordering::SeqCst) {
+                    slot.pending.clear();
+                }
+                match slot.pending.pop_front() {
                     Some(prompt) => prompt,
                     None => {
                         // Inbox empty: release ownership atomically under the lock.
@@ -259,7 +273,7 @@ impl SessionCoordinator {
                     }
                 }
             };
-            runner.run(&session_id, next).await;
+            runner.run(&session_id, next, cancel.clone()).await;
         }
     }
 
@@ -267,10 +281,24 @@ impl SessionCoordinator {
     pub fn spawn_count(&self) -> u64 {
         self.spawns.load(Ordering::SeqCst)
     }
+
+    /// Request cooperative cancellation of `session_id`'s in-flight run: sets the token the runner
+    /// checks at each step boundary (and clears the inbox). Returns whether a session slot was found.
+    pub(crate) fn cancel(&self, session_id: &str) -> bool {
+        let slots = self.slots.lock().expect("coordinator mutex poisoned");
+        match slots.get(session_id) {
+            Some(slot) => {
+                slot.cancel.store(true, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Build the engine + native tools + persist-then-announce sink and drive one user turn to completion.
 /// Shared by the synchronous execute route and the background [`LiveTurnRunner`].
+#[allow(clippy::too_many_arguments)]
 async fn drive_one_turn(
     ctx: &AppContext,
     runner: &RunnerServices,
@@ -279,6 +307,7 @@ async fn drive_one_turn(
     prompt: String,
     system: Vec<String>,
     step_limit: usize,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<SessionRun, String> {
     let (provider, model_id) = split_model(model).map_err(|e| e.to_string())?;
     let engine = runner.engines.build(model).map_err(|e| e.to_string())?;
@@ -304,6 +333,7 @@ async fn drive_one_turn(
         runner.gate.as_ref(),
         &session,
         vec![Message::user_text(prompt)],
+        cancel,
     )
     .await
     .map_err(|e| e.to_string())
@@ -376,6 +406,7 @@ async fn rust_session_execute(
         payload.prompt,
         payload.system,
         payload.step_limit,
+        None,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -384,6 +415,7 @@ async fn rust_session_execute(
         SessionOutcome::Completed { steps } => ("completed", *steps),
         SessionOutcome::StepLimitReached { steps } => ("step_limit_reached", *steps),
         SessionOutcome::AwaitingPermission { steps } => ("awaiting_permission", *steps),
+        SessionOutcome::Cancelled { steps } => ("cancelled", *steps),
     };
     let text = run
         .messages
@@ -457,6 +489,19 @@ async fn rust_session_prompt(
         "delivery": "steer",
         "status": "admitted",
     })))
+}
+
+/// `POST /_rust/session/{sessionID}/abort` — internal, gated (`session-prompt`) cooperative
+/// cancellation: sets the session's cancel token so the background runner stops at the next step
+/// boundary, recording `session.next.interrupt.requested`. Returns whether a running session was found.
+/// (The public `session.abort` instance-route cutover is the follow-up PR.)
+async fn rust_session_abort(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let cancelled = state.coordinator.cancel(&session_id);
+    tracing::info!(session = %session_id, cancelled, "session abort requested");
+    Json(serde_json::json!({ "session": session_id, "cancelled": cancelled }))
 }
 
 /// `GET /health` — first contract route cut over natively (gated by the route table).
@@ -1551,6 +1596,7 @@ pub fn build_router(state: ServerState) -> Router {
             "/_rust/session/{sessionID}/prompt",
             post(rust_session_prompt),
         );
+        router = router.route("/_rust/session/{sessionID}/abort", post(rust_session_abort));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -2697,7 +2743,7 @@ mod tests {
 
     #[async_trait]
     impl TurnRunner for ReportingRunner {
-        async fn run(&self, _session_id: &str, prompt: AdmittedPrompt) {
+        async fn run(&self, _session_id: &str, prompt: AdmittedPrompt, _cancel: Arc<AtomicBool>) {
             let _ = self.done.send(prompt.prompt);
         }
     }
@@ -2712,11 +2758,94 @@ mod tests {
 
     #[async_trait]
     impl TurnRunner for BlockingRunner {
-        async fn run(&self, _session_id: &str, prompt: AdmittedPrompt) {
+        async fn run(&self, _session_id: &str, prompt: AdmittedPrompt, _cancel: Arc<AtomicBool>) {
             let _ = self.started.send(prompt.prompt.clone());
             let _permit = self.release.acquire().await.unwrap();
             let _ = self.done.send(prompt.prompt);
         }
+    }
+
+    /// A [`TurnRunner`] that simulates a long run: signals start, cooperatively polls the cancel token
+    /// (as `run_gated` does at step boundaries) until it's set, then signals stop.
+    struct CancelAwareRunner {
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+        stopped: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl TurnRunner for CancelAwareRunner {
+        async fn run(&self, _session_id: &str, _prompt: AdmittedPrompt, cancel: Arc<AtomicBool>) {
+            let _ = self.started.send(());
+            while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            let _ = self.stopped.send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_cancel_stops_a_running_session() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (stopped_tx, mut stopped_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let runner: Arc<dyn TurnRunner> = Arc::new(CancelAwareRunner {
+            started: started_tx,
+            stopped: stopped_tx,
+        });
+        let coord = SessionCoordinator::default();
+
+        coord.admit(runner, "ses".to_string(), admitted("p1"));
+        started_rx.recv().await.unwrap(); // the run started and is polling the cancel token
+
+        assert!(coord.cancel("ses")); // a running session is found and signalled
+        stopped_rx.recv().await.unwrap(); // the runner observed the token and stopped
+
+        // Cancelling an unknown session is a no-op.
+        assert!(!coord.cancel("ses_absent"));
+    }
+
+    #[tokio::test]
+    async fn abort_route_acks_and_is_gated() {
+        use tower::ServiceExt;
+        let abort_request = |session: &str| {
+            axum::extract::Request::builder()
+                .method("POST")
+                .uri(format!("/_rust/session/{session}/abort"))
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        // Group enabled → 200 ack; no running session ⇒ cancelled=false.
+        let on = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session-prompt"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(on)
+            .oneshot(abort_request("ses_x"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["cancelled"], false);
+
+        // Group disabled → proxied → 502.
+        let off = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(off)
+            .oneshot(abort_request("ses_x"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
     }
 
     #[tokio::test]
