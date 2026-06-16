@@ -17,6 +17,7 @@ pub mod eventstream;
 pub mod executor;
 pub mod gemini;
 pub mod openai_chat;
+pub mod openai_responses;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
