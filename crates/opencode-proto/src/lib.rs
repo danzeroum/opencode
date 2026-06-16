@@ -388,6 +388,140 @@ pub struct Project {
     pub sandboxes: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// V2 session prompt contract (`v2.session.prompt` — POST /api/session/{sessionID}/prompt).
+// `Prompt` and the `SessionInput.Admitted` projection mirror `packages/core/src/session/input.ts`
+// and the golden `Prompt` / `SessionInputAdmitted` schemas. These are the request/response/error wire
+// types for the upcoming `/prompt` cutover; that PR wires them to the route and the contract
+// `openapi-diff` (which finalizes the JSON-Schema constraints — `id`/`sessionID` patterns, integer
+// minimums — that don't affect the Rust struct shape or its JSON serialization).
+// ---------------------------------------------------------------------------
+
+/// A source range within the user's raw input that produced an attachment (`{ start, end, text }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct PromptSource {
+    /// Start offset within the raw input.
+    pub start: f64,
+    /// End offset within the raw input.
+    pub end: f64,
+    /// The slice of raw input text.
+    pub text: String,
+}
+
+/// A file/media attachment on a [`Prompt`] (`{ uri, mime, name?, description?, source? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct PromptFileAttachment {
+    /// Resource URI (e.g. `file://…`).
+    pub uri: String,
+    /// MIME type.
+    pub mime: String,
+    /// Display name, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Description, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Where in the raw input this attachment was referenced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<PromptSource>,
+}
+
+/// An agent mention on a [`Prompt`] (`{ name, source? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct PromptAgentAttachment {
+    /// Agent name.
+    pub name: String,
+    /// Where in the raw input this agent was mentioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<PromptSource>,
+}
+
+/// `Prompt` — a user prompt: required `text` plus optional file/media and agent attachments.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct Prompt {
+    /// The prompt text.
+    pub text: String,
+    /// File/media attachments (omitted when absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<PromptFileAttachment>>,
+    /// Agent mentions (omitted when absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<PromptAgentAttachment>>,
+}
+
+/// How an admitted input is folded into the session's turn loop.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Delivery {
+    /// Steer the running turn (the default): folded at the next step boundary.
+    Steer,
+    /// Queue behind the running turn: run after it completes.
+    Queue,
+}
+
+/// `SessionInput.Admitted` — the durable result of admitting a prompt (the `v2.session.prompt` 200
+/// payload). `admittedSeq` is the event sequence of the admission; `promotedSeq` is set once the input
+/// is folded into a turn (absent while pending).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionInputAdmitted {
+    /// Event sequence of the admission.
+    #[serde(rename = "admittedSeq")]
+    pub admitted_seq: i64,
+    /// Message id (`msg_…`).
+    pub id: String,
+    /// Session id (`ses_…`).
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// The admitted prompt.
+    pub prompt: Prompt,
+    /// Delivery semantics.
+    pub delivery: Delivery,
+    /// Admission time (ms since epoch; `number` in the contract).
+    #[serde(rename = "timeCreated")]
+    pub time_created: f64,
+    /// Sequence at which the input was folded into a turn (absent while pending).
+    #[serde(rename = "promotedSeq", skip_serializing_if = "Option::is_none")]
+    pub promoted_seq: Option<i64>,
+}
+
+/// Request body of `v2.session.prompt`: a required `prompt`, an optional caller-supplied message `id`
+/// (generated when omitted), `delivery` (defaults to `steer`), and `resume` (defaults to `true`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionPromptRequest {
+    /// Caller-supplied message id (`msg_…`); generated when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The prompt to admit.
+    pub prompt: Prompt,
+    /// Delivery semantics (defaults to `steer` when omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
+    /// Whether to schedule execution (defaults to `true` when omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<bool>,
+}
+
+/// 200 body of `v2.session.prompt`: `{ data: SessionInputAdmitted }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionPromptResponse {
+    /// The admitted input.
+    pub data: SessionInputAdmitted,
+}
+
+/// `ConflictError` — 409 for `v2.session.prompt` when a different prompt was already admitted under the
+/// same message `id` (`{ _tag, message, resource? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConflictError {
+    /// Always `"ConflictError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+    /// The conflicting resource, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +535,110 @@ mod tests {
         .unwrap();
         assert_eq!(json["_tag"], "BadRequest");
         assert_eq!(json["message"], "boom");
+    }
+
+    #[test]
+    fn prompt_omits_empty_attachment_arrays() {
+        let json = serde_json::to_value(Prompt {
+            text: "hi".into(),
+            files: None,
+            agents: None,
+        })
+        .unwrap();
+        assert_eq!(json, serde_json::json!({ "text": "hi" }));
+    }
+
+    #[test]
+    fn prompt_round_trips_with_attachments() {
+        let prompt = Prompt {
+            text: "see @agent and file".into(),
+            files: Some(vec![PromptFileAttachment {
+                uri: "file:///x".into(),
+                mime: "text/plain".into(),
+                name: Some("x".into()),
+                description: None,
+                source: Some(PromptSource {
+                    start: 9.0,
+                    end: 13.0,
+                    text: "file".into(),
+                }),
+            }]),
+            agents: Some(vec![PromptAgentAttachment {
+                name: "agent".into(),
+                source: None,
+            }]),
+        };
+        let json = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(json["files"][0]["uri"], "file:///x");
+        assert_eq!(json["files"][0]["source"]["start"], 9.0);
+        assert!(json["files"][0].get("description").is_none());
+        assert_eq!(json["agents"][0]["name"], "agent");
+        let back: Prompt = serde_json::from_value(json).unwrap();
+        assert_eq!(back, prompt);
+    }
+
+    #[test]
+    fn delivery_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(Delivery::Steer).unwrap(),
+            serde_json::json!("steer")
+        );
+        assert_eq!(
+            serde_json::to_value(Delivery::Queue).unwrap(),
+            serde_json::json!("queue")
+        );
+        let back: Delivery = serde_json::from_value(serde_json::json!("queue")).unwrap();
+        assert_eq!(back, Delivery::Queue);
+    }
+
+    #[test]
+    fn session_input_admitted_uses_camel_case_and_omits_promoted_when_pending() {
+        let admitted = SessionInputAdmitted {
+            admitted_seq: 3,
+            id: "msg_1".into(),
+            session_id: "ses_1".into(),
+            prompt: Prompt {
+                text: "hi".into(),
+                files: None,
+                agents: None,
+            },
+            delivery: Delivery::Steer,
+            time_created: 1234.0,
+            promoted_seq: None,
+        };
+        let json = serde_json::to_value(&admitted).unwrap();
+        assert_eq!(json["admittedSeq"], 3);
+        assert_eq!(json["sessionID"], "ses_1");
+        assert_eq!(json["timeCreated"], 1234.0);
+        assert_eq!(json["delivery"], "steer");
+        assert!(json.get("promotedSeq").is_none());
+        let back: SessionInputAdmitted = serde_json::from_value(json).unwrap();
+        assert_eq!(back, admitted);
+    }
+
+    #[test]
+    fn session_prompt_request_requires_only_prompt() {
+        // A minimal body (just `prompt`) deserializes with the optional fields defaulting to None.
+        let req: SessionPromptRequest =
+            serde_json::from_value(serde_json::json!({ "prompt": { "text": "hi" } })).unwrap();
+        assert_eq!(req.prompt.text, "hi");
+        assert!(req.id.is_none());
+        assert!(req.delivery.is_none());
+        assert!(req.resume.is_none());
+        // …and re-serializes back to just `{ prompt: { text } }`.
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json, serde_json::json!({ "prompt": { "text": "hi" } }));
+    }
+
+    #[test]
+    fn conflict_error_uses_tag_key() {
+        let json = serde_json::to_value(ConflictError {
+            tag: "ConflictError".into(),
+            message: "already admitted".into(),
+            resource: Some("msg_1".into()),
+        })
+        .unwrap();
+        assert_eq!(json["_tag"], "ConflictError");
+        assert_eq!(json["resource"], "msg_1");
     }
 }
