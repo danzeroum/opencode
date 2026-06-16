@@ -1310,6 +1310,7 @@ name = "opencode-server"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "futures",
