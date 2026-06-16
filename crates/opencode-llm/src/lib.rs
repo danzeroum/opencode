@@ -12,6 +12,8 @@
 //! openai-responses → gemini → bedrock-converse.
 
 pub mod anthropic;
+pub mod bedrock;
+pub mod eventstream;
 pub mod executor;
 pub mod gemini;
 pub mod openai_chat;
@@ -334,13 +336,16 @@ pub fn sse_frames(body: &str) -> Vec<String> {
     frames
 }
 
-/// Run a recorded/streamed SSE `body` through `protocol`, returning the full normalized event stream.
-/// This is the network-free decode pipeline used by the parity tests (and, later, fed live frames by
-/// the transport).
-pub fn decode_sse<P: Protocol>(protocol: &P, body: &str) -> Result<Vec<LlmEvent>, LlmError> {
+/// Drive already-extracted frame payloads through `protocol`'s decode loop, returning the full
+/// normalized event stream. Shared by [`decode_sse`] (text SSE) and [`decode_eventstream`] (AWS binary
+/// framing): the only difference between transports is how the frame payloads are extracted.
+fn decode_frames<P: Protocol>(
+    protocol: &P,
+    frames: Vec<String>,
+) -> Result<Vec<LlmEvent>, LlmError> {
     let mut state = protocol.initial();
     let mut out = Vec::new();
-    for frame in sse_frames(body) {
+    for frame in frames {
         let event = protocol.decode_frame(&frame)?;
         let terminal = protocol.terminal(&event);
         out.extend(protocol.step(&mut state, event));
@@ -350,6 +355,23 @@ pub fn decode_sse<P: Protocol>(protocol: &P, body: &str) -> Result<Vec<LlmEvent>
     }
     out.extend(protocol.on_halt(&state));
     Ok(out)
+}
+
+/// Run a recorded/streamed SSE `body` through `protocol`, returning the full normalized event stream.
+/// This is the network-free decode pipeline used by the parity tests (and, later, fed live frames by
+/// the transport).
+pub fn decode_sse<P: Protocol>(protocol: &P, body: &str) -> Result<Vec<LlmEvent>, LlmError> {
+    decode_frames(protocol, sse_frames(body))
+}
+
+/// Run a recorded/streamed AWS `vnd.amazon.eventstream` body (Bedrock Converse) through `protocol`.
+/// The binary frames are decoded by [`eventstream::frames`] into the same `{"<event-type>": payload}`
+/// JSON the protocol's [`Protocol::decode_frame`] expects, then driven through the shared loop.
+pub fn decode_eventstream<P: Protocol>(
+    protocol: &P,
+    bytes: &[u8],
+) -> Result<Vec<LlmEvent>, LlmError> {
+    decode_frames(protocol, eventstream::frames(bytes)?)
 }
 
 #[cfg(test)]
