@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opencode_db::{DbError, EventStore};
+use opencode_effect::{BusEvent, EventBus};
 use opencode_events::EventInput;
 use opencode_llm::{
     ContentPart, Generation, LlmError, LlmEvent, LlmRequest, Message, Role, ToolChoice,
@@ -385,6 +386,66 @@ impl SessionSink for EventStoreSink {
             .await
             .map_err(|e| RunError::Attempt(format!("persist: {e}")))?;
         *self.head.lock().expect("event sink mutex poisoned") = new_head;
+        Ok(())
+    }
+}
+
+/// A [`SessionSink`] that publishes each event to the in-process [`EventBus`] (scoped to the session's
+/// aggregate), so live consumers — e.g. the SSE `/event` stream — see the run as it happens. Publishing
+/// is fire-and-forget (the bus drops for lagging subscribers rather than blocking the runner), so this
+/// sink never aborts a run.
+pub struct BusSink {
+    bus: Arc<EventBus>,
+    aggregate_id: String,
+}
+
+impl BusSink {
+    /// A bus sink that scopes published events to `aggregate_id`.
+    pub fn new(bus: Arc<EventBus>, aggregate_id: impl Into<String>) -> Self {
+        Self {
+            bus,
+            aggregate_id: aggregate_id.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionSink for BusSink {
+    async fn record(&self, events: Vec<EventInput>) -> Result<(), RunError> {
+        for event in events {
+            self.bus.publish(BusEvent::for_aggregate(
+                event.kind,
+                self.aggregate_id.as_str(),
+                event.data,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Fan one batch out to two sinks: a `primary` (authoritative — its failure aborts the run) followed by
+/// a best-effort `secondary` (its failure is swallowed). The runner uses this to **persist then
+/// announce**: an [`EventStoreSink`] primary + a [`BusSink`] secondary, so nothing is announced on the
+/// bus that failed to persist, and a stalled bus never aborts a run.
+pub struct FanOutSink<A: SessionSink, B: SessionSink> {
+    primary: A,
+    secondary: B,
+}
+
+impl<A: SessionSink, B: SessionSink> FanOutSink<A, B> {
+    /// Fan out to `primary` (authoritative) then `secondary` (best-effort).
+    pub fn new(primary: A, secondary: B) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+#[async_trait]
+impl<A: SessionSink, B: SessionSink> SessionSink for FanOutSink<A, B> {
+    async fn record(&self, events: Vec<EventInput>) -> Result<(), RunError> {
+        // Persist first; a primary failure aborts before anything is announced.
+        self.primary.record(events.clone()).await?;
+        // Then announce best-effort; a secondary failure does not abort the run.
+        let _ = self.secondary.record(events).await;
         Ok(())
     }
 }
@@ -843,5 +904,107 @@ mod tests {
             }
             other => panic!("expected a persist conflict, got {other:?}"),
         }
+    }
+
+    // ---- Event-bus production (fan-out) ----
+
+    #[tokio::test]
+    async fn fans_out_to_store_and_bus() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe(); // subscribe before producing
+        let sink = FanOutSink::new(
+            EventStoreSink::new(store.clone(), "ses_fan").await.unwrap(),
+            BusSink::new(bus.clone(), "ses_fan"),
+        );
+        let engine = ScriptedEngine::new(vec![text_turn("Hi", FinishReason::Stop, usage(5, 2))]);
+        let session = Session::new("claude-haiku-4-5-20251001", 8);
+        run_with_sink(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &session,
+            vec![Message::user_text("hi")],
+        )
+        .await
+        .unwrap();
+
+        // The store persisted the run.
+        let stored = store.read("ses_fan", 0).await.unwrap();
+        assert_eq!(
+            stored.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            vec![
+                event_kinds::ASSISTANT_MESSAGE,
+                event_kinds::SESSION_FINISHED
+            ]
+        );
+
+        // The bus announced the same events, in order, scoped to the session.
+        let mut published = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            assert_eq!(event.aggregate_id.as_deref(), Some("ses_fan"));
+            published.push(event.kind);
+        }
+        assert_eq!(
+            published,
+            vec![
+                event_kinds::ASSISTANT_MESSAGE.to_string(),
+                event_kinds::SESSION_FINISHED.to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn store_failure_aborts_before_bus_publish() {
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe();
+        let sink = FanOutSink::new(
+            EventStoreSink::new(store.clone(), "ses_abort")
+                .await
+                .unwrap(),
+            BusSink::new(bus.clone(), "ses_abort"),
+        );
+        // A concurrent writer advances the aggregate so the store leg conflicts.
+        store
+            .append("ses_abort", 0, vec![EventInput::new("other.1", json!({}))])
+            .await
+            .unwrap();
+        let err = sink
+            .record(vec![EventInput::new(
+                event_kinds::ASSISTANT_MESSAGE,
+                json!({}),
+            )])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Attempt(m) if m.contains("conflict")));
+        // Nothing was announced on the bus (persist-then-announce ordering).
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn secondary_failure_is_soft() {
+        struct FailingSink;
+        #[async_trait]
+        impl SessionSink for FailingSink {
+            async fn record(&self, _events: Vec<EventInput>) -> Result<(), RunError> {
+                Err(RunError::Attempt("secondary boom".into()))
+            }
+        }
+        let store: Arc<dyn EventStore> = Arc::new(MemoryEventStore::new());
+        let sink = FanOutSink::new(
+            EventStoreSink::new(store.clone(), "ses_soft")
+                .await
+                .unwrap(),
+            FailingSink,
+        );
+        // The secondary errors, but the batch still succeeds and the primary persisted it.
+        sink.record(vec![EventInput::new(
+            event_kinds::ASSISTANT_MESSAGE,
+            json!({}),
+        )])
+        .await
+        .unwrap();
+        assert_eq!(store.read("ses_soft", 0).await.unwrap().len(), 1);
     }
 }
