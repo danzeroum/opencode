@@ -12,6 +12,7 @@ opencode-effect.workspace = true
 opencode-core.workspace = true
 opencode-tools.workspace = true
 opencode-db.workspace = true
+opencode-llm.workspace = true
 
 axum.workspace = true
 tower.workspace = true
@@ -28,3 +29,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tempfile.workspace = true
