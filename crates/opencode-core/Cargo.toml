@@ -10,6 +10,7 @@ description = "opencode domain core: sessions, events, permissions, agents, proj
 opencode-proto.workspace = true
 opencode-events.workspace = true
 opencode-effect.workspace = true
+opencode-db.workspace = true
 opencode-llm.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
