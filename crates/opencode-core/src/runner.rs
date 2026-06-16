@@ -173,22 +173,25 @@ pub enum ToolError {
     Cancelled,
 }
 
-/// The settled result of one tool call.
+/// The settled result of one tool call. `T` is the tool task's success payload (the produced output),
+/// defaulting to `String`; the runner's tool path uses `Result<String, String>` so a tool-level error
+/// (fed back to the model) is distinguished from a successful output without tripping the executor's
+/// infrastructure-failure channel ([`ToolError`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolResult {
+pub struct ToolResult<T = String> {
     /// The tool-call id.
     pub id: String,
     /// `Ok(output)` on success, else why it didn't settle.
-    pub outcome: Result<String, ToolError>,
+    pub outcome: Result<T, ToolError>,
 }
 
 /// What [`ToolExecutor::drain`] observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DrainOutcome {
+pub enum DrainOutcome<T = String> {
     /// Every spawned tool completed successfully.
-    AllSettled(Vec<ToolResult>),
+    AllSettled(Vec<ToolResult<T>>),
     /// A tool failed; remaining tools are still pending (the caller should [`ToolExecutor::cancel_all`]).
-    Failed(ToolResult),
+    Failed(ToolResult<T>),
 }
 
 /// Explicit lifecycle for streaming tool calls — the Rust analog of the runner's `FiberSet`.
@@ -196,17 +199,17 @@ pub enum DrainOutcome {
 /// Tools are spawned as they stream in ([`spawn`](ToolExecutor::spawn)); [`drain`](ToolExecutor::drain)
 /// is `raceFirst(join, awaitEmpty)` (return on the first failure, else when all have settled); and
 /// [`cancel_all`](ToolExecutor::cancel_all) is `FiberSet.clear` (abort the rest on interrupt/failure).
-pub struct ToolExecutor {
-    set: JoinSet<ToolResult>,
+pub struct ToolExecutor<T = String> {
+    set: JoinSet<ToolResult<T>>,
 }
 
-impl Default for ToolExecutor {
+impl<T: Send + 'static> Default for ToolExecutor<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ToolExecutor {
+impl<T: Send + 'static> ToolExecutor<T> {
     /// Create an empty executor.
     pub fn new() -> Self {
         Self {
@@ -217,7 +220,7 @@ impl ToolExecutor {
     /// Spawn a tool call. `fut` resolves to the tool's output (or a [`ToolError`]).
     pub fn spawn<F>(&mut self, id: impl Into<String>, fut: F)
     where
-        F: Future<Output = Result<String, ToolError>> + Send + 'static,
+        F: Future<Output = Result<T, ToolError>> + Send + 'static,
     {
         let id = id.into();
         self.set.spawn(async move {
@@ -238,7 +241,7 @@ impl ToolExecutor {
 
     /// Drain settled tools, returning on the **first failure** (leaving the rest pending) or once
     /// **all** have settled successfully — `raceFirst(FiberSet.join, FiberSet.awaitEmpty)`.
-    pub async fn drain(&mut self) -> DrainOutcome {
+    pub async fn drain(&mut self) -> DrainOutcome<T> {
         let mut settled = Vec::new();
         while let Some(joined) = self.set.join_next().await {
             match joined {

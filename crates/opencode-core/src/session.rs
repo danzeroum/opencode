@@ -310,22 +310,41 @@ pub async fn run_gated(
             .collect();
         let outputs = run_tools(&tools, &allowed).await?;
 
-        // Each call's result (executed output for allowed calls, the denial reason for denied ones — fed
-        // back so the model sees what happened) becomes a `tool.success` event. The success/failed
-        // distinction is a later increment (tool errors currently surface in the result text).
+        // Each call's result is fed back so the model sees what happened: a successful tool (or a
+        // denial) becomes a `tool.success` event; an executed tool that errored becomes a `tool.failed`
+        // event (its message also surfaces in the model-facing result text, prefixed `Tool error:`).
         let mut results = Vec::with_capacity(calls.len());
         for (call, decision) in calls.iter().zip(&decisions) {
-            let result = match decision {
-                Decision::Deny(reason) => format!("Permission denied: {reason}"),
+            // A denial (fed back as the result) and a successful tool both settle as `Ok`; only an
+            // executed tool that returned an error is `Err(message)`.
+            let outcome: Result<String, String> = match decision {
+                Decision::Deny(reason) => Ok(format!("Permission denied: {reason}")),
                 // `Allow` (`Ask` is handled above).
-                _ => outputs.get(&call.id).cloned().unwrap_or_default(),
+                _ => match outputs.get(&call.id) {
+                    Some(output) => output.clone(),
+                    None => Ok(String::new()),
+                },
             };
-            batch.push(tool_success_event(
-                &session.id,
-                &message_id,
-                &call.id,
-                &result,
-            ));
+            let result = match outcome {
+                Ok(text) => {
+                    batch.push(tool_success_event(
+                        &session.id,
+                        &message_id,
+                        &call.id,
+                        &text,
+                    ));
+                    text
+                }
+                Err(message) => {
+                    batch.push(tool_failed_event(
+                        &session.id,
+                        &message_id,
+                        &call.id,
+                        &message,
+                    ));
+                    format!("Tool error: {message}")
+                }
+            };
             results.push(ContentPart::ToolResult {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -392,23 +411,21 @@ fn fold_turn(
 async fn run_tools(
     tools: &Arc<dyn ToolBox>,
     calls: &[&ToolCallRecord],
-) -> Result<HashMap<String, String>, RunError> {
-    let mut exec = ToolExecutor::new();
+) -> Result<HashMap<String, Result<String, String>>, RunError> {
+    let mut exec = ToolExecutor::<Result<String, String>>::new();
     for call in calls {
         let tools = tools.clone();
         let name = call.name.clone();
         let input = call.input.clone();
         exec.spawn(call.id.clone(), async move {
-            // Tool-level errors settle as `Ok` here (they are fed back to the model); the executor's
-            // error channel is reserved for infrastructure failures (a panicking task).
-            Ok(match tools.invoke(&name, input).await {
-                Ok(output) => output,
-                Err(message) => format!("Tool error: {message}"),
-            })
+            // A tool-level error settles as `Ok(Err(message))` — fed back to the model and surfaced as
+            // a `tool.failed` event; the executor's `ToolError` channel stays reserved for
+            // infrastructure failures (a panicking task).
+            Ok(tools.invoke(&name, input).await)
         });
     }
 
-    let mut outputs: HashMap<String, String> = HashMap::new();
+    let mut outputs: HashMap<String, Result<String, String>> = HashMap::new();
     match exec.drain().await {
         DrainOutcome::AllSettled(results) => {
             for result in results {
@@ -462,6 +479,8 @@ pub mod event_kinds {
     pub const TOOL_CALLED: &str = "session.next.tool.called";
     /// A tool call settled successfully — `data`: the `EventSessionNextToolSuccess` properties.
     pub const TOOL_SUCCESS: &str = "session.next.tool.success";
+    /// A tool call settled with an error — `data`: the `EventSessionNextToolFailed` properties.
+    pub const TOOL_FAILED: &str = "session.next.tool.failed";
     /// Cancellation requested for the session — `data`: the `EventSessionNextInterruptRequested`
     /// properties (`timestamp` + `sessionID`).
     pub const INTERRUPT_REQUESTED: &str = "session.next.interrupt.requested";
@@ -658,6 +677,29 @@ fn tool_success_event(
             "structured": {},
             "content": [{ "type": "text", "text": result }],
             "result": result,
+            "provider": { "executed": false },
+        }),
+    )
+}
+
+/// `session.next.tool.failed` — an executed tool call settled with an error. The message is fed back to
+/// the model as the tool result (prefixed `Tool error:`); here it is surfaced structurally in `error`
+/// (the contract's `EventSessionNextToolFailed`, an `UnknownError`).
+fn tool_failed_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    error: &str,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::TOOL_FAILED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "callID": call_id,
+            "error": { "type": "unknown", "message": error },
+            "result": error,
             "provider": { "executed": false },
         }),
     )
@@ -1046,6 +1088,61 @@ mod tests {
         // The next step is a distinct assistant message.
         let msg1 = events[6].data["assistantMessageID"].as_str().unwrap();
         assert_ne!(msg0, msg1);
+    }
+
+    #[tokio::test]
+    async fn tool_error_emits_tool_failed_event() {
+        // The model calls a tool the toolbox rejects; the errored call must settle as `tool.failed`
+        // (not `tool.success`), and the error is fed back so the next step recovers.
+        let engine = ScriptedEngine::new(vec![
+            tool_turn("call_1", "explode", json!({}), usage(10, 5)),
+            text_turn("Recovered.", FinishReason::Stop, usage(20, 4)),
+        ]);
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.id = "ses_f".into();
+        session.tools = vec![ToolDefinition {
+            name: "explode".into(),
+            description: None,
+            input_schema: json!({ "type": "object" }),
+        }];
+        let sink = RecordingSink::default();
+        let run = run_with_sink(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &session,
+            vec![Message::user_text("go")],
+        )
+        .await
+        .unwrap();
+        // The error is fed back as the tool result, so the second step completes the run.
+        assert_eq!(run.outcome, SessionOutcome::Completed { steps: 2 });
+
+        let events = sink.events.lock().unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "session.next.step.started",
+                "session.next.tool.input.started",
+                "session.next.tool.input.ended",
+                "session.next.tool.called",
+                "session.next.tool.failed",
+                "session.next.step.ended",
+                "session.next.step.started",
+                "session.next.text.started",
+                "session.next.text.ended",
+                "session.next.step.ended",
+            ]
+        );
+
+        // The failed event carries the contract-faithful `UnknownError` payload + the shared envelope.
+        let failed = &events[4].data;
+        assert_eq!(failed["callID"], "call_1");
+        assert_eq!(failed["error"]["type"], "unknown");
+        assert_eq!(failed["error"]["message"], "unknown tool: explode");
+        assert_eq!(failed["result"], "unknown tool: explode");
+        assert_eq!(failed["provider"]["executed"], false);
     }
 
     #[tokio::test]
