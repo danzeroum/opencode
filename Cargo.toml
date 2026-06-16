@@ -61,6 +61,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 async-trait = "0.1"
 ulid = "1"
+# base64url for the opaque keyset pagination cursor (zero-dependency, MIT/Apache).
+base64 = "0.22"
 jsonc-parser = { version = "0.26", features = ["serde"] }
 # Search/glob — the ripgrep libraries (identical ignore/match semantics to ripgrep.ts).
 ignore = "0.4"

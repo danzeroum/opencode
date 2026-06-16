@@ -276,13 +276,36 @@ const SESSION_RECORD_COLS: &str = "id, project_id, parent_id, agent, model, cost
      tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, title, directory, \
      workspace_id, path, time_created, time_updated, time_archived";
 
+/// Pagination direction within a keyset cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ListDirection {
+    /// The page after the anchor (default).
+    #[default]
+    Next,
+    /// The page before the anchor.
+    Previous,
+}
+
+/// A keyset pagination anchor: the `(time_created, id)` position to page from, plus the direction.
+/// Mirrors the TS `ListAnchor` (`session.ts`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListAnchor {
+    /// Anchor session id (the `id` tiebreaker).
+    pub id: String,
+    /// Anchor `time_created` (ms).
+    pub time: i64,
+    /// Page before or after the anchor.
+    pub direction: ListDirection,
+}
+
 /// Filters/ordering for [`SessionStore::list`]. All filters are optional (`None` = no filter).
 #[derive(Debug, Clone, Default)]
 pub struct SessionListQuery {
     /// Max rows to return (`None` = no limit).
     pub limit: Option<i64>,
     /// Order by `time_created` (then `id`) descending — most-recent first — when `true`; ascending
-    /// otherwise.
+    /// otherwise. (The requested order; for a `Previous` anchor the query is flipped internally.)
     pub descending: bool,
     /// ASCII-case-insensitive substring match on `title`.
     pub search: Option<String>,
@@ -290,6 +313,31 @@ pub struct SessionListQuery {
     pub project: Option<String>,
     /// Restrict to a workspace id.
     pub workspace: Option<String>,
+    /// Restrict to a directory.
+    pub directory: Option<String>,
+    /// Keyset anchor for cursor pagination (`None` = first page).
+    pub anchor: Option<ListAnchor>,
+}
+
+impl SessionListQuery {
+    /// Whether this query pages *before* its anchor.
+    fn is_previous(&self) -> bool {
+        matches!(
+            self.anchor.as_ref().map(|a| a.direction),
+            Some(ListDirection::Previous)
+        )
+    }
+
+    /// The effective sort order applied to the SQL/in-memory query: a `Previous` anchor flips the
+    /// requested order (then results are reversed back), so the page is the rows immediately before
+    /// the anchor in the requested order.
+    fn effective_descending(&self) -> bool {
+        if self.is_previous() {
+            !self.descending
+        } else {
+            self.descending
+        }
+    }
 }
 
 /// Read-only store over the `session` projection table.
@@ -357,9 +405,13 @@ impl SessionStore for SqlxSessionStore {
     }
 
     async fn list(&self, query: &SessionListQuery) -> Result<Vec<SessionRecord>, DbError> {
+        let descending = query.effective_descending();
         // Build the filter clause dynamically, then bind in the same order.
         let mut sql = format!("SELECT {SESSION_RECORD_COLS} FROM session");
         let mut conds: Vec<&str> = Vec::new();
+        if query.directory.is_some() {
+            conds.push("directory = ?");
+        }
         if query.project.is_some() {
             conds.push("project_id = ?");
         }
@@ -369,11 +421,19 @@ impl SessionStore for SqlxSessionStore {
         if query.search.is_some() {
             conds.push("title LIKE ?");
         }
+        if query.anchor.is_some() {
+            // Keyset boundary on `(time_created, id)` relative to the anchor.
+            conds.push(if descending {
+                "(time_created < ? OR (time_created = ? AND id < ?))"
+            } else {
+                "(time_created > ? OR (time_created = ? AND id > ?))"
+            });
+        }
         if !conds.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&conds.join(" AND "));
         }
-        sql.push_str(if query.descending {
+        sql.push_str(if descending {
             " ORDER BY time_created DESC, id DESC"
         } else {
             " ORDER BY time_created ASC, id ASC"
@@ -383,6 +443,9 @@ impl SessionStore for SqlxSessionStore {
         }
 
         let mut q = sqlx::query(&sql);
+        if let Some(d) = &query.directory {
+            q = q.bind(d);
+        }
         if let Some(p) = &query.project {
             q = q.bind(p);
         }
@@ -392,12 +455,20 @@ impl SessionStore for SqlxSessionStore {
         if let Some(s) = &query.search {
             q = q.bind(format!("%{s}%"));
         }
+        if let Some(a) = &query.anchor {
+            q = q.bind(a.time).bind(a.time).bind(&a.id);
+        }
         if let Some(l) = query.limit {
             q = q.bind(l);
         }
 
         let rows = q.fetch_all(&self.pool).await?;
-        rows.iter().map(record_from_row).collect()
+        let mut records: Vec<SessionRecord> =
+            rows.iter().map(record_from_row).collect::<Result<_, _>>()?;
+        if query.is_previous() {
+            records.reverse();
+        }
+        Ok(records)
     }
 }
 
@@ -434,12 +505,14 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn list(&self, query: &SessionListQuery) -> Result<Vec<SessionRecord>, DbError> {
+        let descending = query.effective_descending();
         let search = query.search.as_ref().map(|s| s.to_lowercase());
         let mut rows: Vec<SessionRecord> = self
             .rows
             .lock()
             .expect("session store mutex poisoned")
             .values()
+            .filter(|r| query.directory.as_ref().is_none_or(|d| &r.directory == d))
             .filter(|r| query.project.as_ref().is_none_or(|p| &r.project_id == p))
             .filter(|r| {
                 query
@@ -454,12 +527,25 @@ impl SessionStore for MemorySessionStore {
             })
             .cloned()
             .collect();
+        // Keyset boundary relative to the anchor, in the effective order.
+        if let Some(a) = &query.anchor {
+            rows.retain(|r| {
+                if descending {
+                    (r.time_created, r.id.as_str()) < (a.time, a.id.as_str())
+                } else {
+                    (r.time_created, r.id.as_str()) > (a.time, a.id.as_str())
+                }
+            });
+        }
         rows.sort_by(|a, b| (a.time_created, &a.id).cmp(&(b.time_created, &b.id)));
-        if query.descending {
+        if descending {
             rows.reverse();
         }
         if let Some(limit) = query.limit {
             rows.truncate(limit.max(0) as usize);
+        }
+        if query.is_previous() {
+            rows.reverse();
         }
         Ok(rows)
     }
@@ -777,5 +863,130 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ids(store.list(&search).await.unwrap()), ["ses_a", "ses_c"]);
+    }
+
+    #[tokio::test]
+    async fn sqlx_session_store_keyset_pagination() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        sqlx::query(SESSION_PROJECTION_DDL)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        for i in 1..=5 {
+            sqlx::query(
+                "INSERT INTO session (id, project_id, title, directory, time_created, time_updated) \
+                 VALUES (?, 'prj_1', 'S', '/r', ?, ?)",
+            )
+            .bind(format!("ses_{i}"))
+            .bind(i * 100)
+            .bind(i * 100)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        let store = SqlxSessionStore::new(db.pool().clone());
+        let ids = |rs: &[SessionRecord]| rs.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+
+        // Page 1: newest first, two per page.
+        let page1 = store
+            .list(&SessionListQuery {
+                descending: true,
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&page1), ["ses_5", "ses_4"]);
+
+        // Page 2: anchored "next" from the last row of page 1.
+        let last = page1.last().unwrap();
+        let page2 = store
+            .list(&SessionListQuery {
+                descending: true,
+                limit: Some(2),
+                anchor: Some(ListAnchor {
+                    id: last.id.clone(),
+                    time: last.time_created,
+                    direction: ListDirection::Next,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&page2), ["ses_3", "ses_2"]);
+
+        // "previous" from the first row of page 2 returns page 1's rows in the requested (desc) order.
+        let first2 = page2.first().unwrap();
+        let prev = store
+            .list(&SessionListQuery {
+                descending: true,
+                limit: Some(2),
+                anchor: Some(ListAnchor {
+                    id: first2.id.clone(),
+                    time: first2.time_created,
+                    direction: ListDirection::Previous,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&prev), ["ses_5", "ses_4"]);
+    }
+
+    #[tokio::test]
+    async fn memory_session_store_keyset_matches_sqlx() {
+        let store = MemorySessionStore::new();
+        for i in 1..=5 {
+            let mut r = SessionRecord {
+                id: format!("ses_{i}"),
+                project_id: "prj_1".into(),
+                parent_id: None,
+                agent: None,
+                model: None,
+                cost: 0.0,
+                tokens_input: 0,
+                tokens_output: 0,
+                tokens_reasoning: 0,
+                tokens_cache_read: 0,
+                tokens_cache_write: 0,
+                title: "S".into(),
+                directory: "/r".into(),
+                workspace_id: None,
+                path: None,
+                time_created: 0,
+                time_updated: 0,
+                time_archived: None,
+            };
+            r.time_created = i * 100;
+            store.insert(r);
+        }
+        let ids = |rs: &[SessionRecord]| rs.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        let page1 = store
+            .list(&SessionListQuery {
+                descending: true,
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&page1), ["ses_5", "ses_4"]);
+        let last = page1.last().unwrap();
+        let page2 = store
+            .list(&SessionListQuery {
+                descending: true,
+                limit: Some(2),
+                anchor: Some(ListAnchor {
+                    id: last.id.clone(),
+                    time: last.time_created,
+                    direction: ListDirection::Next,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&page2), ["ses_3", "ses_2"]);
     }
 }

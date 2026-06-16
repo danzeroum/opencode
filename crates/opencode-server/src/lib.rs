@@ -429,11 +429,16 @@ async fn v2_session_get(
     }
 }
 
-/// Error responder for `v2.session.list`: a contract-shaped 400 `InvalidRequestError` (one arm of the
-/// golden 400 union), or a generic 500 envelope if the store read fails.
+/// Default page size when `limit` is omitted (mirrors TS `DefaultSessionsLimit`).
+const DEFAULT_SESSIONS_LIMIT: i64 = 50;
+
+/// Error responder for `v2.session.list`, producing the golden 400 union arms (`InvalidRequestError`
+/// for a bad param, `InvalidCursorError` for an undecodable cursor) or a generic 500 envelope.
 pub enum SessionListFailure {
-    /// Invalid query parameter (400).
+    /// Invalid query parameter (400 `InvalidRequestError`).
     BadRequest(String),
+    /// Undecodable pagination cursor (400 `InvalidCursorError`).
+    InvalidCursor,
     /// Store read failed (500).
     Internal(String),
 }
@@ -451,6 +456,14 @@ impl axum::response::IntoResponse for SessionListFailure {
                 }),
             )
                 .into_response(),
+            SessionListFailure::InvalidCursor => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidCursorError {
+                    tag: "InvalidCursorError".to_string(),
+                    message: "Invalid cursor".to_string(),
+                }),
+            )
+                .into_response(),
             SessionListFailure::Internal(message) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(opencode_proto::ErrorEnvelope {
@@ -463,10 +476,43 @@ impl axum::response::IntoResponse for SessionListFailure {
     }
 }
 
+/// Decoded payload of the opaque `v2.session.list` cursor: the filters/order to preserve across
+/// pages, plus the keyset anchor. base64url(JSON) of this is the opaque token. This is a Rust-native
+/// format (not byte-interchangeable with TS cursors mid-pagination — a documented rollback caveat);
+/// the pagination *behavior* matches TS (`session.ts` keyset).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CursorPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory: Option<String>,
+    anchor: opencode_db::ListAnchor,
+}
+
+fn encode_cursor(payload: &CursorPayload) -> String {
+    use base64::Engine;
+    let json = serde_json::to_vec(payload).unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+fn decode_cursor(raw: &str) -> Result<CursorPayload, SessionListFailure> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| SessionListFailure::InvalidCursor)?;
+    serde_json::from_slice(&bytes).map_err(|_| SessionListFailure::InvalidCursor)
+}
+
 /// `GET /api/session` — list sessions (group `session`). Matches the golden `v2.session.list`:
-/// 200 `SessionsResponse`, 400 union, 401. Reads the shared `session` projection table with
-/// `limit`/`order`/`search`/`project`/`workspace` filters. Opaque keyset cursors are a follow-up, so
-/// the `cursor` object is currently always returned empty (its fields are optional in the contract).
+/// 200 `SessionsResponse`, 400 union (`InvalidCursorError`/`InvalidRequestError`), 401. Reads the
+/// shared `session` projection table with `limit`/`order`/`search`/`project`/`workspace`/`directory`
+/// filters and keyset cursor pagination (`previous`/`next`), defaulting to 50 rows.
 #[utoipa::path(
     get,
     path = "/api/session",
@@ -474,9 +520,10 @@ impl axum::response::IntoResponse for SessionListFailure {
     params(
         ("workspace" = Option<String>, Query, description = "Filter by workspace id"),
         ("project" = Option<String>, Query, description = "Filter by project id"),
+        ("directory" = Option<String>, Query, description = "Filter by directory"),
         ("search" = Option<String>, Query, description = "Title substring (case-insensitive)"),
         ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
-        ("limit" = Option<i64>, Query, description = "Max results"),
+        ("limit" = Option<i64>, Query, description = "Max results (default 50)"),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor")
     ),
     responses(
@@ -490,7 +537,38 @@ async fn v2_session_list(
     State(state): State<ServerState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::SessionsResponse>, SessionListFailure> {
-    let descending = match params.get("order").map(String::as_str) {
+    let pick = |key: &str| params.get(key).filter(|s| !s.is_empty()).cloned();
+    // `limit` always comes from the request (the cursor omits it), defaulting to 50.
+    let limit = match params.get("limit") {
+        None => DEFAULT_SESSIONS_LIMIT,
+        Some(s) => s.parse::<i64>().map_err(|_| {
+            SessionListFailure::BadRequest(format!("limit must be an integer: {s}"))
+        })?,
+    };
+
+    // A cursor supplies the filters/order + anchor; otherwise read them from the query params.
+    let (order, search, project, workspace, directory, anchor) = match pick("cursor") {
+        Some(raw) => {
+            let c = decode_cursor(&raw)?;
+            (
+                c.order,
+                c.search,
+                c.project,
+                c.workspace,
+                c.directory,
+                Some(c.anchor),
+            )
+        }
+        None => (
+            pick("order"),
+            pick("search"),
+            pick("project"),
+            pick("workspace"),
+            pick("directory"),
+            None,
+        ),
+    };
+    let descending = match order.as_deref() {
         None | Some("desc") => true,
         Some("asc") => false,
         Some(other) => {
@@ -499,19 +577,15 @@ async fn v2_session_list(
             )))
         }
     };
-    let limit = match params.get("limit") {
-        None => None,
-        Some(s) => Some(s.parse::<i64>().map_err(|_| {
-            SessionListFailure::BadRequest(format!("limit must be an integer: {s}"))
-        })?),
-    };
-    let pick = |key: &str| params.get(key).filter(|s| !s.is_empty()).cloned();
+
     let query = opencode_db::SessionListQuery {
-        limit,
+        limit: Some(limit),
         descending,
-        search: pick("search"),
-        project: pick("project"),
-        workspace: pick("workspace"),
+        search: search.clone(),
+        project: project.clone(),
+        workspace: workspace.clone(),
+        directory: directory.clone(),
+        anchor,
     };
     let records = state
         .ctx
@@ -519,11 +593,35 @@ async fn v2_session_list(
         .list(&query)
         .await
         .map_err(|e| SessionListFailure::Internal(e.to_string()))?;
+
+    // Build adjacent-page cursors from the first/last rows (same filters/order, new anchor).
+    let order_field = if descending { "desc" } else { "asc" };
+    let make_cursor = |record: &opencode_db::SessionRecord,
+                       direction: opencode_db::ListDirection| {
+        encode_cursor(&CursorPayload {
+            order: Some(order_field.to_string()),
+            search: search.clone(),
+            project: project.clone(),
+            workspace: workspace.clone(),
+            directory: directory.clone(),
+            anchor: opencode_db::ListAnchor {
+                id: record.id.clone(),
+                time: record.time_created,
+                direction,
+            },
+        })
+    };
+    let cursor = opencode_proto::SessionCursor {
+        previous: records
+            .first()
+            .map(|r| make_cursor(r, opencode_db::ListDirection::Previous)),
+        next: records
+            .last()
+            .map(|r| make_cursor(r, opencode_db::ListDirection::Next)),
+    };
+
     let data = records.into_iter().map(session_record_to_info).collect();
-    Ok(Json(opencode_proto::SessionsResponse {
-        data,
-        cursor: opencode_proto::SessionCursor::default(),
-    }))
+    Ok(Json(opencode_proto::SessionsResponse { data, cursor }))
 }
 
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
@@ -1046,5 +1144,80 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["_tag"], "InvalidRequestError");
+    }
+
+    #[tokio::test]
+    async fn v2_session_list_cursor_paginates() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        for (id, t) in [("ses_a", 100), ("ses_b", 200), ("ses_c", 300)] {
+            let mut r = test_session_record(id);
+            r.time_created = t;
+            sessions.insert(r);
+        }
+        let state = ServerState {
+            ctx: AppContext::new(Arc::new(opencode_db::MemoryEventStore::new()), sessions),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let app = build_router(state);
+
+        let read = |app: axum::Router, uri: String| async move {
+            let resp = app
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        // Page 1: newest first, one per page.
+        let p1 = read(app.clone(), "/api/session?limit=1".to_string()).await;
+        assert_eq!(p1["data"].as_array().unwrap().len(), 1);
+        assert_eq!(p1["data"][0]["id"], "ses_c");
+        let next = p1["cursor"]["next"].as_str().unwrap().to_string();
+
+        // Page 2: follow the `next` cursor → the second-newest session.
+        let p2 = read(app.clone(), format!("/api/session?limit=1&cursor={next}")).await;
+        assert_eq!(p2["data"][0]["id"], "ses_b");
+
+        // The `previous` cursor from page 2 returns page 1.
+        let prev = p2["cursor"]["previous"].as_str().unwrap().to_string();
+        let back = read(app, format!("/api/session?limit=1&cursor={prev}")).await;
+        assert_eq!(back["data"][0]["id"], "ses_c");
+    }
+
+    #[tokio::test]
+    async fn v2_session_list_invalid_cursor_is_invalid_cursor_error() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        // Valid base64url ("aGVsbG8" = "hello") but not a JSON cursor payload.
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session?cursor=aGVsbG8")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "InvalidCursorError");
     }
 }
