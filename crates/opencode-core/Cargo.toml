@@ -13,6 +13,7 @@ opencode-effect.workspace = true
 opencode-db.workspace = true
 opencode-llm.workspace = true
 opencode-tools.workspace = true
+opencode-config.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true
