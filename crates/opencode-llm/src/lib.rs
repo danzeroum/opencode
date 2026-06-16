@@ -123,8 +123,12 @@ pub enum LlmError {
 
 /// A provider-family protocol pipeline. This increment covers the **decode** side: parse one frame
 /// into a provider [`Event`](Protocol::Event), fold it into [`State`](Protocol::State) emitting
-/// normalized [`LlmEvent`]s, and detect termination. (Body construction + transport land next.)
+/// normalized [`LlmEvent`]s, and detect termination — plus the **request** side
+/// ([`build_body`](Protocol::build_body)). The reqwest/SSE transport that ties them together lands
+/// next.
 pub trait Protocol {
+    /// The provider-native request body (serialized to JSON by the transport).
+    type Body: serde::Serialize;
     /// The provider-native event decoded from one frame (e.g. an Anthropic SSE event).
     type Event;
     /// The streaming accumulator (open blocks, tool buffers, usage).
@@ -132,6 +136,9 @@ pub trait Protocol {
 
     /// Stable protocol id, e.g. `"anthropic-messages"`.
     fn name(&self) -> &'static str;
+
+    /// Lower a normalized [`LlmRequest`] to the provider-native request body (`body.from`).
+    fn build_body(&self, request: &LlmRequest) -> Result<Self::Body, LlmError>;
 
     /// The initial streaming state.
     fn initial(&self) -> Self::State;
@@ -144,6 +151,129 @@ pub trait Protocol {
 
     /// Whether `event` terminates the stream.
     fn terminal(&self, event: &Self::Event) -> bool;
+}
+
+/// A normalized LLM request (`packages/llm/src/schema/messages.ts` `LLMRequest`) — the core subset:
+/// model, system text, conversation messages, tools, tool choice, and generation params. Media /
+/// reasoning / cache parts and provider options are deferred to a later increment.
+#[derive(Debug, Clone, Default)]
+pub struct LlmRequest {
+    /// Model id (provider-native, e.g. `"claude-haiku-4-5-20251001"`).
+    pub model: String,
+    /// System prompt parts (each becomes a system text block).
+    pub system: Vec<String>,
+    /// Conversation messages.
+    pub messages: Vec<Message>,
+    /// Tool definitions offered to the model.
+    pub tools: Vec<ToolDefinition>,
+    /// Tool-choice policy.
+    pub tool_choice: Option<ToolChoice>,
+    /// Generation parameters.
+    pub generation: Generation,
+}
+
+/// One conversation message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Message {
+    /// The message author.
+    pub role: Role,
+    /// Ordered content parts.
+    pub content: Vec<ContentPart>,
+}
+
+impl Message {
+    /// A user message with a single text part.
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![ContentPart::Text(text.into())],
+        }
+    }
+
+    /// An assistant message with a single text part.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: vec![ContentPart::Text(text.into())],
+        }
+    }
+}
+
+/// A message author (`packages/llm` message roles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// System role.
+    System,
+    /// End user.
+    User,
+    /// The model.
+    Assistant,
+    /// A tool result author.
+    Tool,
+}
+
+/// A message content part (core subset).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentPart {
+    /// Plain text.
+    Text(String),
+    /// A tool call the assistant requested.
+    ToolCall {
+        /// Tool-call id.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// Arguments.
+        input: serde_json::Value,
+    },
+    /// A tool result fed back to the model.
+    ToolResult {
+        /// The tool-call id this result is for.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// The result payload.
+        result: serde_json::Value,
+    },
+}
+
+/// A tool definition offered to the model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDefinition {
+    /// Tool name.
+    pub name: String,
+    /// Human/model-facing description.
+    pub description: Option<String>,
+    /// JSON Schema for the tool's arguments.
+    pub input_schema: serde_json::Value,
+}
+
+/// Tool-choice policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolChoice {
+    /// The model decides.
+    Auto,
+    /// No tools.
+    None,
+    /// The model must call some tool.
+    Required,
+    /// The model must call this specific tool.
+    Tool(String),
+}
+
+/// Generation parameters (`packages/llm` `GenerationOptions`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Generation {
+    /// Max output tokens (providers that require it default it when `None`).
+    pub max_tokens: Option<u64>,
+    /// Sampling temperature.
+    pub temperature: Option<f64>,
+    /// Nucleus sampling.
+    pub top_p: Option<f64>,
+    /// Top-k sampling.
+    pub top_k: Option<u64>,
+    /// Stop sequences.
+    pub stop: Vec<String>,
 }
 
 /// Extract SSE `data:` payloads from a raw event-stream body (`packages/llm` `sseFraming`): events
