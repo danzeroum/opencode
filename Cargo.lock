@@ -1229,9 +1229,12 @@ dependencies = [
 name = "opencode-llm"
 version = "0.0.0"
 dependencies = [
+ "axum",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

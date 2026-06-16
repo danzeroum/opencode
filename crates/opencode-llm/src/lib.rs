@@ -12,6 +12,7 @@
 //! openai-responses → gemini → bedrock-converse.
 
 pub mod anthropic;
+pub mod transport;
 
 use serde::{Deserialize, Serialize};
 
@@ -113,12 +114,25 @@ pub enum LlmEvent {
     },
 }
 
-/// Errors decoding a protocol stream.
+/// Errors building, sending, or decoding a protocol stream.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     /// A frame could not be parsed into the protocol's event type.
     #[error("failed to decode frame: {0}")]
     Decode(String),
+    /// A network/transport error reaching the provider.
+    #[error("http transport error: {0}")]
+    Http(String),
+    /// The provider returned a non-success HTTP status.
+    #[error("provider returned status {code}: {message}")]
+    Status {
+        /// HTTP status code.
+        code: u16,
+        /// Whether the request is worth retrying (the executor uses this; Phase 3 follow-up).
+        retryable: bool,
+        /// Response body / error message.
+        message: String,
+    },
 }
 
 /// A provider-family protocol pipeline. This increment covers the **decode** side: parse one frame
