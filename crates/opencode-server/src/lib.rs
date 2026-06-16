@@ -801,6 +801,225 @@ async fn v2_session_get(
     }
 }
 
+/// Wall-clock time in milliseconds since the epoch (the contract's `timestamp` / `timeCreated`).
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+/// Error responder for `v2.session.prompt`: a contract-shaped 404 `SessionNotFoundError`, a 409
+/// `ConflictError`, or a generic 500 envelope.
+pub enum SessionPromptError {
+    /// No session with that id (404).
+    NotFound(String),
+    /// An optimistic-concurrency conflict that didn't settle after retries (409 `ConflictError`).
+    Conflict(String),
+    /// Store/runner failure (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for SessionPromptError {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::StatusCode;
+        match self {
+            SessionPromptError::NotFound(id) => (
+                StatusCode::NOT_FOUND,
+                Json(opencode_proto::SessionNotFoundError {
+                    tag: "SessionNotFoundError".to_string(),
+                    message: format!("Session {id} not found"),
+                    session_id: id,
+                }),
+            )
+                .into_response(),
+            SessionPromptError::Conflict(message) => (
+                StatusCode::CONFLICT,
+                Json(opencode_proto::ConflictError {
+                    tag: "ConflictError".to_string(),
+                    message,
+                    resource: None,
+                }),
+            )
+                .into_response(),
+            SessionPromptError::Internal(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `POST /api/session/{sessionID}/prompt` — durably admit a prompt and schedule the background runner
+/// (group `session`). Matches the golden `v2.session.prompt`: 200 `{ data: SessionInputAdmitted }`,
+/// 400/401 typed errors, 404 `SessionNotFoundError`, 409 `ConflictError`. Admission appends a
+/// `session.next.prompt.admitted.1` event to the shared store (its aggregate seq is `admittedSeq`); the
+/// model comes from the session record (the request carries none). With `resume != false` the
+/// background coordinator drives the turn(s) — events stream on `/api/event`.
+#[utoipa::path(
+    post,
+    path = "/api/session/{sessionID}/prompt",
+    operation_id = "v2.session.prompt",
+    params(("sessionID" = String, Path, description = "Session id")),
+    request_body = inline(opencode_proto::SessionPromptRequest),
+    responses(
+        (status = 200, description = "Admitted", body = inline(opencode_proto::SessionPromptResponse)),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError),
+        (status = 409, description = "Conflict", body = opencode_proto::ConflictError)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_prompt(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(request): Json<opencode_proto::SessionPromptRequest>,
+) -> Result<Json<opencode_proto::SessionPromptResponse>, SessionPromptError> {
+    // The session must exist and carry a model (the request doesn't include one).
+    let record = state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| SessionPromptError::Internal(e.to_string()))?
+        .ok_or_else(|| SessionPromptError::NotFound(session_id.clone()))?;
+    let model = record
+        .model
+        .as_ref()
+        .and_then(|m| {
+            let id = m.get("id").and_then(|v| v.as_str())?;
+            let provider = m.get("providerID").and_then(|v| v.as_str())?;
+            Some(format!("{provider}/{id}"))
+        })
+        .ok_or_else(|| {
+            SessionPromptError::Internal(format!("session {session_id} has no model"))
+        })?;
+
+    let message_id = request
+        .id
+        .clone()
+        .unwrap_or_else(|| format!("msg_{}", ulid::Ulid::new()));
+    let delivery = request.delivery.unwrap_or(opencode_proto::Delivery::Steer);
+    let prompt = request.prompt;
+    let now = now_ms();
+
+    // Durably admit: append the lifecycle event; its aggregate sequence is `admittedSeq`. Retry on an
+    // optimistic-concurrency conflict (the background runner appends to the same aggregate).
+    let admitted_event = opencode_db::EventInput::new(
+        "session.next.prompt.admitted.1",
+        serde_json::json!({
+            "timestamp": now,
+            "sessionID": session_id,
+            "messageID": message_id,
+            "prompt": serde_json::to_value(&prompt)
+                .map_err(|e| SessionPromptError::Internal(e.to_string()))?,
+            "delivery": serde_json::to_value(delivery)
+                .map_err(|e| SessionPromptError::Internal(e.to_string()))?,
+        }),
+    );
+    let mut admitted_seq = None;
+    for _ in 0..8 {
+        let head = state
+            .ctx
+            .event_store()
+            .head_seq(&session_id)
+            .await
+            .map_err(|e| SessionPromptError::Internal(e.to_string()))?;
+        match state
+            .ctx
+            .event_store()
+            .append(&session_id, head, vec![admitted_event.clone()])
+            .await
+        {
+            Ok(seq) => {
+                admitted_seq = Some(seq);
+                break;
+            }
+            Err(opencode_db::DbError::Conflict { .. }) => continue,
+            Err(other) => return Err(SessionPromptError::Internal(other.to_string())),
+        }
+    }
+    let admitted_seq = admitted_seq.ok_or_else(|| {
+        SessionPromptError::Conflict(format!("session {session_id} is busy; retry"))
+    })?;
+
+    // Schedule the background turn(s) unless the caller opted out (`resume: false`).
+    if request.resume != Some(false) {
+        let live: Arc<dyn TurnRunner> = Arc::new(LiveTurnRunner {
+            ctx: state.ctx.clone(),
+            runner: state.runner.clone(),
+        });
+        state.coordinator.admit(
+            live,
+            session_id.clone(),
+            AdmittedPrompt {
+                model,
+                prompt: prompt.text.clone(),
+                system: Vec::new(),
+                step_limit: default_step_limit(),
+            },
+        );
+    }
+
+    Ok(Json(opencode_proto::SessionPromptResponse {
+        data: opencode_proto::SessionInputAdmitted {
+            admitted_seq,
+            id: message_id,
+            session_id,
+            prompt,
+            delivery,
+            time_created: now,
+            promoted_seq: None,
+        },
+    }))
+}
+
+/// Wrap an in-process [`opencode_effect::BusEvent`] as the contract live event envelope
+/// (`{ id, type, properties }`) that `/api/event` delivers. The runner already emits the event's
+/// `properties` payload as the bus event's `data`.
+fn contract_event_payload(event: &opencode_effect::BusEvent) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("evt_{}", ulid::Ulid::new()),
+        "type": event.kind.clone(),
+        "properties": event.data.clone(),
+    })
+}
+
+/// `GET /api/event` — native SSE stream of the Rust event bus (group `event`). Matches the golden
+/// `v2.event.subscribe`: a `text/event-stream` of contract events. Every event is delivered under the
+/// SSE event name `message` (the JSON `type` is the discriminator), carrying `{ id, type, properties }`.
+#[utoipa::path(
+    get,
+    path = "/api/event",
+    operation_id = "v2.event.subscribe",
+    responses(
+        (status = 200, description = "Success", content_type = "text/event-stream", body = String),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "events"
+)]
+async fn v2_event_subscribe(
+    State(state): State<ServerState>,
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use futures::StreamExt;
+    let stream = state.ctx.event_bus().subscribe().map(|event| {
+        let data = serde_json::to_string(&contract_event_payload(&event))
+            .unwrap_or_else(|_| "{}".to_string());
+        Ok(axum::response::sse::Event::default()
+            .event("message")
+            .data(data))
+    });
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 /// Default page size when `limit` is omitted (mirrors TS `DefaultSessionsLimit`).
 const DEFAULT_SESSIONS_LIMIT: i64 = 50;
 
@@ -1122,8 +1341,10 @@ async fn project_current(
         app_log,
         v2_session_get,
         v2_session_list,
+        v2_session_prompt,
         project_list,
-        project_current
+        project_current,
+        v2_event_subscribe
     ),
     components(schemas(
         opencode_proto::Health,
@@ -1153,7 +1374,14 @@ async fn project_current(
         opencode_proto::Project,
         opencode_proto::ProjectIcon,
         opencode_proto::ProjectCommands,
-        opencode_proto::ProjectTime
+        opencode_proto::ProjectTime,
+        opencode_proto::Prompt,
+        opencode_proto::PromptSource,
+        opencode_proto::PromptFileAttachment,
+        opencode_proto::PromptAgentAttachment,
+        opencode_proto::Delivery,
+        opencode_proto::SessionInputAdmitted,
+        opencode_proto::ConflictError
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -1161,7 +1389,8 @@ async fn project_current(
         (name = "instance", description = "Instance-scoped routes"),
         (name = "file", description = "File routes"),
         (name = "sessions", description = "Session routes"),
-        (name = "project", description = "Project routes")
+        (name = "project", description = "Project routes"),
+        (name = "events", description = "Event stream routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -1232,6 +1461,10 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("session") {
         router = router.route("/api/session", get(v2_session_list));
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
+        router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
+    }
+    if state.routes.handles("event") {
+        router = router.route("/api/event", get(v2_event_subscribe));
     }
     if state.routes.handles("project") {
         router = router.route("/project", get(project_list));
@@ -1488,6 +1721,173 @@ mod tests {
             time_updated: 200,
             time_archived: None,
         }
+    }
+
+    // ---- Phase 4: the public `/prompt` + `/event` cutover ----
+
+    fn contract_state(url: String, root: std::path::PathBuf, session: &str) -> ServerState {
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record(session));
+        ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session,event"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices {
+                engines: Arc::new(TestEngines { url }),
+                gate: Arc::new(AllowAll),
+                root,
+            },
+            coordinator: SessionCoordinator::default(),
+        }
+    }
+
+    fn prompt_contract_request(session: &str, text: &str) -> axum::extract::Request {
+        axum::extract::Request::builder()
+            .method("POST")
+            .uri(format!("/api/session/{session}/prompt"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "prompt": { "text": text } }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v2_session_prompt_admits_and_schedules_the_runner() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = contract_state(url, dir.path().to_path_buf(), "ses_cut");
+        let mut bus = state.ctx.event_bus().subscribe();
+
+        let resp = build_router(state.clone())
+            .oneshot(prompt_contract_request("ses_cut", "hello"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Contract-faithful admission response (returned synchronously).
+        assert_eq!(v["data"]["sessionID"], "ses_cut");
+        assert_eq!(v["data"]["delivery"], "steer");
+        assert!(v["data"]["id"].as_str().unwrap().starts_with("msg_"));
+        assert_eq!(v["data"]["prompt"]["text"], "hello");
+        assert_eq!(v["data"]["admittedSeq"], 1); // first event on the aggregate
+
+        // The background run then appends its contract events (awaited on the bus).
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), bus.recv())
+                .await
+                .expect("a bus event before timeout")
+                .expect("bus open");
+            if event.kind == "session.next.step.ended" {
+                break;
+            }
+        }
+        // The admission is persisted first, then the run's events, under the session aggregate.
+        let stored = state.ctx.event_store().read("ses_cut", 0).await.unwrap();
+        assert_eq!(stored[0].kind, "session.next.prompt.admitted.1");
+        assert!(stored.iter().any(|e| e.kind == "session.next.text.ended"));
+    }
+
+    #[tokio::test]
+    async fn v2_session_prompt_404_for_unknown_session() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(), // no session inserted
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(prompt_contract_request("ses_missing", "hi"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "SessionNotFoundError");
+    }
+
+    #[tokio::test]
+    async fn v2_session_prompt_is_gated_behind_session() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""), // group off → proxied → 502 (upstream down)
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(prompt_contract_request("ses_x", "hi"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[test]
+    fn contract_event_payload_wraps_as_live_envelope() {
+        let event = opencode_effect::BusEvent::for_aggregate(
+            "session.next.step.started",
+            "ses_e",
+            serde_json::json!({ "sessionID": "ses_e", "assistantMessageID": "msg_1" }),
+        );
+        let payload = contract_event_payload(&event);
+        assert_eq!(payload["type"], "session.next.step.started");
+        assert_eq!(payload["properties"]["sessionID"], "ses_e");
+        assert!(payload["id"].as_str().unwrap().starts_with("evt_"));
+    }
+
+    #[tokio::test]
+    async fn v2_event_is_gated_behind_event() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""), // group off → proxied → 502
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/event")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[test]
+    fn openapi_has_v2_session_prompt_and_event_operations() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let prompt = &json["paths"]["/api/session/{sessionID}/prompt"]["post"];
+        assert_eq!(prompt["operationId"], "v2.session.prompt");
+        assert_eq!(
+            prompt["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                ["data"]["$ref"],
+            "#/components/schemas/SessionInputAdmitted"
+        );
+        for code in ["400", "401", "404", "409"] {
+            assert!(
+                prompt["responses"][code].is_object(),
+                "prompt missing {code}"
+            );
+        }
+        let event = &json["paths"]["/api/event"]["get"];
+        assert_eq!(event["operationId"], "v2.event.subscribe");
+        assert!(event["responses"]["200"]["content"]["text/event-stream"].is_object());
     }
 
     #[test]

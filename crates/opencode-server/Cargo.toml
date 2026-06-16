@@ -27,6 +27,7 @@ utoipa.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
