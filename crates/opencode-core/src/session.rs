@@ -14,6 +14,7 @@
 //! durable persistence land once compaction and the event store are ported.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -158,7 +159,7 @@ pub async fn run_with_sink(
     session: &Session,
     seed: Vec<Message>,
 ) -> Result<SessionRun, RunError> {
-    run_gated(engine, tools, sink, &AllowAll, session, seed).await
+    run_gated(engine, tools, sink, &AllowAll, session, seed, None).await
 }
 
 /// Like [`run_with_sink`], but consults `gate` before executing each tool call (the
@@ -174,12 +175,24 @@ pub async fn run_gated(
     gate: &dyn PermissionGate,
     session: &Session,
     seed: Vec<Message>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<SessionRun, RunError> {
     let mut messages = seed;
     let mut transcript = Vec::new();
     let mut usage = Usage::default();
 
     for step in 0..session.step_limit {
+        // Cooperative cancellation: stop cleanly at the step boundary, recording the interrupt request.
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+            sink.record(vec![interrupt_requested_event(&session.id)])
+                .await?;
+            return Ok(SessionRun {
+                outcome: SessionOutcome::Cancelled { steps: step },
+                messages,
+                transcript,
+                usage,
+            });
+        }
         let request = LlmRequest {
             model: session.model.clone(),
             system: session.system.clone(),
@@ -449,6 +462,9 @@ pub mod event_kinds {
     pub const TOOL_CALLED: &str = "session.next.tool.called";
     /// A tool call settled successfully — `data`: the `EventSessionNextToolSuccess` properties.
     pub const TOOL_SUCCESS: &str = "session.next.tool.success";
+    /// Cancellation requested for the session — `data`: the `EventSessionNextInterruptRequested`
+    /// properties (`timestamp` + `sessionID`).
+    pub const INTERRUPT_REQUESTED: &str = "session.next.interrupt.requested";
 }
 
 // ---- Contract lifecycle events (the `/event` vocabulary the runner emits per step) ----
@@ -476,6 +492,18 @@ fn finish_label(reason: FinishReason) -> &'static str {
         FinishReason::Error => "error",
         FinishReason::Unknown => "unknown",
     }
+}
+
+/// `session.next.interrupt.requested` — the cooperative-cancellation signal (matches TS's abort
+/// handler); recorded by the runner when it observes the cancel token at a step boundary.
+fn interrupt_requested_event(session_id: &str) -> EventInput {
+    EventInput::new(
+        event_kinds::INTERRUPT_REQUESTED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+        }),
+    )
 }
 
 /// `session.next.step.started` — the step boundary opening (the new assistant message + model). `agent`
@@ -848,6 +876,35 @@ mod tests {
             output,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_at_step_boundary_and_records_interrupt() {
+        // The cancel token is set before the first step, so the run stops immediately at the boundary
+        // (the engine is never called) — recording the interrupt and returning Cancelled.
+        let engine = ScriptedEngine::new(vec![]);
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.id = "ses_cancel".into();
+        let sink = RecordingSink::default();
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let run = run_gated(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &AllowAll,
+            &session,
+            vec![Message::user_text("go")],
+            Some(cancel),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.outcome, SessionOutcome::Cancelled { steps: 0 });
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "session.next.interrupt.requested");
+        assert_eq!(events[0].data["sessionID"], "ses_cancel");
     }
 
     /// A [`SessionSink`] that captures every recorded batch (flattened), for asserting event shapes.
@@ -1512,6 +1569,7 @@ mod tests {
             &FixedGate(Decision::Allow),
             &weather_session(),
             vec![Message::user_text("weather?")],
+            None,
         )
         .await
         .unwrap();
@@ -1547,6 +1605,7 @@ mod tests {
             &FixedGate(Decision::Deny("not allowed".into())),
             &weather_session(),
             vec![Message::user_text("weather?")],
+            None,
         )
         .await
         .unwrap();
@@ -1587,6 +1646,7 @@ mod tests {
             &FixedGate(Decision::Ask),
             &weather_session(),
             vec![Message::user_text("weather?")],
+            None,
         )
         .await
         .unwrap();
