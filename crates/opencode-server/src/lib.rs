@@ -386,6 +386,25 @@ async fn rust_metrics(State(state): State<ServerState>) -> Json<serde_json::Valu
     }))
 }
 
+/// Always-native Prometheus scrape endpoint (`/metrics`, **not** part of the OpenAPI contract): the
+/// same runner counters + turn-latency percentiles + bus events as [`rust_metrics`], rendered in the
+/// Prometheus text exposition format. Carries no secrets, but it's ops-only — restrict at the network
+/// layer if exposure matters.
+async fn prometheus_metrics(State(state): State<ServerState>) -> impl axum::response::IntoResponse {
+    let body = state
+        .ctx
+        .metrics()
+        .snapshot()
+        .render_prometheus(state.ctx.event_bus().published_count());
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
 /// Always-native internal SSE stream of the in-process event bus (`/_rust/event`). This is **not**
 /// the contract `/event` (which stays proxied to TS): during coexistence the Rust bus has no
 /// producers, so this is infrastructure proving the SSE + channel plumbing end-to-end (and the Phase-4
@@ -1622,7 +1641,8 @@ pub fn build_router(state: ServerState) -> Router {
     let mut router = Router::new()
         .route("/_rust/health", get(rust_health))
         .route("/_rust/event", get(rust_event))
-        .route("/_rust/metrics", get(rust_metrics));
+        .route("/_rust/metrics", get(rust_metrics))
+        .route("/metrics", get(prometheus_metrics));
 
     // Native contract routes are enabled here as they are cut over, gated by the route table.
     if state.routes.handles("health") {
@@ -2728,6 +2748,60 @@ mod tests {
         assert_eq!(v["steps_total"], 1);
         assert!(v["events_total"].as_u64().unwrap() >= 1);
         assert_eq!(v["turn_latency_ms"]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn prometheus_metrics_endpoint_renders_text_format() {
+        use tower::ServiceExt;
+        let url = spawn_anthropic(&[EXEC_TEXT_SSE]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = exec_state(url, dir.path().to_path_buf());
+        let scrape = || {
+            axum::extract::Request::builder()
+                .uri("/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        // Before any activity: 200, Prometheus content-type, zeroed counters.
+        let resp = build_router(state.clone()).oneshot(scrape()).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ctype.starts_with("text/plain"));
+        assert!(ctype.contains("version=0.0.4"));
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("# TYPE opencode_turns_total counter"));
+        assert!(body.contains("\nopencode_turns_total 0\n"));
+
+        // Drive one turn via the internal execute route.
+        let resp = build_router(state.clone())
+            .oneshot(exec_request(
+                "ses_prom",
+                "anthropic/claude-haiku-4-5-20251001",
+                "hi",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // The scrape now reflects the run.
+        let resp = build_router(state.clone()).oneshot(scrape()).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("\nopencode_turns_total 1\n"));
+        assert!(body.contains("\nopencode_steps_total 1\n"));
+        assert!(body.contains("opencode_turn_latency_ms_count 1\n"));
     }
 
     #[tokio::test]
