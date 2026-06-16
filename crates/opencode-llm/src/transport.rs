@@ -45,6 +45,12 @@ pub async fn complete<P: Protocol>(
         .await
         .map_err(|e| LlmError::Http(e.to_string()))?;
     let status = response.status().as_u16();
+    // Capture `Retry-After` (seconds) before the response body is consumed.
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
     let text = response
         .text()
         .await
@@ -53,7 +59,9 @@ pub async fn complete<P: Protocol>(
         return Err(LlmError::Status {
             code: status,
             retryable: is_retryable(status),
-            message: text,
+            retry_after,
+            // Redact any echoed API key before the error reaches logs.
+            message: crate::executor::redact_secrets(&text),
         });
     }
     decode_sse(protocol, &text)
@@ -114,6 +122,56 @@ mod tests {
             .collect();
         assert_eq!(text, "Hi");
         assert!(matches!(events.last(), Some(LlmEvent::Finish { .. })));
+    }
+
+    #[tokio::test]
+    async fn executor_retries_transport_then_succeeds() {
+        use crate::executor::{execute, RetryPolicy};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // The server 429s the first call, then streams the SSE response.
+        let calls = Arc::new(AtomicU32::new(0));
+        let counter = calls.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let counter = counter.clone();
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (StatusCode::TOO_MANY_REQUESTS, "slow down").into_response()
+                    } else {
+                        ([("content-type", "text/event-stream")], SSE_BODY).into_response()
+                    }
+                }
+            }),
+        );
+        let base = spawn(app).await;
+        let url = format!("{base}/v1/messages");
+        let client = reqwest::Client::new();
+        let req = request();
+        // 0-delay policy → no real sleeping in the test.
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            base: std::time::Duration::ZERO,
+            cap: std::time::Duration::ZERO,
+            jitter: false,
+        };
+
+        let events = execute(&policy, || {
+            complete(&client, &url, &[], &AnthropicMessages, &req)
+        })
+        .await
+        .unwrap();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hi");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
