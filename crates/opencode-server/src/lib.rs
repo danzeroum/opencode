@@ -83,6 +83,25 @@ async fn rust_health() -> Json<Health> {
     })
 }
 
+/// Always-native internal SSE stream of the in-process event bus (`/_rust/event`). This is **not**
+/// the contract `/event` (which stays proxied to TS): during coexistence the Rust bus has no
+/// producers, so this is infrastructure proving the SSE + channel plumbing end-to-end (and the Phase-4
+/// runner's outlet). Each [`opencode_effect::BusEvent`] becomes one SSE message (`event:` = its type).
+async fn rust_event(
+    State(state): State<ServerState>,
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use futures::StreamExt;
+    let stream = state.ctx.event_bus().subscribe().map(|event| {
+        let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+        Ok(axum::response::sse::Event::default()
+            .event(event.kind)
+            .data(data))
+    });
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 /// `GET /health` — first contract route cut over natively (gated by the route table).
 #[utoipa::path(
     get,
@@ -786,7 +805,9 @@ impl axum::response::IntoResponse for ApiError {
 
 /// Build the axum router: always-native liveness + cut-over contract routes + proxy fallback.
 pub fn build_router(state: ServerState) -> Router {
-    let mut router = Router::new().route("/_rust/health", get(rust_health));
+    let mut router = Router::new()
+        .route("/_rust/health", get(rust_health))
+        .route("/_rust/event", get(rust_event));
 
     // Native contract routes are enabled here as they are cut over, gated by the route table.
     if state.routes.handles("health") {
@@ -1376,6 +1397,33 @@ mod tests {
         assert_eq!(p["time"]["created"], 100);
         assert_eq!(p["time"]["initialized"], 150);
         assert_eq!(p["sandboxes"][0], "/repo/sb");
+    }
+
+    #[tokio::test]
+    async fn rust_event_serves_sse_stream() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/_rust/event")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Always-native SSE infra route → 200 text/event-stream. (Body is an open stream; not read.)
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/event-stream"
+        );
     }
 
     #[tokio::test]
