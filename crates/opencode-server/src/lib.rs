@@ -707,6 +707,55 @@ async fn project_list(
     Ok(Json(data))
 }
 
+/// `GET /project/current` — the project for the current directory (group `project`). Matches the
+/// golden `project.current`: 200 `Project` + 400 `BadRequestError`. Resolves `directory` (param or
+/// cwd) to its git worktree (via `opencode_tools::git::root`), then looks the project up by that
+/// `worktree` — a non-PK lookup. The TS remote-id derivation and non-repo "global" fallback are
+/// documented follow-ups; if no project matches the worktree, returns 400.
+#[utoipa::path(
+    get,
+    path = "/project/current",
+    operation_id = "project.current",
+    params(
+        ("directory" = Option<String>, Query, description = "Directory to resolve (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id (not yet applied)")
+    ),
+    responses(
+        (status = 200, description = "Current project", body = opencode_proto::Project),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "project"
+)]
+async fn project_current(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::Project>, ApiBadRequest> {
+    let directory = params.get("directory").cloned().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let worktree = opencode_tools::git::root(std::path::Path::new(&directory))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| directory.clone());
+    let record = state
+        .ctx
+        .projects()
+        .get_by_worktree(&worktree)
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    match record {
+        Some(record) => Ok(Json(project_record_to_info(record))),
+        None => Err(bad_request(
+            format!("no project for worktree: {worktree}"),
+            "Unknown",
+        )),
+    }
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
@@ -720,7 +769,8 @@ async fn project_list(
         app_log,
         v2_session_get,
         v2_session_list,
-        project_list
+        project_list,
+        project_current
     ),
     components(schemas(
         opencode_proto::Health,
@@ -832,6 +882,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("project") {
         router = router.route("/project", get(project_list));
+        router = router.route("/project/current", get(project_current));
     }
 
     router.fallback(proxy::proxy_handler).with_state(state)
@@ -1424,6 +1475,79 @@ mod tests {
                 .unwrap(),
             "text/event-stream"
         );
+    }
+
+    #[test]
+    fn openapi_has_project_current_contract_operation() {
+        let json = serde_json::to_value(openapi_document()).unwrap();
+        let op = &json["paths"]["/project/current"]["get"];
+        assert_eq!(op["operationId"], "project.current");
+        assert_eq!(
+            op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Project"
+        );
+        assert!(op["responses"]["400"].is_object());
+    }
+
+    #[tokio::test]
+    async fn project_current_resolves_by_worktree() {
+        use tower::ServiceExt;
+        // A non-existent directory has no git root → the handler falls back to the directory string
+        // as the worktree, making the lookup deterministic without a real repo.
+        let worktree = "/nonexistent/opencode-current-test";
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        let mut record = test_project_record("prj_cur");
+        record.worktree = worktree.to_string();
+        projects.insert(record);
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("project"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(format!("/project/current?directory={worktree}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], "prj_cur");
+        assert_eq!(v["worktree"], worktree);
+    }
+
+    #[tokio::test]
+    async fn project_current_unknown_worktree_is_bad_request() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(), // empty project store
+            routes: RouteTable::parse("project"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/project/current?directory=/nonexistent/none")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["name"], "BadRequest");
     }
 
     #[tokio::test]

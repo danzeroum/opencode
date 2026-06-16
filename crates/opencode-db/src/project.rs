@@ -88,6 +88,9 @@ fn record_from_row(row: &SqliteRow) -> Result<ProjectRecord, DbError> {
 pub trait ProjectStore: Send + Sync {
     /// List all projects, most-recently-created first.
     async fn list(&self) -> Result<Vec<ProjectRecord>, DbError>;
+
+    /// Fetch the project whose `worktree` equals `worktree` (a non-PK lookup), or `None`.
+    async fn get_by_worktree(&self, worktree: &str) -> Result<Option<ProjectRecord>, DbError>;
 }
 
 /// SQLite-backed [`ProjectStore`] over the shared pool.
@@ -111,6 +114,16 @@ impl ProjectStore for SqlxProjectStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(record_from_row).collect()
+    }
+
+    async fn get_by_worktree(&self, worktree: &str) -> Result<Option<ProjectRecord>, DbError> {
+        let row = sqlx::query(&format!(
+            "SELECT {PROJECT_COLS} FROM project WHERE worktree = ? LIMIT 1"
+        ))
+        .bind(worktree)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(record_from_row).transpose()
     }
 }
 
@@ -146,6 +159,16 @@ impl ProjectStore for MemoryProjectStore {
         // Most-recent first, id as a stable tiebreaker (matches the SQL ordering).
         rows.sort_by(|a, b| (b.time_created, b.id.as_str()).cmp(&(a.time_created, a.id.as_str())));
         Ok(rows)
+    }
+
+    async fn get_by_worktree(&self, worktree: &str) -> Result<Option<ProjectRecord>, DbError> {
+        Ok(self
+            .rows
+            .lock()
+            .expect("project store mutex poisoned")
+            .iter()
+            .find(|r| r.worktree == worktree)
+            .cloned())
     }
 }
 
@@ -226,5 +249,27 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(ids, ["prj_new", "prj_old"]);
+    }
+
+    #[tokio::test]
+    async fn sqlx_project_store_get_by_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("projects.db"))
+            .await
+            .unwrap();
+        sqlx::query(PROJECT_DDL).execute(db.pool()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) \
+             VALUES ('prj_a', '/repo/a', 1, 1, '[]')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let store = SqlxProjectStore::new(db.pool().clone());
+        assert_eq!(
+            store.get_by_worktree("/repo/a").await.unwrap().unwrap().id,
+            "prj_a"
+        );
+        assert!(store.get_by_worktree("/nope").await.unwrap().is_none());
     }
 }
