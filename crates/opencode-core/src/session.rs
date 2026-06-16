@@ -21,10 +21,11 @@ use opencode_db::{DbError, EventStore};
 use opencode_effect::{BusEvent, EventBus};
 use opencode_events::EventInput;
 use opencode_llm::{
-    ContentPart, Generation, LlmError, LlmEvent, LlmRequest, Message, Role, ToolChoice,
-    ToolDefinition, Usage,
+    ContentPart, FinishReason, Generation, LlmError, LlmEvent, LlmRequest, Message, Role,
+    ToolChoice, ToolDefinition, Usage,
 };
 use serde_json::Value;
+use ulid::Ulid;
 
 use crate::runner::{DrainOutcome, RunError, SessionOutcome, ToolExecutor};
 
@@ -85,6 +86,8 @@ pub struct Session {
     pub id: String,
     /// Model id sent on every turn.
     pub model: String,
+    /// Provider id for `model` — the `providerID` in emitted step events.
+    pub provider: String,
     /// System prompt parts.
     pub system: Vec<String>,
     /// Tools offered to the model each turn (their JSON schemas).
@@ -101,6 +104,7 @@ impl Session {
         Self {
             id: String::new(),
             model: model.into(),
+            provider: String::new(),
             system: Vec::new(),
             tools: Vec::new(),
             generation: Generation::default(),
@@ -191,7 +195,7 @@ pub async fn run_gated(
             .await
             .map_err(|e| RunError::Attempt(e.to_string()))?;
 
-        let (text, calls) = fold_turn(&events, &mut usage);
+        let (text, calls, finish) = fold_turn(&events, &mut usage);
         transcript.extend(events);
 
         // The durable record of this turn (assistant message; tool results appended below).
@@ -201,7 +205,7 @@ pub async fn run_gated(
         // provider streamed.
         let mut content = Vec::new();
         if !text.is_empty() {
-            content.push(ContentPart::Text(text));
+            content.push(ContentPart::Text(text.clone()));
         }
         for call in &calls {
             content.push(ContentPart::ToolCall {
@@ -215,13 +219,21 @@ pub async fn run_gated(
             content,
         });
 
-        // No tool calls ⇒ the model is done: persist the turn, then the outcome.
+        // No tool calls ⇒ the model is done: emit the turn's contract lifecycle events (step + text
+        // boundaries), then return. Tool turns and the step-limit outcome still use the legacy events
+        // (converted with the public `/event` cutover, the next increment).
         if calls.is_empty() {
-            sink.record(vec![assistant]).await?;
-            let outcome = SessionOutcome::Completed { steps: step + 1 };
-            sink.record(vec![finished_event(&outcome, &usage)]).await?;
+            let message_id = new_id("msg_");
+            let mut batch = vec![step_started_event(session, &message_id)];
+            if !text.is_empty() {
+                let text_id = new_id("txt_");
+                batch.push(text_started_event(&session.id, &message_id, &text_id));
+                batch.push(text_ended_event(&session.id, &message_id, &text_id, &text));
+            }
+            batch.push(step_ended_event(&session.id, &message_id, finish, &usage));
+            sink.record(batch).await?;
             return Ok(SessionRun {
-                outcome,
+                outcome: SessionOutcome::Completed { steps: step + 1 },
                 messages,
                 transcript,
                 usage,
@@ -312,9 +324,13 @@ pub async fn run_gated(
 
 /// Fold a turn's normalized events into its assistant text + tool calls, accumulating usage from the
 /// terminal `Finish`.
-fn fold_turn(events: &[LlmEvent], usage: &mut Usage) -> (String, Vec<ToolCallRecord>) {
+fn fold_turn(
+    events: &[LlmEvent],
+    usage: &mut Usage,
+) -> (String, Vec<ToolCallRecord>, FinishReason) {
     let mut text = String::new();
     let mut calls = Vec::new();
+    let mut finish = FinishReason::Unknown;
     for event in events {
         match event {
             LlmEvent::TextDelta { text: delta, .. } => text.push_str(delta),
@@ -324,17 +340,21 @@ fn fold_turn(events: &[LlmEvent], usage: &mut Usage) -> (String, Vec<ToolCallRec
                 input: input.clone(),
             }),
             LlmEvent::Finish {
-                usage: Some(turn), ..
+                reason,
+                usage: turn,
             } => {
-                usage.input += turn.input;
-                usage.output += turn.output;
-                usage.cache_read += turn.cache_read;
-                usage.cache_write += turn.cache_write;
+                finish = *reason;
+                if let Some(turn) = turn {
+                    usage.input += turn.input;
+                    usage.output += turn.output;
+                    usage.cache_read += turn.cache_read;
+                    usage.cache_write += turn.cache_write;
+                }
             }
             _ => {}
         }
     }
-    (text, calls)
+    (text, calls, finish)
 }
 
 /// Run `calls` concurrently on the [`ToolExecutor`], returning each call's output keyed by tool-call id.
@@ -393,6 +413,18 @@ pub mod event_kinds {
     pub const PERMISSION_REQUESTED: &str = "permission.requested.1";
     /// The run outcome — `data`: `{ "outcome": "completed"|"step_limit", "steps": n, "usage": {…} }`.
     pub const SESSION_FINISHED: &str = "session.finished.1";
+
+    // Contract lifecycle events (the live `/event` vocabulary; unversioned `type`). The runner emits
+    // these for a completed text turn — the first slice of contract-faithful event production. Tool
+    // turns and the persisted (sync-versioned) form land with the public `/event` cutover.
+    /// Step boundary opens — `data`: the `EventSessionNextStepStarted` properties.
+    pub const STEP_STARTED: &str = "session.next.step.started";
+    /// Step boundary closes — `data`: the `EventSessionNextStepEnded` properties.
+    pub const STEP_ENDED: &str = "session.next.step.ended";
+    /// Assistant text block opens — `data`: the `EventSessionNextTextStarted` properties.
+    pub const TEXT_STARTED: &str = "session.next.text.started";
+    /// Assistant text block closes — `data`: the `EventSessionNextTextEnded` properties.
+    pub const TEXT_ENDED: &str = "session.next.text.ended";
 }
 
 fn assistant_event(text: &str, calls: &[ToolCallRecord]) -> EventInput {
@@ -433,6 +465,106 @@ fn finished_event(outcome: &SessionOutcome, usage: &Usage) -> EventInput {
     EventInput::new(
         event_kinds::SESSION_FINISHED,
         serde_json::json!({ "outcome": label, "steps": steps, "usage": usage }),
+    )
+}
+
+// ---- Contract lifecycle events (the `/event` vocabulary, emitted for a completed text turn) ----
+
+/// Current wall-clock time in milliseconds since the epoch (the contract's `timestamp`).
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+/// Mint a prefixed ULID id (e.g. `msg_…`), matching opencode's id convention.
+fn new_id(prefix: &str) -> String {
+    format!("{prefix}{}", Ulid::new())
+}
+
+/// Map a normalized [`FinishReason`] to the contract's `finish` string.
+fn finish_label(reason: FinishReason) -> &'static str {
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::Length => "length",
+        FinishReason::ToolCalls => "tool-calls",
+        FinishReason::ContentFilter => "content-filter",
+        FinishReason::Error => "error",
+        FinishReason::Unknown => "unknown",
+    }
+}
+
+/// `session.next.step.started` — the step boundary opening (the new assistant message + model). `agent`
+/// is a fixed default until session agents are plumbed through (a later increment).
+fn step_started_event(session: &Session, assistant_message_id: &str) -> EventInput {
+    EventInput::new(
+        event_kinds::STEP_STARTED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session.id,
+            "assistantMessageID": assistant_message_id,
+            "agent": "build",
+            "model": { "id": session.model, "providerID": session.provider },
+        }),
+    )
+}
+
+/// `session.next.text.started` — an assistant text block opens.
+fn text_started_event(session_id: &str, assistant_message_id: &str, text_id: &str) -> EventInput {
+    EventInput::new(
+        event_kinds::TEXT_STARTED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "textID": text_id,
+        }),
+    )
+}
+
+/// `session.next.text.ended` — the replayable full-text boundary for an assistant text block.
+fn text_ended_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    text_id: &str,
+    text: &str,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::TEXT_ENDED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "textID": text_id,
+            "text": text,
+        }),
+    )
+}
+
+/// `session.next.step.ended` — the step boundary closing (finish reason + token usage). `cost` is `0`
+/// until provider pricing is ported (a later increment).
+fn step_ended_event(
+    session_id: &str,
+    assistant_message_id: &str,
+    finish: FinishReason,
+    usage: &Usage,
+) -> EventInput {
+    EventInput::new(
+        event_kinds::STEP_ENDED,
+        serde_json::json!({
+            "timestamp": now_ms(),
+            "sessionID": session_id,
+            "assistantMessageID": assistant_message_id,
+            "finish": finish_label(finish),
+            "cost": 0.0,
+            "tokens": {
+                "input": usage.input,
+                "output": usage.output,
+                "reasoning": 0,
+                "cache": { "read": usage.cache_read, "write": usage.cache_write },
+            },
+        }),
     )
 }
 
@@ -649,6 +781,75 @@ mod tests {
             output,
             ..Default::default()
         }
+    }
+
+    /// A [`SessionSink`] that captures every recorded batch (flattened), for asserting event shapes.
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<EventInput>>,
+    }
+
+    #[async_trait]
+    impl SessionSink for RecordingSink {
+        async fn record(&self, events: Vec<EventInput>) -> Result<(), RunError> {
+            self.events.lock().unwrap().extend(events);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn text_turn_emits_contract_lifecycle_events() {
+        let engine = ScriptedEngine::new(vec![text_turn(
+            "Hi there.",
+            FinishReason::Stop,
+            usage(20, 7),
+        )]);
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.id = "ses_x".into();
+        session.provider = "anthropic".into();
+        let sink = RecordingSink::default();
+        run_with_sink(
+            &engine,
+            Arc::new(WeatherTools),
+            &sink,
+            &session,
+            vec![Message::user_text("hi")],
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events.lock().unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "session.next.step.started",
+                "session.next.text.started",
+                "session.next.text.ended",
+                "session.next.step.ended",
+            ]
+        );
+
+        // Envelope + payload fidelity: one assistantMessageID across the turn; contract field names.
+        let started = &events[0].data;
+        assert_eq!(started["sessionID"], "ses_x");
+        assert_eq!(started["agent"], "build");
+        assert_eq!(started["model"]["id"], "claude-haiku-4-5-20251001");
+        assert_eq!(started["model"]["providerID"], "anthropic");
+        let msg_id = started["assistantMessageID"].as_str().unwrap();
+        assert!(msg_id.starts_with("msg_"));
+
+        let text_ended = &events[2].data;
+        assert_eq!(text_ended["assistantMessageID"], msg_id);
+        assert_eq!(text_ended["text"], "Hi there.");
+        assert_eq!(text_ended["textID"], events[1].data["textID"]);
+
+        let step_ended = &events[3].data;
+        assert_eq!(step_ended["assistantMessageID"], msg_id);
+        assert_eq!(step_ended["finish"], "stop");
+        assert_eq!(step_ended["tokens"]["input"], 20);
+        assert_eq!(step_ended["tokens"]["output"], 7);
+        assert_eq!(step_ended["tokens"]["cache"]["read"], 0);
     }
 
     #[tokio::test]
@@ -919,14 +1120,16 @@ mod tests {
             vec![
                 event_kinds::ASSISTANT_MESSAGE, // turn 0: assistant (tool call)
                 event_kinds::TOOL_RESULTS,      // turn 0: tool results
-                event_kinds::ASSISTANT_MESSAGE, // turn 1: assistant (text)
-                event_kinds::SESSION_FINISHED,  // outcome
+                event_kinds::STEP_STARTED,      // turn 1 (text completion): step opens
+                event_kinds::TEXT_STARTED,      // turn 1: text block opens
+                event_kinds::TEXT_ENDED,        // turn 1: text block closes
+                event_kinds::STEP_ENDED,        // turn 1: step closes (outcome)
             ]
         );
         // Sequence numbers are monotonic from 1.
         assert_eq!(
             stored.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4]
+            vec![1, 2, 3, 4, 5, 6]
         );
         // The first assistant event carries the tool call; the tool-results event carries the output.
         assert_eq!(stored[0].data["tool_calls"][0]["name"], "get_weather");
@@ -934,11 +1137,11 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("sunny"));
-        // The outcome event snapshots the summed usage + step count.
-        assert_eq!(stored[3].data["outcome"], "completed");
-        assert_eq!(stored[3].data["steps"], 2);
-        assert_eq!(stored[3].data["usage"]["input"], 40);
-        assert_eq!(stored[3].data["usage"]["output"], 13);
+        // The completion turn: the text block carries the answer; step.ended snapshots summed usage.
+        assert_eq!(stored[4].data["text"], "It's sunny.");
+        assert_eq!(stored[5].data["finish"], "stop");
+        assert_eq!(stored[5].data["tokens"]["input"], 40);
+        assert_eq!(stored[5].data["tokens"]["output"], 13);
     }
 
     #[tokio::test]
@@ -976,13 +1179,15 @@ mod tests {
             kinds,
             vec![
                 "session.created.1",
-                event_kinds::ASSISTANT_MESSAGE,
-                event_kinds::SESSION_FINISHED,
+                event_kinds::STEP_STARTED,
+                event_kinds::TEXT_STARTED,
+                event_kinds::TEXT_ENDED,
+                event_kinds::STEP_ENDED,
             ]
         );
         assert_eq!(
             stored.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![1, 2, 3, 4, 5]
         );
     }
 
@@ -1045,8 +1250,10 @@ mod tests {
         assert_eq!(
             stored.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
             vec![
-                event_kinds::ASSISTANT_MESSAGE,
-                event_kinds::SESSION_FINISHED
+                event_kinds::STEP_STARTED,
+                event_kinds::TEXT_STARTED,
+                event_kinds::TEXT_ENDED,
+                event_kinds::STEP_ENDED,
             ]
         );
 
@@ -1059,8 +1266,10 @@ mod tests {
         assert_eq!(
             published,
             vec![
-                event_kinds::ASSISTANT_MESSAGE.to_string(),
-                event_kinds::SESSION_FINISHED.to_string(),
+                event_kinds::STEP_STARTED.to_string(),
+                event_kinds::TEXT_STARTED.to_string(),
+                event_kinds::TEXT_ENDED.to_string(),
+                event_kinds::STEP_ENDED.to_string(),
             ]
         );
     }

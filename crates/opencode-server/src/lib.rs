@@ -276,12 +276,13 @@ async fn drive_one_turn(
     system: Vec<String>,
     step_limit: usize,
 ) -> Result<SessionRun, String> {
-    let (_, model_id) = split_model(model).map_err(|e| e.to_string())?;
+    let (provider, model_id) = split_model(model).map_err(|e| e.to_string())?;
     let engine = runner.engines.build(model).map_err(|e| e.to_string())?;
     let tools: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(runner.root.clone()));
     let session = Session {
         id: session_id.to_string(),
         model: model_id.to_string(),
+        provider: provider.as_str().to_string(),
         system,
         tools: native_tools::tool_definitions(),
         generation: Generation::default(),
@@ -2055,18 +2056,30 @@ mod tests {
         assert_eq!(v["steps"], 1);
         assert!(v["text"].as_str().unwrap().contains("sunny"));
 
-        // Persisted under the session aggregate.
+        // Persisted under the session aggregate (contract text-turn lifecycle events).
         let stored = state.ctx.event_store().read("ses_exec", 0).await.unwrap();
         let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["message.assistant.1", "session.finished.1"]);
+        assert_eq!(
+            kinds,
+            vec![
+                "session.next.step.started",
+                "session.next.text.started",
+                "session.next.text.ended",
+                "session.next.step.ended",
+            ]
+        );
+        // The text block carries the assistant's answer.
+        assert!(stored[2].data["text"].as_str().unwrap().contains("sunny"));
 
         // Announced on the bus.
         let mut seen = Vec::new();
         while let Ok(ev) = bus.try_recv() {
             seen.push(ev.kind);
         }
-        assert!(seen.iter().any(|k| k.as_str() == "message.assistant.1"));
-        assert!(seen.iter().any(|k| k.as_str() == "session.finished.1"));
+        assert!(seen
+            .iter()
+            .any(|k| k.as_str() == "session.next.step.started"));
+        assert!(seen.iter().any(|k| k.as_str() == "session.next.step.ended"));
     }
 
     #[tokio::test]
@@ -2094,13 +2107,17 @@ mod tests {
 
         let stored = state.ctx.event_store().read("ses_tool", 0).await.unwrap();
         let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
+        // Turn 0 (tool call) still uses the legacy events; the text-completion turn uses the contract
+        // lifecycle events (tool turns convert with the public `/event` cutover).
         assert_eq!(
             kinds,
             vec![
                 "message.assistant.1",
                 "message.tool_results.1",
-                "message.assistant.1",
-                "session.finished.1",
+                "session.next.step.started",
+                "session.next.text.started",
+                "session.next.text.ended",
+                "session.next.step.ended",
             ]
         );
         // The bash tool actually ran in the toolbox root; its stdout is in the tool-results event.
@@ -2243,25 +2260,33 @@ mod tests {
         assert_eq!(v["status"], "admitted");
 
         // Await the background turn's events on the bus.
-        let mut saw_assistant = false;
+        let mut saw_text = false;
         loop {
             let event = tokio::time::timeout(std::time::Duration::from_secs(5), bus.recv())
                 .await
                 .expect("a bus event before timeout")
                 .expect("bus open");
-            if event.kind == "message.assistant.1" {
-                saw_assistant = true;
+            if event.kind == "session.next.text.ended" {
+                saw_text = true;
             }
-            if event.kind == "session.finished.1" {
+            if event.kind == "session.next.step.ended" {
                 break;
             }
         }
-        assert!(saw_assistant);
+        assert!(saw_text);
 
-        // Persisted under the session aggregate too.
+        // Persisted under the session aggregate too (contract text-turn lifecycle events).
         let stored = state.ctx.event_store().read("ses_bg", 0).await.unwrap();
         let kinds: Vec<&str> = stored.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["message.assistant.1", "session.finished.1"]);
+        assert_eq!(
+            kinds,
+            vec![
+                "session.next.step.started",
+                "session.next.text.started",
+                "session.next.text.ended",
+                "session.next.step.ended",
+            ]
+        );
     }
 
     #[tokio::test]
