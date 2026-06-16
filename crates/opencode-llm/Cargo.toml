@@ -10,3 +10,8 @@ description = "opencode LLM protocol router (ported from packages/llm) — Phase
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+axum.workspace = true
