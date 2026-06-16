@@ -13,6 +13,7 @@
 
 pub mod anthropic;
 pub mod executor;
+pub mod openai_chat;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
@@ -168,6 +169,13 @@ pub trait Protocol {
 
     /// Whether `event` terminates the stream.
     fn terminal(&self, event: &Self::Event) -> bool;
+
+    /// Flush any pending state at stream end (`onHalt` in TS) — e.g. close an open text block or emit
+    /// the terminal `Finish` for protocols (like openai-chat) that split finish/usage across the last
+    /// chunks. Default: nothing (protocols that emit everything inline need no flush).
+    fn on_halt(&self, _state: &Self::State) -> Vec<LlmEvent> {
+        Vec::new()
+    }
 }
 
 /// A normalized LLM request (`packages/llm/src/schema/messages.ts` `LLMRequest`) — the core subset:
@@ -339,6 +347,7 @@ pub fn decode_sse<P: Protocol>(protocol: &P, body: &str) -> Result<Vec<LlmEvent>
             break;
         }
     }
+    out.extend(protocol.on_halt(&state));
     Ok(out)
 }
 
