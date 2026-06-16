@@ -17,7 +17,7 @@
 
 3. **Escopo do CI (paths-ignore).** Adicionei `paths-ignore` (incl. `.github/workflows/**`, `crates/**`, `Cargo.*`, `.config/**`) aos workflows TS (`test`/`typecheck`/`security`/`nix-eval`) para que PRs só-Rust disparem **apenas** o `rust`. Efeito colateral: mudanças só em YAML de workflow não rodam a suíte TS. Confirme se está OK.
 
-4. **TLS removido na Fase 0.** `reqwest` sem `rustls-tls` (o proxy só fala HTTP com o upstream local) — mantém `ring`/`rustls` fora da árvore (deps enxutos, licenças limpas, menos C no cross-compile). **Decisão p/ Fase 3** (provedores LLM): `rustls`+`ring` (melhor p/ musl/windows-arm) vs `aws-lc-rs`. Recomendo `rustls`+`ring`.
+4. **TLS — RESOLVIDO ✅ (PR #28).** Reintroduzido na Fase 3 via `reqwest` feature `rustls-tls` (**rustls + ring**, sua escolha aprovada): sem OpenSSL de sistema, melhor cross-compile musl/windows-arm. `deny.toml` precisou de apenas **uma** licença nova (`CDLA-Permissive-2.0`, do `webpki-roots`); o `ring 0.17.14` declara `Apache-2.0 AND ISC` (já permitidas) — não exigiu nada especial, ao contrário do temido. `transport::https_client` constrói o cliente HTTPS-only.
 
 5. **Patch do MCP (401 linhas).** `patches/@modelcontextprotocol%2Fsdk@1.29.0.patch` adiciona reconexão/`onsessionexpired`. Auditar se `rmcp` (Rust) tem paridade ou se precisa fork. **Recomendo** auditar antes da Fase 5.
 
