@@ -9,6 +9,16 @@
 
 use crate::{decode_sse, LlmError, LlmEvent, LlmRequest, Protocol};
 
+/// Build an HTTPS client for real provider calls: the rustls TLS backend (no system OpenSSL),
+/// HTTPS-only, with a request timeout. (Tests hit a local HTTP server and use a default client.)
+pub fn https_client(timeout: std::time::Duration) -> Result<reqwest::Client, LlmError> {
+    reqwest::Client::builder()
+        .https_only(true)
+        .timeout(timeout)
+        .build()
+        .map_err(|e| LlmError::Http(e.to_string()))
+}
+
 /// Whether a non-success status is worth retrying (429 + 5xx-ish), mirroring `route/executor.ts`'s
 /// status classification.
 fn is_retryable(status: u16) -> bool {
@@ -132,6 +142,12 @@ mod tests {
             }
             other => panic!("expected Status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn https_client_builds_with_rustls() {
+        // The rustls TLS backend is present (https_only requires a TLS backend to build).
+        assert!(https_client(std::time::Duration::from_secs(30)).is_ok());
     }
 
     #[tokio::test]
