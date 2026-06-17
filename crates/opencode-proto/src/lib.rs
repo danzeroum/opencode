@@ -806,38 +806,39 @@ pub enum ProviderApi {
     },
 }
 
-/// The credential source of an enabled provider (`{ via, … }`), tagged on `via`.
+/// Whether/how a provider is enabled: the literal `false` (disabled), or one of the `{ via, … }`
+/// credential sources. Modeled as a **flat** untagged union (rather than nesting the three `via` arms
+/// under one variant) so the generated schema matches the golden contract's 4-way `anyOf`. Each `via`
+/// field is the corresponding literal string (`"env"` / `"credential"` / `"custom"`); the arms are
+/// distinguished on the wire by their payload field.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-#[serde(tag = "via", rename_all = "lowercase")]
-pub enum ProviderEnabledSource {
+#[serde(untagged)]
+pub enum ProviderEnabled {
+    /// Disabled (always `false` on the wire).
+    Disabled(bool),
     /// Enabled by an environment variable (`{ via: "env", name }`).
     Env {
+        /// Always `"env"`.
+        via: String,
         /// The environment variable that supplied the key.
         name: String,
     },
     /// Enabled by a stored credential (`{ via: "credential", credentialID }`).
     Credential {
+        /// Always `"credential"`.
+        via: String,
         /// The credential id (`cred_…`).
         #[serde(rename = "credentialID")]
         credential_id: String,
     },
     /// Enabled by a custom config block (`{ via: "custom", data }`).
     Custom {
+        /// Always `"custom"`.
+        via: String,
         /// Free-form provider config.
         #[schema(value_type = Object)]
         data: serde_json::Value,
     },
-}
-
-/// Whether/how a provider is enabled. Either the literal `false` (disabled) or the credential source
-/// that enables it.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-#[serde(untagged)]
-pub enum ProviderEnabled {
-    /// Disabled (always `false` on the wire).
-    Disabled(bool),
-    /// Enabled via a specific credential source.
-    Enabled(ProviderEnabledSource),
 }
 
 /// A provider's base request configuration (`{ headers, body }`).
@@ -1244,33 +1245,49 @@ mod tests {
 
     #[test]
     fn provider_enabled_sources_are_tagged_on_via() {
-        let env = ProviderEnabled::Enabled(ProviderEnabledSource::Env {
+        let env = ProviderEnabled::Env {
+            via: "env".into(),
             name: "ANTHROPIC_API_KEY".into(),
-        });
+        };
         assert_eq!(
             serde_json::to_value(&env).unwrap(),
             serde_json::json!({ "via": "env", "name": "ANTHROPIC_API_KEY" })
         );
-        let cred = ProviderEnabled::Enabled(ProviderEnabledSource::Credential {
+        let cred = ProviderEnabled::Credential {
+            via: "credential".into(),
             credential_id: "cred_1".into(),
-        });
+        };
         assert_eq!(
             serde_json::to_value(&cred).unwrap(),
             serde_json::json!({ "via": "credential", "credentialID": "cred_1" })
         );
-        let custom = ProviderEnabled::Enabled(ProviderEnabledSource::Custom {
+        let custom = ProviderEnabled::Custom {
+            via: "custom".into(),
             data: serde_json::json!({ "k": "v" }),
-        });
+        };
         assert_eq!(
             serde_json::to_value(&custom).unwrap(),
             serde_json::json!({ "via": "custom", "data": { "k": "v" } })
         );
-        // The untagged outer enum routes a `{ via }` object to the source arm.
+        // The flat untagged enum routes each `{ via }` object to its arm by payload shape.
         let back: ProviderEnabled =
             serde_json::from_value(serde_json::json!({ "via": "env", "name": "X" })).unwrap();
         assert_eq!(
             back,
-            ProviderEnabled::Enabled(ProviderEnabledSource::Env { name: "X".into() })
+            ProviderEnabled::Env {
+                via: "env".into(),
+                name: "X".into()
+            }
+        );
+        let back: ProviderEnabled =
+            serde_json::from_value(serde_json::json!({ "via": "custom", "data": { "k": 1 } }))
+                .unwrap();
+        assert_eq!(
+            back,
+            ProviderEnabled::Custom {
+                via: "custom".into(),
+                data: serde_json::json!({ "k": 1 })
+            }
         );
     }
 
@@ -1279,9 +1296,10 @@ mod tests {
         let provider = ProviderV2Info {
             id: "anthropic".into(),
             name: "Anthropic".into(),
-            enabled: ProviderEnabled::Enabled(ProviderEnabledSource::Env {
+            enabled: ProviderEnabled::Env {
+                via: "env".into(),
                 name: "ANTHROPIC_API_KEY".into(),
-            }),
+            },
             env: vec!["ANTHROPIC_API_KEY".into()],
             api: ProviderApi::Aisdk {
                 package: "@ai-sdk/anthropic".into(),

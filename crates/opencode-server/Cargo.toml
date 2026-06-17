@@ -32,3 +32,4 @@ ulid.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile.workspace = true
+opencode-config.workspace = true

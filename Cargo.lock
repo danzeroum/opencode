@@ -1317,6 +1317,7 @@ dependencies = [
  "axum",
  "base64",
  "futures",
+ "opencode-config",
  "opencode-core",
  "opencode-db",
  "opencode-effect",
