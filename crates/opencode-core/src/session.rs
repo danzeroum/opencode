@@ -203,10 +203,25 @@ pub async fn run_gated(
             generation: session.generation.clone(),
         };
 
-        let events = engine
-            .complete(&request)
-            .await
-            .map_err(|e| RunError::Attempt(e.to_string()))?;
+        // Race the in-flight provider call against cancellation: an abort drops the `complete` future
+        // (aborting the HTTP request) instead of waiting for the next step boundary. `biased` checks
+        // cancellation first, so an already-set flag interrupts before the call is even polled.
+        let events = tokio::select! {
+            biased;
+            () = poll_cancelled(&cancel) => {
+                sink.record(vec![interrupt_requested_event(&session.id)])
+                    .await?;
+                return Ok(SessionRun {
+                    outcome: SessionOutcome::Cancelled { steps: step },
+                    messages,
+                    transcript,
+                    usage,
+                });
+            }
+            result = engine.complete(&request) => {
+                result.map_err(|e| RunError::Attempt(e.to_string()))?
+            }
+        };
 
         let (text, calls, finish) = fold_turn(&events, &mut usage);
         transcript.extend(events);
@@ -510,6 +525,21 @@ fn finish_label(reason: FinishReason) -> &'static str {
         FinishReason::ContentFilter => "content-filter",
         FinishReason::Error => "error",
         FinishReason::Unknown => "unknown",
+    }
+}
+
+/// Resolve once `cancel` is observed set (polling at a short interval), or never when there's no token.
+/// Raced against the in-flight provider call so an abort interrupts it rather than waiting for the next
+/// step boundary; the poll only runs while a request is in flight, so its cost is negligible.
+async fn poll_cancelled(cancel: &Option<Arc<AtomicBool>>) {
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+    match cancel {
+        Some(flag) => {
+            while !flag.load(Ordering::SeqCst) {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -947,6 +977,59 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "session.next.interrupt.requested");
         assert_eq!(events[0].data["sessionID"], "ses_cancel");
+    }
+
+    /// An engine whose completion blocks "forever" — to prove an in-flight call is interrupted.
+    struct BlockingEngine;
+    #[async_trait]
+    impl LlmEngine for BlockingEngine {
+        async fn complete(&self, _request: &LlmRequest) -> Result<Vec<LlmEvent>, LlmError> {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(text_turn("late", FinishReason::Stop, usage(1, 1)))
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_interrupts_an_in_flight_completion() {
+        // The engine blocks for 30s; the abort flips ~50ms in and must interrupt the in-flight call
+        // (well under 30s) — recording the interrupt and returning Cancelled, not waiting it out.
+        let mut session = Session::new("claude-haiku-4-5-20251001", 8);
+        session.id = "ses_abort".into();
+        let sink = RecordingSink::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let flipper = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let run = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_gated(
+                &BlockingEngine,
+                Arc::new(WeatherTools),
+                &sink,
+                &AllowAll,
+                &session,
+                vec![Message::user_text("go")],
+                Some(cancel),
+            ),
+        )
+        .await
+        .expect("abort must interrupt the in-flight call, not wait for it")
+        .unwrap();
+
+        flipper.await.unwrap();
+        assert!(matches!(
+            run.outcome,
+            SessionOutcome::Cancelled { steps: 0 }
+        ));
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "session.next.interrupt.requested");
     }
 
     /// A [`SessionSink`] that captures every recorded batch (flattened), for asserting event shapes.
