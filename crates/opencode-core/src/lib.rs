@@ -6,6 +6,7 @@
 
 pub use opencode_effect::{AppContext, AppError};
 
+pub mod catalog;
 pub mod native_tools;
 pub mod provider;
 pub mod runner;
