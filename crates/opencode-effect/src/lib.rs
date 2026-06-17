@@ -11,6 +11,7 @@ pub mod metrics;
 
 use std::sync::Arc;
 
+use opencode_config::catalog::Catalog;
 use opencode_db::{EventStore, ProjectStore, SessionStore};
 
 pub use bus::{BusEvent, EventBus};
@@ -74,6 +75,9 @@ pub struct AppServices {
     pub event_bus: Arc<EventBus>,
     /// In-process runner metrics (counters + turn-latency percentiles).
     pub metrics: Arc<AppMetrics>,
+    /// The models.dev catalog (`providerID → Provider`). Read-only reference data the model/provider
+    /// routes project into the V2 wire contract; defaults to empty (populated at the composition root).
+    pub catalog: Arc<Catalog>,
 }
 
 impl Default for AppServices {
@@ -84,6 +88,7 @@ impl Default for AppServices {
             projects: Arc::new(opencode_db::MemoryProjectStore::new()),
             event_bus: Arc::new(EventBus::new()),
             metrics: Arc::new(AppMetrics::default()),
+            catalog: Arc::new(Catalog::default()),
         }
     }
 }
@@ -131,6 +136,11 @@ impl AppContext {
     pub fn metrics(&self) -> &Arc<AppMetrics> {
         &self.inner.metrics
     }
+
+    /// The models.dev catalog (read-only reference data; empty unless wired at the composition root).
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.inner.catalog
+    }
 }
 
 /// Initialize global tracing. Idempotent and safe to call once at startup.
@@ -139,4 +149,38 @@ pub fn init_tracing() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,opencode=debug"));
     let _ = fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use opencode_config::catalog::Provider;
+
+    #[test]
+    fn in_memory_catalog_is_empty() {
+        let ctx = AppContext::in_memory();
+        assert!(ctx.catalog().is_empty());
+    }
+
+    #[test]
+    fn wired_catalog_is_accessible() {
+        let mut catalog = Catalog::new();
+        catalog.insert(
+            "anthropic".to_string(),
+            Provider {
+                id: "anthropic".to_string(),
+                name: "Anthropic".to_string(),
+                env: vec![],
+                api: None,
+                npm: None,
+                models: Default::default(),
+            },
+        );
+        let ctx = AppContext::new(AppServices {
+            catalog: Arc::new(catalog),
+            ..Default::default()
+        });
+        assert_eq!(ctx.catalog().len(), 1);
+        assert!(ctx.catalog().contains_key("anthropic"));
+    }
 }

@@ -8,6 +8,7 @@ description = "DI/runtime support for opencode: AppContext, error taxonomy, trac
 
 [dependencies]
 opencode-db.workspace = true
+opencode-config.workspace = true
 
 thiserror.workspace = true
 anyhow.workspace = true

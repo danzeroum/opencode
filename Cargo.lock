@@ -1254,6 +1254,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-broadcast",
+ "opencode-config",
  "opencode-db",
  "serde",
  "serde_json",
