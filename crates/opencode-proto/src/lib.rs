@@ -889,6 +889,40 @@ pub struct LocationInfo {
     pub project: LocationProject,
 }
 
+/// `ServiceUnavailableError` — 503 for `v2.model.list` / `v2.provider.list` when the catalog can't be
+/// served (`{ _tag, message, service? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ServiceUnavailableError {
+    /// Always `"ServiceUnavailableError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Which service was unavailable, if specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+}
+
+/// 200 body of `v2.model.list` (GET /api/model): the `Location.response` wrapper `{ location, data }`
+/// around the model list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ModelListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The models.
+    pub data: Vec<ModelV2Info>,
+}
+
+/// 200 body of `v2.provider.list` (GET /api/provider): the `Location.response` wrapper
+/// `{ location, data }` around the provider list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ProviderListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The providers.
+    pub data: Vec<ProviderV2Info>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1290,5 +1324,77 @@ mod tests {
         assert_eq!(json["workspaceID"], "wrk_1");
         let back: LocationInfo = serde_json::from_value(json).unwrap();
         assert_eq!(back, with_ws);
+    }
+
+    #[test]
+    fn service_unavailable_error_uses_tag_and_omits_absent_service() {
+        let json = serde_json::to_value(ServiceUnavailableError {
+            tag: "ServiceUnavailableError".into(),
+            message: "Model catalog is unavailable".into(),
+            service: None,
+        })
+        .unwrap();
+        assert_eq!(json["_tag"], "ServiceUnavailableError");
+        assert_eq!(json["message"], "Model catalog is unavailable");
+        assert!(json.get("service").is_none());
+        let with_service = ServiceUnavailableError {
+            tag: "ServiceUnavailableError".into(),
+            message: "boom".into(),
+            service: Some("catalog".into()),
+        };
+        let json = serde_json::to_value(&with_service).unwrap();
+        assert_eq!(json["service"], "catalog");
+        let back: ServiceUnavailableError = serde_json::from_value(json).unwrap();
+        assert_eq!(back, with_service);
+    }
+
+    fn sample_location() -> LocationInfo {
+        LocationInfo {
+            directory: "/home/u/proj".into(),
+            workspace_id: None,
+            project: LocationProject {
+                id: "prj_1".into(),
+                directory: "/home/u/proj".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn model_list_response_round_trips() {
+        let resp = ModelListResponse {
+            location: sample_location(),
+            data: vec![sample_model()],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["location"]["project"]["id"], "prj_1");
+        assert_eq!(json["data"][0]["providerID"], "anthropic");
+        let back: ModelListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn provider_list_response_round_trips() {
+        let resp = ProviderListResponse {
+            location: sample_location(),
+            data: vec![ProviderV2Info {
+                id: "anthropic".into(),
+                name: "Anthropic".into(),
+                enabled: ProviderEnabled::Disabled(false),
+                env: vec!["ANTHROPIC_API_KEY".into()],
+                api: ProviderApi::Native {
+                    url: None,
+                    settings: serde_json::json!({}),
+                },
+                request: ProviderRequest {
+                    headers: BTreeMap::new(),
+                    body: serde_json::json!({}),
+                },
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["data"][0]["id"], "anthropic");
+        assert_eq!(json["location"]["directory"], "/home/u/proj");
+        let back: ProviderListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, resp);
     }
 }
