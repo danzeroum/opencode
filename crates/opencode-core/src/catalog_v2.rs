@@ -31,13 +31,44 @@ use opencode_proto::{
     ProviderEnabled, ProviderRequest, ProviderV2Info,
 };
 
-/// Project a single catalog [`Provider`] into its V2 wire form. `enabled` is always `false` (the raw
-/// projection; the credential layer enables providers downstream).
-pub fn provider_info(provider: &Provider) -> ProviderV2Info {
+/// A provider's env-derived `enabled`: the first of its `env` vars that `env` reports set
+/// (`{ via: "env", name }`), else disabled. Mirrors `packages/core/src/plugin/env.ts`. The
+/// stored-credential path (`{ via: "credential" }`) needs the credential store — a documented
+/// follow-up — so a provider with no matching env var reports disabled here.
+fn enabled_from_env(provider: &Provider, env: &impl Fn(&str) -> bool) -> ProviderEnabled {
+    provider
+        .env
+        .iter()
+        .find(|name| env(name))
+        .map_or(ProviderEnabled::Disabled(false), |name| {
+            ProviderEnabled::Env {
+                via: "env".to_string(),
+                name: name.clone(),
+            }
+        })
+}
+
+/// Whether an `enabled` value counts as available (anything other than the literal `false`; mirrors
+/// the TS `provider.enabled !== false`).
+fn is_available(enabled: &ProviderEnabled) -> bool {
+    !matches!(enabled, ProviderEnabled::Disabled(false))
+}
+
+/// A model's release time as epoch-millis (`0` for the non-finite arm), for release-date ordering.
+fn released_ms(model: &ModelV2Info) -> f64 {
+    match model.time.released {
+        EffectNumber::Finite(ms) => ms,
+        EffectNumber::NonFinite(_) => 0.0,
+    }
+}
+
+/// Project a single catalog [`Provider`] into its V2 wire form, deriving `enabled` from `env`
+/// (an "is this variable set?" predicate — kept injected so the projection stays pure + testable).
+pub fn provider_info(provider: &Provider, env: &impl Fn(&str) -> bool) -> ProviderV2Info {
     ProviderV2Info {
         id: provider.id.clone(),
         name: provider.name.clone(),
-        enabled: ProviderEnabled::Disabled(false),
+        enabled: enabled_from_env(provider, env),
         env: provider.env.clone(),
         api: match provider.npm.as_ref() {
             Some(npm) => ProviderApi::Aisdk {
@@ -115,9 +146,10 @@ pub fn model_info(provider_id: &str, model: &Model) -> ModelV2Info {
     }
 }
 
-/// Project every provider in a [`Catalog`] (ordered by id via the catalog's `BTreeMap`).
-pub fn providers(catalog: &Catalog) -> Vec<ProviderV2Info> {
-    catalog.values().map(provider_info).collect()
+/// Project every provider in a [`Catalog`] (ordered by id via the catalog's `BTreeMap`), deriving
+/// each `enabled` from `env`.
+pub fn providers(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ProviderV2Info> {
+    catalog.values().map(|p| provider_info(p, env)).collect()
 }
 
 /// Project every model across every provider in a [`Catalog`].
@@ -131,6 +163,33 @@ pub fn models(catalog: &Catalog) -> Vec<ModelV2Info> {
                 .map(move |model| model_info(&provider.id, model))
         })
         .collect()
+}
+
+/// The `available()` provider list (TS `catalog.provider.available()`): every provider whose
+/// env-derived `enabled` isn't `false`.
+pub fn available_providers(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ProviderV2Info> {
+    providers(catalog, env)
+        .into_iter()
+        .filter(|p| is_available(&p.enabled))
+        .collect()
+}
+
+/// The `available()` model list (TS `catalog.model.available()`): every enabled model of an
+/// env-enabled provider, ordered by release date (newest first).
+pub fn available_models(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ModelV2Info> {
+    let mut out: Vec<ModelV2Info> = catalog
+        .values()
+        .filter(|provider| is_available(&enabled_from_env(provider, env)))
+        .flat_map(|provider| {
+            provider
+                .models
+                .values()
+                .map(move |model| model_info(&provider.id, model))
+        })
+        .filter(|model| model.enabled)
+        .collect();
+    out.sort_by(|a, b| released_ms(b).total_cmp(&released_ms(a)));
+    out
 }
 
 /// Build the V2 `cost` array from the catalog's optional cost block: the base price, plus the legacy
@@ -251,7 +310,7 @@ mod tests {
     #[test]
     fn provider_aisdk_when_npm_present() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let p = provider_info(&cat["anthropic"]);
+        let p = provider_info(&cat["anthropic"], &|_| false);
         assert_eq!(p.id, "anthropic");
         assert_eq!(p.name, "Anthropic");
         assert_eq!(p.env, vec!["ANTHROPIC_API_KEY".to_string()]);
@@ -272,7 +331,7 @@ mod tests {
     #[test]
     fn provider_native_when_npm_absent() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let p = provider_info(&cat["local"]);
+        let p = provider_info(&cat["local"], &|_| false);
         assert_eq!(
             p.api,
             ProviderApi::Native {
@@ -401,12 +460,86 @@ mod tests {
     #[test]
     fn whole_catalog_projection_counts() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let providers = providers(&cat);
+        let providers = providers(&cat, &|_| false);
         let models = models(&cat);
         assert_eq!(providers.len(), 2);
         assert_eq!(models.len(), 2);
         // BTreeMap order: "anthropic" before "local".
         assert_eq!(providers[0].id, "anthropic");
         assert_eq!(providers[1].id, "local");
+    }
+
+    #[test]
+    fn enabled_from_env_picks_first_present_var() {
+        let cat = parse_catalog(
+            r#"{ "p": { "id": "p", "name": "P", "env": ["FIRST_KEY", "SECOND_KEY"], "models": {} } }"#,
+        )
+        .unwrap();
+        let provider = &cat["p"];
+        // None set → disabled.
+        assert_eq!(
+            enabled_from_env(provider, &|_| false),
+            ProviderEnabled::Disabled(false)
+        );
+        // Only the second set → that one wins.
+        assert_eq!(
+            enabled_from_env(provider, &|n| n == "SECOND_KEY"),
+            ProviderEnabled::Env {
+                via: "env".to_string(),
+                name: "SECOND_KEY".to_string(),
+            }
+        );
+        // Both set → the first in the list wins.
+        assert_eq!(
+            enabled_from_env(provider, &|_| true),
+            ProviderEnabled::Env {
+                via: "env".to_string(),
+                name: "FIRST_KEY".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn available_filters_to_env_enabled_providers_and_models() {
+        let cat = parse_catalog(SAMPLE).unwrap(); // anthropic (env ANTHROPIC_API_KEY) + local (env [])
+        let has_anthropic_key = |n: &str| n == "ANTHROPIC_API_KEY";
+
+        // Provider list: only anthropic is env-enabled; local (no env) is filtered out.
+        let providers = available_providers(&cat, &has_anthropic_key);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "anthropic");
+        assert_eq!(
+            providers[0].enabled,
+            ProviderEnabled::Env {
+                via: "env".to_string(),
+                name: "ANTHROPIC_API_KEY".to_string(),
+            }
+        );
+
+        // Model list: only anthropic's model (local's "tiny" excluded — provider disabled).
+        let models = available_models(&cat, &has_anthropic_key);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-sonnet-4-6");
+
+        // Nothing enabled → both lists empty.
+        assert!(available_providers(&cat, &|_| false).is_empty());
+        assert!(available_models(&cat, &|_| false).is_empty());
+    }
+
+    #[test]
+    fn available_models_sorted_newest_release_first() {
+        let cat = parse_catalog(
+            r#"{ "p": { "id": "p", "name": "P", "env": ["KEY"], "models": {
+              "old": { "id": "old", "name": "Old", "release_date": "2020-01-01",
+                       "limit": { "context": 1, "output": 1 } },
+              "new": { "id": "new", "name": "New", "release_date": "2026-01-01",
+                       "limit": { "context": 1, "output": 1 } }
+            } } }"#,
+        )
+        .unwrap();
+        let models = available_models(&cat, &|_| true);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "new"); // newest first
+        assert_eq!(models[1].id, "old");
     }
 }

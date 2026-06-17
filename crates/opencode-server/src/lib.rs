@@ -1582,20 +1582,17 @@ async fn resolve_location(
     })
 }
 
-/// The model's release time as epoch-millis (`0` for the non-finite arm), for release-date ordering.
-fn released_epoch(model: &opencode_proto::ModelV2Info) -> f64 {
-    match model.time.released {
-        opencode_proto::EffectNumber::Finite(ms) => ms,
-        opencode_proto::EffectNumber::NonFinite(_) => 0.0,
-    }
+/// The production env predicate for catalog gating: whether an environment variable is set. A provider
+/// is enabled when one of its `env` keys is present (mirrors `packages/core/src/plugin/env.ts`).
+fn env_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
 }
 
 /// `GET /api/model` — list models (group `model`). Matches the golden `v2.model.list`: 200
-/// `{ location, data }` + 400/401/503. Projects the in-memory models.dev catalog
-/// ([`opencode_effect::AppContext::catalog`]) via [`opencode_core::catalog_v2`], ordered by release date
-/// (newest first, mirroring the TS). The catalog is empty until populated at the composition root, and
-/// the credential-gated `available()` filter is deferred — both documented follow-ups — so this returns
-/// the full projected catalog.
+/// `{ location, data }` + 400/401/503. Returns the `available()` models from the in-memory models.dev
+/// catalog ([`opencode_effect::AppContext::catalog`]) via [`opencode_core::catalog_v2`] — models of
+/// env-enabled providers (an `env` key set), ordered by release date (newest first, mirroring the TS).
+/// Stored-credential enabling (beyond env) is a documented follow-up.
 #[utoipa::path(
     get,
     path = "/api/model",
@@ -1614,15 +1611,14 @@ async fn v2_model_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::ModelListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    let mut data = opencode_core::catalog_v2::models(state.ctx.catalog());
-    data.sort_by(|a, b| released_epoch(b).total_cmp(&released_epoch(a)));
+    let data = opencode_core::catalog_v2::available_models(state.ctx.catalog(), &env_present);
     Ok(Json(opencode_proto::ModelListResponse { location, data }))
 }
 
 /// `GET /api/provider` — list providers (group `provider`). Matches the golden `v2.provider.list`: 200
-/// `{ location, data }` + 400/401/503. Projects the in-memory catalog via [`opencode_core::catalog_v2`]
-/// (ordered by id via the catalog `BTreeMap`). Same population / `available()` follow-ups as
-/// [`v2_model_list`].
+/// `{ location, data }` + 400/401/503. Returns the `available()` providers from the in-memory catalog
+/// via [`opencode_core::catalog_v2`] — those with an `env` key set, `enabled` as `{ via: "env", name }`.
+/// Stored-credential enabling is a documented follow-up.
 #[utoipa::path(
     get,
     path = "/api/provider",
@@ -1641,7 +1637,7 @@ async fn v2_provider_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::ProviderListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    let data = opencode_core::catalog_v2::providers(state.ctx.catalog());
+    let data = opencode_core::catalog_v2::available_providers(state.ctx.catalog(), &env_present);
     Ok(Json(opencode_proto::ProviderListResponse {
         location,
         data,
@@ -2787,10 +2783,15 @@ mod tests {
 
     // ---- Phase 6: model/provider catalog routes ----
 
-    /// A small parsed catalog: one aisdk provider (`anthropic`) with one model (no per-model hint).
+    /// A unique env key the sample catalog's provider gates on — set by the tests that exercise the
+    /// `available()` path so the gating is deterministic regardless of the ambient environment.
+    const TEST_ENV_KEY: &str = "OPENCODE_TEST_CATALOG_KEY";
+
+    /// A small parsed catalog: one aisdk provider (`anthropic`, gated on [`TEST_ENV_KEY`]) with one
+    /// model (no per-model hint).
     fn sample_catalog() -> opencode_config::catalog::Catalog {
         opencode_config::catalog::parse_catalog(
-            r#"{ "anthropic": { "id":"anthropic","name":"Anthropic","env":["ANTHROPIC_API_KEY"],
+            r#"{ "anthropic": { "id":"anthropic","name":"Anthropic","env":["OPENCODE_TEST_CATALOG_KEY"],
                  "api":"https://api.anthropic.com","npm":"@ai-sdk/anthropic","models":{
                    "claude-x":{"id":"claude-x","name":"Claude X","release_date":"2026-01-01",
                      "tool_call":true,"limit":{"context":200000,"output":64000}} } } }"#,
@@ -2815,8 +2816,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_model_list_returns_projected_models() {
+    async fn v2_model_list_returns_available_models() {
         use tower::ServiceExt;
+        // The provider gates on TEST_ENV_KEY; set it so the model is available (idempotent, unique key).
+        std::env::set_var(TEST_ENV_KEY, "x");
         let resp = build_router(catalog_state("model"))
             .oneshot(
                 axum::extract::Request::builder()
@@ -2843,8 +2846,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_provider_list_returns_projected_providers() {
+    async fn v2_provider_list_returns_available_providers() {
         use tower::ServiceExt;
+        std::env::set_var(TEST_ENV_KEY, "x"); // enable the provider via env
         let resp = build_router(catalog_state("provider"))
             .oneshot(
                 axum::extract::Request::builder()
@@ -2861,9 +2865,51 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["location"]["project"]["id"], "prj_1");
         assert_eq!(v["data"][0]["id"], "anthropic");
-        // npm advertised → aisdk; raw projection reports disabled (credential layer enables it later).
+        // npm advertised → aisdk; env-enabled → `{ via: "env", name }`.
         assert_eq!(v["data"][0]["api"]["type"], "aisdk");
-        assert_eq!(v["data"][0]["enabled"], false);
+        assert_eq!(v["data"][0]["enabled"]["via"], "env");
+        assert_eq!(v["data"][0]["enabled"]["name"], TEST_ENV_KEY);
+    }
+
+    #[tokio::test]
+    async fn v2_provider_list_excludes_env_disabled_providers() {
+        use tower::ServiceExt;
+        // A provider gating on a never-set key is disabled → filtered out → empty `data`. Uses its own
+        // catalog (and mutates no env) so it can't race the `set_var` tests above.
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1"));
+        let catalog = opencode_config::catalog::parse_catalog(
+            r#"{ "anthropic": { "id":"anthropic","name":"Anthropic",
+                 "env":["OPENCODE_DEFINITELY_UNSET_KEY_FOR_TEST"],"models":{} } }"#,
+        )
+        .unwrap();
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                catalog: Arc::new(catalog),
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("provider"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/provider?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["location"]["project"]["id"], "prj_1");
+        assert_eq!(v["data"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
