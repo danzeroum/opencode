@@ -1528,6 +1528,126 @@ async fn project_current(
     }
 }
 
+/// Resolve the request `location` (the `Location.response` wrapper's `location` field) from the query.
+/// Mirrors the TS location middleware's `ref()` (query `location[directory]` / `location[workspace]`,
+/// else cwd), then resolves the project from the shared `project` store by worktree. Find-or-create and
+/// the non-repo "global" fallback are documented follow-ups, so a directory with no known project is a
+/// 400 here (the native model/provider groups are opt-in via `OPENCODE_RUST_ROUTES`; production proxies
+/// to TypeScript, which owns project creation).
+async fn resolve_location(
+    state: &ServerState,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<opencode_proto::LocationInfo, ApiError> {
+    let directory = params
+        .get("location[directory]")
+        .or_else(|| params.get("directory"))
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        });
+    let workspace_id = params
+        .get("location[workspace]")
+        .or_else(|| params.get("workspace"))
+        .cloned();
+    let worktree = opencode_tools::git::root(std::path::Path::new(&directory))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| directory.clone());
+    let project = state
+        .ctx
+        .projects()
+        .get_by_worktree(&worktree)
+        .await
+        .map_err(|e| {
+            ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+                e.to_string()
+            )))
+        })?
+        .ok_or_else(|| {
+            ApiError(opencode_effect::AppError::BadRequest(format!(
+                "no project for directory: {directory}"
+            )))
+        })?;
+    Ok(opencode_proto::LocationInfo {
+        directory,
+        workspace_id,
+        project: opencode_proto::LocationProject {
+            id: project.id,
+            directory: project.worktree,
+        },
+    })
+}
+
+/// The model's release time as epoch-millis (`0` for the non-finite arm), for release-date ordering.
+fn released_epoch(model: &opencode_proto::ModelV2Info) -> f64 {
+    match model.time.released {
+        opencode_proto::EffectNumber::Finite(ms) => ms,
+        opencode_proto::EffectNumber::NonFinite(_) => 0.0,
+    }
+}
+
+/// `GET /api/model` — list models (group `model`). Matches the golden `v2.model.list`: 200
+/// `{ location, data }` + 400/401/503. Projects the in-memory models.dev catalog
+/// ([`opencode_effect::AppContext::catalog`]) via [`opencode_core::catalog_v2`], ordered by release date
+/// (newest first, mirroring the TS). The catalog is empty until populated at the composition root, and
+/// the credential-gated `available()` filter is deferred — both documented follow-ups — so this returns
+/// the full projected catalog.
+#[utoipa::path(
+    get,
+    path = "/api/model",
+    operation_id = "v2.model.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Models", body = opencode_proto::ModelListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 503, description = "Catalog unavailable", body = opencode_proto::ServiceUnavailableError)
+    ),
+    tag = "model"
+)]
+async fn v2_model_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::ModelListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    let mut data = opencode_core::catalog_v2::models(state.ctx.catalog());
+    data.sort_by(|a, b| released_epoch(b).total_cmp(&released_epoch(a)));
+    Ok(Json(opencode_proto::ModelListResponse { location, data }))
+}
+
+/// `GET /api/provider` — list providers (group `provider`). Matches the golden `v2.provider.list`: 200
+/// `{ location, data }` + 400/401/503. Projects the in-memory catalog via [`opencode_core::catalog_v2`]
+/// (ordered by id via the catalog `BTreeMap`). Same population / `available()` follow-ups as
+/// [`v2_model_list`].
+#[utoipa::path(
+    get,
+    path = "/api/provider",
+    operation_id = "v2.provider.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Providers", body = opencode_proto::ProviderListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 503, description = "Catalog unavailable", body = opencode_proto::ServiceUnavailableError)
+    ),
+    tag = "provider"
+)]
+async fn v2_provider_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::ProviderListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    let data = opencode_core::catalog_v2::providers(state.ctx.catalog());
+    Ok(Json(opencode_proto::ProviderListResponse {
+        location,
+        data,
+    }))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
@@ -1545,7 +1665,9 @@ async fn project_current(
         project_list,
         project_current,
         v2_event_subscribe,
-        session_abort
+        session_abort,
+        v2_model_list,
+        v2_provider_list
     ),
     components(schemas(
         opencode_proto::Health,
@@ -1582,7 +1704,30 @@ async fn project_current(
         opencode_proto::PromptAgentAttachment,
         opencode_proto::Delivery,
         opencode_proto::SessionInputAdmitted,
-        opencode_proto::ConflictError
+        opencode_proto::ConflictError,
+        opencode_proto::ModelListResponse,
+        opencode_proto::ProviderListResponse,
+        opencode_proto::ServiceUnavailableError,
+        opencode_proto::ModelV2Info,
+        opencode_proto::ModelApi,
+        opencode_proto::ModelCapabilities,
+        opencode_proto::ModelGeneration,
+        opencode_proto::ModelRequest,
+        opencode_proto::ModelVariant,
+        opencode_proto::ModelCost,
+        opencode_proto::ModelCostTier,
+        opencode_proto::ModelCostCache,
+        opencode_proto::ModelTime,
+        opencode_proto::ModelLimit,
+        opencode_proto::ModelStatus,
+        opencode_proto::EffectNumber,
+        opencode_proto::EffectNonFinite,
+        opencode_proto::ProviderV2Info,
+        opencode_proto::ProviderApi,
+        opencode_proto::ProviderEnabled,
+        opencode_proto::ProviderRequest,
+        opencode_proto::LocationInfo,
+        opencode_proto::LocationProject
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -1591,7 +1736,9 @@ async fn project_current(
         (name = "file", description = "File routes"),
         (name = "sessions", description = "Session routes"),
         (name = "project", description = "Project routes"),
-        (name = "events", description = "Event stream routes")
+        (name = "events", description = "Event stream routes"),
+        (name = "model", description = "Model catalog routes"),
+        (name = "provider", description = "Provider catalog routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -1673,6 +1820,12 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("project") {
         router = router.route("/project", get(project_list));
         router = router.route("/project/current", get(project_current));
+    }
+    if state.routes.handles("model") {
+        router = router.route("/api/model", get(v2_model_list));
+    }
+    if state.routes.handles("provider") {
+        router = router.route("/api/provider", get(v2_provider_list));
     }
     // Internal Phase-4 proving route (not a contract path): build the runner and drive one turn.
     if state.routes.handles("session-exec") {
@@ -2624,6 +2777,109 @@ mod tests {
             .oneshot(
                 axum::extract::Request::builder()
                     .uri("/project")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    // ---- Phase 6: model/provider catalog routes ----
+
+    /// A small parsed catalog: one aisdk provider (`anthropic`) with one model (no per-model hint).
+    fn sample_catalog() -> opencode_config::catalog::Catalog {
+        opencode_config::catalog::parse_catalog(
+            r#"{ "anthropic": { "id":"anthropic","name":"Anthropic","env":["ANTHROPIC_API_KEY"],
+                 "api":"https://api.anthropic.com","npm":"@ai-sdk/anthropic","models":{
+                   "claude-x":{"id":"claude-x","name":"Claude X","release_date":"2026-01-01",
+                     "tool_call":true,"limit":{"context":200000,"output":64000}} } } }"#,
+        )
+        .unwrap()
+    }
+
+    fn catalog_state(group: &str) -> ServerState {
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1")); // worktree "/repo"
+        ServerState {
+            ctx: AppContext::new(AppServices {
+                catalog: Arc::new(sample_catalog()),
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse(group),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_model_list_returns_projected_models() {
+        use tower::ServiceExt;
+        let resp = build_router(catalog_state("model"))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/model?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // location resolved from the seeded project (worktree "/repo").
+        assert_eq!(v["location"]["directory"], "/repo");
+        assert_eq!(v["location"]["project"]["id"], "prj_1");
+        // model projected from the catalog (no per-model hint → native, carrying the id).
+        assert_eq!(v["data"][0]["id"], "claude-x");
+        assert_eq!(v["data"][0]["providerID"], "anthropic");
+        assert_eq!(v["data"][0]["api"]["type"], "native");
+        assert_eq!(v["data"][0]["status"], "active");
+        assert_eq!(v["data"][0]["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn v2_provider_list_returns_projected_providers() {
+        use tower::ServiceExt;
+        let resp = build_router(catalog_state("provider"))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/provider?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["location"]["project"]["id"], "prj_1");
+        assert_eq!(v["data"][0]["id"], "anthropic");
+        // npm advertised → aisdk; raw projection reports disabled (credential layer enables it later).
+        assert_eq!(v["data"][0]["api"]["type"], "aisdk");
+        assert_eq!(v["data"][0]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn v2_model_list_proxies_when_group_disabled() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""), // `model` not enabled → proxy fallback
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/model")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
