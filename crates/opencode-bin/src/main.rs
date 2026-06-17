@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
+use opencode_config::catalog::Catalog;
+use opencode_core::catalog::{populate, PopulateOpts};
 use opencode_db::Database;
 use opencode_effect::{init_tracing, AppContext, AppServices};
 use opencode_server::{
@@ -51,6 +53,39 @@ fn data_dir() -> PathBuf {
     PathBuf::from(home).join(".local/share/opencode")
 }
 
+/// The opencode cache directory (`$XDG_CACHE_HOME/opencode`, falling back to `~/.cache/opencode`),
+/// mirroring `packages/core/src/global.ts`.
+fn cache_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("opencode");
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache/opencode")
+}
+
+/// Load the models.dev catalog best-effort for the composition root: mirrors the TS load order
+/// (`OPENCODE_MODELS_PATH` → on-disk cache → fetch) via [`opencode_core::catalog::populate`]. Any
+/// failure (offline, parse error, missing cache with fetch disabled) degrades to an empty catalog with
+/// a warning, so the server always boots — the model/provider routes then serve an empty list until a
+/// catalog is available. A periodic background refresh is a documented follow-up.
+async fn load_catalog(opts: &PopulateOpts, cache_path: &Path) -> Arc<Catalog> {
+    let client = reqwest::Client::new();
+    match populate(&client, cache_path, opts).await {
+        Ok(catalog) => {
+            tracing::info!(providers = catalog.len(), "models.dev catalog loaded");
+            Arc::new(catalog)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "models.dev catalog unavailable; serving an empty catalog");
+            Arc::new(Catalog::new())
+        }
+    }
+}
+
 /// Resolve the database path from the `--db`/`OPENCODE_DB` flag, mirroring TS `Database.path()`:
 /// `:memory:` and absolute paths pass through; a relative value is joined under `data_dir`; an absent
 /// flag defaults to `<data_dir>/opencode.db`.
@@ -68,7 +103,7 @@ fn resolve_db_path(flag: Option<&str>, data_dir: &Path) -> PathBuf {
 /// Migration policy ("TS migrates, Rust verifies"): a database that is **behind** this build (missing
 /// expected migrations) is fatal — the TypeScript server must apply migrations first. A database
 /// **ahead** of this build, or one with no journal yet, only warns.
-async fn build_app_context(db_path: &Path) -> anyhow::Result<AppContext> {
+async fn build_app_context(db_path: &Path, catalog: Arc<Catalog>) -> anyhow::Result<AppContext> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() && db_path.as_os_str() != ":memory:" {
             std::fs::create_dir_all(parent).ok();
@@ -109,6 +144,7 @@ async fn build_app_context(db_path: &Path) -> anyhow::Result<AppContext> {
         event_store: db.event_store(),
         sessions: db.session_store(),
         projects: db.project_store(),
+        catalog,
         ..Default::default()
     }))
 }
@@ -119,7 +155,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let db_path = resolve_db_path(cli.db.as_deref(), &data_dir());
-    let ctx = build_app_context(&db_path).await?;
+    let catalog = load_catalog(&PopulateOpts::from_env(), &cache_dir().join("models.json")).await;
+    let ctx = build_app_context(&db_path, catalog).await?;
 
     // The native tools resolve relative paths against the server's working directory.
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -170,9 +207,10 @@ mod tests {
     async fn build_app_context_wires_a_working_event_store() {
         // A fresh file DB has no journal → warns (not fatal) and yields a usable event store.
         let dir = tempfile::tempdir().unwrap();
-        let ctx = build_app_context(&dir.path().join("opencode.db"))
+        let ctx = build_app_context(&dir.path().join("opencode.db"), Arc::new(Catalog::new()))
             .await
             .unwrap();
+        assert!(ctx.catalog().is_empty());
         let store = ctx.event_store();
         let head = store
             .append(
@@ -184,5 +222,38 @@ mod tests {
             .unwrap();
         assert_eq!(head, 1);
         assert_eq!(store.head_seq("ses_1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_catalog_reads_models_path() {
+        // `OPENCODE_MODELS_PATH` (opts.models_path) loads that file directly — no network.
+        let dir = tempfile::tempdir().unwrap();
+        let models = dir.path().join("models.json");
+        std::fs::write(
+            &models,
+            r#"{ "anthropic": { "id": "anthropic", "name": "Anthropic", "models": {} } }"#,
+        )
+        .unwrap();
+        let opts = PopulateOpts {
+            models_path: Some(models),
+            disable_fetch: true,
+            source: "http://unused.invalid".to_string(),
+        };
+        let catalog = load_catalog(&opts, &dir.path().join("cache.json")).await;
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.contains_key("anthropic"));
+    }
+
+    #[tokio::test]
+    async fn load_catalog_degrades_to_empty_when_unavailable() {
+        // No override, no cache, fetch disabled → an empty catalog (the server still boots).
+        let dir = tempfile::tempdir().unwrap();
+        let opts = PopulateOpts {
+            models_path: None,
+            disable_fetch: true,
+            source: "http://unused.invalid".to_string(),
+        };
+        let catalog = load_catalog(&opts, &dir.path().join("missing.json")).await;
+        assert!(catalog.is_empty());
     }
 }
