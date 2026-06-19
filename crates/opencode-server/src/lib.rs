@@ -1667,6 +1667,92 @@ async fn v2_location_get(
     Ok(Json(location))
 }
 
+/// Error responder for `v2.provider.get`: a 404 `ProviderNotFoundError`, a 400 `InvalidRequestError`
+/// (from location resolution), or a generic 500 envelope.
+enum ProviderGetError {
+    /// No provider with that id (404).
+    NotFound(String),
+    /// The request location couldn't be resolved (400).
+    BadRequest(String),
+    /// Store/resolver failure (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for ProviderGetError {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::StatusCode;
+        match self {
+            ProviderGetError::NotFound(id) => (
+                StatusCode::NOT_FOUND,
+                Json(opencode_proto::ProviderNotFoundError {
+                    tag: "ProviderNotFoundError".to_string(),
+                    message: format!("Provider not found: {id}"),
+                    provider_id: id,
+                }),
+            )
+                .into_response(),
+            ProviderGetError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message,
+                    kind: None,
+                    field: None,
+                }),
+            )
+                .into_response(),
+            ProviderGetError::Internal(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /api/provider/{providerID}` — get one provider (group `provider`). Matches the golden
+/// `v2.provider.get`: 200 `{ location, data }` + 400/401/404/503. Looks the provider up in the catalog
+/// by id (unfiltered — a disabled provider is still returned, with its env-derived `enabled`); a missing
+/// id is a 404 `ProviderNotFoundError`.
+#[utoipa::path(
+    get,
+    path = "/api/provider/{providerID}",
+    operation_id = "v2.provider.get",
+    params(
+        ("providerID" = String, Path, description = "Provider id"),
+        ("location" = Option<String>, Query, description = "Location context (deepObject)")
+    ),
+    responses(
+        (status = 200, description = "Provider", body = opencode_proto::ProviderGetResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Provider not found", body = opencode_proto::ProviderNotFoundError),
+        (status = 503, description = "Catalog unavailable", body = opencode_proto::ServiceUnavailableError)
+    ),
+    tag = "provider"
+)]
+async fn v2_provider_get(
+    State(state): State<ServerState>,
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::ProviderGetResponse>, ProviderGetError> {
+    let location = resolve_location(&state, &params)
+        .await
+        .map_err(|e| match e.0 {
+            opencode_effect::AppError::BadRequest(m) => ProviderGetError::BadRequest(m),
+            other => ProviderGetError::Internal(other.to_string()),
+        })?;
+    let catalog = state.ctx.catalog();
+    let provider = catalog
+        .get(&provider_id)
+        .ok_or_else(|| ProviderGetError::NotFound(provider_id.clone()))?;
+    let data = opencode_core::catalog_v2::provider_info(provider, &env_present);
+    Ok(Json(opencode_proto::ProviderGetResponse { location, data }))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
@@ -1687,7 +1773,8 @@ async fn v2_location_get(
         session_abort,
         v2_model_list,
         v2_provider_list,
-        v2_location_get
+        v2_location_get,
+        v2_provider_get
     ),
     components(schemas(
         opencode_proto::Health,
@@ -1727,6 +1814,8 @@ async fn v2_location_get(
         opencode_proto::ConflictError,
         opencode_proto::ModelListResponse,
         opencode_proto::ProviderListResponse,
+        opencode_proto::ProviderGetResponse,
+        opencode_proto::ProviderNotFoundError,
         opencode_proto::ServiceUnavailableError,
         opencode_proto::ModelV2Info,
         opencode_proto::ModelApi,
@@ -1847,6 +1936,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("provider") {
         router = router.route("/api/provider", get(v2_provider_list));
+        router = router.route("/api/provider/{providerID}", get(v2_provider_get));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -3018,6 +3108,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 502);
+    }
+
+    /// State for the `v2.provider.get` tests: one provider (`anthropic`) gating on a never-set key, so
+    /// `enabled` is deterministically `false` (and `provider.get` returns it anyway — it doesn't filter).
+    fn provider_get_state() -> ServerState {
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1"));
+        let catalog = opencode_config::catalog::parse_catalog(
+            r#"{ "anthropic": { "id":"anthropic","name":"Anthropic",
+                 "env":["OPENCODE_DEFINITELY_UNSET_KEY_FOR_TEST"],"npm":"@ai-sdk/anthropic","models":{} } }"#,
+        )
+        .unwrap();
+        ServerState {
+            ctx: AppContext::new(AppServices {
+                catalog: Arc::new(catalog),
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("provider"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_provider_get_returns_the_provider() {
+        use tower::ServiceExt;
+        let resp = build_router(provider_get_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/provider/anthropic?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // `{ location, data }` wrapper around a single provider; get returns it even though disabled.
+        assert_eq!(v["location"]["project"]["id"], "prj_1");
+        assert_eq!(v["data"]["id"], "anthropic");
+        assert_eq!(v["data"]["api"]["type"], "aisdk");
+        assert_eq!(v["data"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn v2_provider_get_unknown_is_not_found() {
+        use tower::ServiceExt;
+        let resp = build_router(provider_get_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/provider/ghost?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "ProviderNotFoundError");
+        assert_eq!(v["providerID"], "ghost");
     }
 
     // ---- Phase 4: the internal session-execute proving route (engine factory injected) ----

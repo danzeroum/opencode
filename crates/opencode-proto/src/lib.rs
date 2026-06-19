@@ -924,6 +924,29 @@ pub struct ProviderListResponse {
     pub data: Vec<ProviderV2Info>,
 }
 
+/// 200 body of `v2.provider.get` (GET /api/provider/{providerID}): the `Location.response` wrapper
+/// `{ location, data }` around a single provider.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ProviderGetResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The provider.
+    pub data: ProviderV2Info,
+}
+
+/// `ProviderNotFoundError` — 404 for `v2.provider.get` (`{ _tag, providerID, message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderNotFoundError {
+    /// Always `"ProviderNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The provider id that was not found.
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,5 +1437,47 @@ mod tests {
         assert_eq!(json["location"]["directory"], "/home/u/proj");
         let back: ProviderListResponse = serde_json::from_value(json).unwrap();
         assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn provider_get_response_round_trips() {
+        let resp = ProviderGetResponse {
+            location: sample_location(),
+            data: ProviderV2Info {
+                id: "anthropic".into(),
+                name: "Anthropic".into(),
+                enabled: ProviderEnabled::Env {
+                    via: "env".into(),
+                    name: "ANTHROPIC_API_KEY".into(),
+                },
+                env: vec!["ANTHROPIC_API_KEY".into()],
+                api: ProviderApi::Native {
+                    url: None,
+                    settings: serde_json::json!({}),
+                },
+                request: ProviderRequest {
+                    headers: BTreeMap::new(),
+                    body: serde_json::json!({}),
+                },
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["data"]["id"], "anthropic"); // single object, not an array
+        assert_eq!(json["data"]["enabled"]["via"], "env");
+        let back: ProviderGetResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn provider_not_found_error_uses_tag_and_provider_id_keys() {
+        let json = serde_json::to_value(ProviderNotFoundError {
+            tag: "ProviderNotFoundError".into(),
+            provider_id: "anthropic".into(),
+            message: "Provider not found: anthropic".into(),
+        })
+        .unwrap();
+        assert_eq!(json["_tag"], "ProviderNotFoundError");
+        assert_eq!(json["providerID"], "anthropic");
+        assert_eq!(json["message"], "Provider not found: anthropic");
     }
 }
