@@ -190,6 +190,22 @@ pub struct Todo {
     pub priority: String,
 }
 
+/// A filesystem entry returned by `file.list` (`{ name, path, absolute, type, ignored }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FileNode {
+    /// Entry file name.
+    pub name: String,
+    /// Path relative to the requested directory.
+    pub path: String,
+    /// Absolute filesystem path.
+    pub absolute: String,
+    /// `"file"` or `"directory"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Whether the entry is gitignored.
+    pub ignored: bool,
+}
+
 // ---------------------------------------------------------------------------
 // V2 session read contract (`v2.session.get` — GET /api/session/{sessionID}).
 // SessionV2Info mirrors `packages/core/src/session/schema.ts`; the projection mapping it comes from

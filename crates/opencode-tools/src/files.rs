@@ -62,6 +62,52 @@ pub fn list_dir(dir: impl AsRef<Path>) -> Result<Vec<String>, ToolError> {
     Ok(entries)
 }
 
+/// A single immediate child of a directory, with its kind and gitignore status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntryInfo {
+    /// Entry file name.
+    pub name: String,
+    /// Whether the entry is a directory.
+    pub is_dir: bool,
+    /// Whether the entry is gitignored (per the `.gitignore`/`.ignore` hierarchy).
+    pub ignored: bool,
+}
+
+/// List the immediate children of `dir` with their kind + gitignore status, sorted by name. The
+/// `ignored` flag uses the [`ignore`] crate's hierarchical gitignore rules (the same the search tools
+/// use): a gitignored entry is still listed, just flagged.
+pub fn list_dir_nodes(dir: impl AsRef<Path>) -> Result<Vec<DirEntryInfo>, ToolError> {
+    let dir = dir.as_ref();
+    // Immediate children that survive the gitignore filter (hidden files kept; only gitignore decides).
+    let mut not_ignored = std::collections::HashSet::new();
+    for result in ignore::WalkBuilder::new(dir)
+        .max_depth(Some(1))
+        .hidden(false)
+        .build()
+        .flatten()
+    {
+        if result.depth() == 1 {
+            if let Some(name) = result.file_name().to_str() {
+                not_ignored.insert(name.to_string());
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let ignored = !not_ignored.contains(&name);
+        nodes.push(DirEntryInfo {
+            name,
+            is_dir,
+            ignored,
+        });
+    }
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(nodes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
