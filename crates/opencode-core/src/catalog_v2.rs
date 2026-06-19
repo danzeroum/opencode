@@ -18,17 +18,18 @@
 //! - `cost` is the base price plus, when published, the legacy over-200k context tier.
 //! - `status` defaults to `active`; `limit` integers are coerced from the catalog's numbers.
 //!
-//! **Deferred to a follow-up slice** (kept out to bound this one): the experimental-mode `variants`
-//! (TS `variants()` / `ModelRequest.normalizeAiSdkOptions`, with its per-package option profiles) —
-//! `variants` is projected as empty here.
+//! Experimental-mode `variants` are projected from `model.experimental.modes` ([`variants`]), mirroring
+//! the TS `variants()` / `ModelRequest.normalizeAiSdkOptions` (per-package option profiles). The
+//! stored-credential enabling path (`enabled = { via: "credential" }`) still needs the credential store
+//! and is a documented follow-up.
 
 use std::collections::BTreeMap;
 
 use opencode_config::catalog::{Catalog, Cost, Model, Provider};
 use opencode_proto::{
     EffectNumber, ModelApi, ModelCapabilities, ModelCost, ModelCostCache, ModelCostTier,
-    ModelGeneration, ModelLimit, ModelRequest, ModelStatus, ModelTime, ModelV2Info, ProviderApi,
-    ProviderEnabled, ProviderRequest, ProviderV2Info,
+    ModelGeneration, ModelLimit, ModelRequest, ModelStatus, ModelTime, ModelV2Info, ModelVariant,
+    ProviderApi, ProviderEnabled, ProviderRequest, ProviderV2Info,
 };
 
 /// A provider's env-derived `enabled`: the first of its `env` vars that `env` reports set
@@ -88,10 +89,13 @@ pub fn provider_info(provider: &Provider, env: &impl Fn(&str) -> bool) -> Provid
     }
 }
 
-/// Project a single catalog [`Model`] (under `provider_id`) into its V2 wire form.
-pub fn model_info(provider_id: &str, model: &Model) -> ModelV2Info {
+/// Project a single catalog [`Model`] (under `provider_id`, whose provider-level npm — if any — is
+/// `provider_npm`) into its V2 wire form.
+pub fn model_info(provider_id: &str, provider_npm: Option<&str>, model: &Model) -> ModelV2Info {
     let model_npm = model.provider.as_ref().and_then(|p| p.npm.as_ref());
     let model_api = model.provider.as_ref().and_then(|p| p.api.clone());
+    // Variant option-partitioning uses the model's own npm, falling back to the provider's.
+    let package_name = model_npm.map(String::as_str).or(provider_npm);
     ModelV2Info {
         id: model.id.clone(),
         provider_id: provider_id.to_string(),
@@ -130,8 +134,7 @@ pub fn model_info(provider_id: &str, model: &Model) -> ModelV2Info {
             options: Some(serde_json::json!({})),
             variant: None,
         },
-        // Experimental-mode variants are deferred to a follow-up slice (see module docs).
-        variants: Vec::new(),
+        variants: variants(model, package_name),
         time: ModelTime {
             released: EffectNumber::Finite(released_millis(&model.release_date)),
         },
@@ -146,6 +149,162 @@ pub fn model_info(provider_id: &str, model: &Model) -> ModelV2Info {
     }
 }
 
+/// Project a model's experimental `modes` into request [`ModelVariant`]s. Mirrors the TS `variants()` in
+/// `plugin/models-dev.ts`: each `experimental.modes[id]` carries an optional `provider.{ body, headers }`;
+/// the body is partitioned by [`normalize_aisdk_options`] (driven by `package_name`) into generation
+/// knobs / provider options / passthrough body. Absent `experimental.modes` yields no variants.
+fn variants(model: &Model, package_name: Option<&str>) -> Vec<ModelVariant> {
+    let Some(modes) = model
+        .experimental
+        .as_ref()
+        .and_then(|e| e.get("modes"))
+        .and_then(|m| m.as_object())
+    else {
+        return Vec::new();
+    };
+    modes
+        .iter()
+        .map(|(id, item)| {
+            let provider = item.get("provider");
+            let body_input = provider
+                .and_then(|p| p.get("body"))
+                .and_then(|b| b.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let headers = provider
+                .and_then(|p| p.get("headers"))
+                .and_then(|h| h.as_object())
+                .map(|h| {
+                    h.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (generation, options, body) = normalize_aisdk_options(package_name, &body_input);
+            ModelVariant {
+                id: id.clone(),
+                headers,
+                body,
+                generation: Some(generation),
+                options: Some(options),
+            }
+        })
+        .collect()
+}
+
+/// Partition AI-SDK-shaped request options into generation knobs, provider options, and passthrough
+/// body. Mirrors `ModelRequest.normalizeAiSdkOptions`: known generation keys (numbers, or a string
+/// array for `stop`) become [`ModelGeneration`] fields; keys the package's profile recognizes become
+/// `options`; everything else stays in `body`.
+fn normalize_aisdk_options(
+    package_name: Option<&str>,
+    input: &serde_json::Map<String, serde_json::Value>,
+) -> (ModelGeneration, serde_json::Value, serde_json::Value) {
+    let mut generation = ModelGeneration::default();
+    let mut options = serde_json::Map::new();
+    let mut body = serde_json::Map::new();
+    for (key, value) in input {
+        match generation_key(key) {
+            Some("stop") => {
+                if let Some(stop) = as_string_array(value) {
+                    generation.stop = Some(stop);
+                    continue;
+                }
+            }
+            Some(field) => {
+                if let Some(n) = value.as_f64() {
+                    set_generation_number(&mut generation, field, n);
+                    continue;
+                }
+            }
+            None => {}
+        }
+        match semantic_option(package_name, key) {
+            Some(canonical) => {
+                options.insert(canonical.to_string(), value.clone());
+            }
+            None => {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    (
+        generation,
+        serde_json::Value::Object(options),
+        serde_json::Value::Object(body),
+    )
+}
+
+/// Map an AI-SDK request key to its canonical [`ModelGeneration`] field name (or `None` if it isn't a
+/// generation knob). Mirrors the TS `generationKeys` map.
+fn generation_key(key: &str) -> Option<&'static str> {
+    match key {
+        "maxOutputTokens" | "maxTokens" => Some("maxTokens"),
+        "temperature" => Some("temperature"),
+        "topP" => Some("topP"),
+        "topK" => Some("topK"),
+        "frequencyPenalty" => Some("frequencyPenalty"),
+        "presencePenalty" => Some("presencePenalty"),
+        "seed" => Some("seed"),
+        "stopSequences" | "stop" => Some("stop"),
+        _ => None,
+    }
+}
+
+/// Set the [`ModelGeneration`] numeric field named by `field` (a canonical key from [`generation_key`]).
+fn set_generation_number(generation: &mut ModelGeneration, field: &str, value: f64) {
+    let value = Some(EffectNumber::Finite(value));
+    match field {
+        "maxTokens" => generation.max_tokens = value,
+        "temperature" => generation.temperature = value,
+        "topP" => generation.top_p = value,
+        "topK" => generation.top_k = value,
+        "frequencyPenalty" => generation.frequency_penalty = value,
+        "presencePenalty" => generation.presence_penalty = value,
+        "seed" => generation.seed = value,
+        _ => {}
+    }
+}
+
+/// The canonical provider-option name for `key` under `package_name`'s profile, or `None` if the key
+/// isn't a recognized option (so it falls through to the passthrough body). Mirrors the TS `profiles`.
+fn semantic_option(package_name: Option<&str>, key: &str) -> Option<&'static str> {
+    let table: &[(&str, &str)] = match package_name {
+        Some("@ai-sdk/openai") => &[
+            ("store", "store"),
+            ("promptCacheKey", "promptCacheKey"),
+            ("reasoningEffort", "reasoningEffort"),
+            ("reasoningSummary", "reasoningSummary"),
+            ("include", "include"),
+            ("textVerbosity", "textVerbosity"),
+            ("serviceTier", "serviceTier"),
+            ("service_tier", "serviceTier"),
+        ],
+        Some("@ai-sdk/openai-compatible") => &[
+            ("store", "store"),
+            ("promptCacheKey", "promptCacheKey"),
+            ("reasoningEffort", "reasoningEffort"),
+            ("reasoning_effort", "reasoningEffort"),
+        ],
+        Some("@ai-sdk/anthropic") => &[("thinking", "thinking")],
+        _ => &[],
+    };
+    table
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, canonical)| *canonical)
+}
+
+/// A JSON value as a `Vec<String>` when it's an array of strings (else `None`) — mirrors the TS
+/// `Array.isArray(value) && value.every(item => typeof item === "string")` check for `stop`.
+fn as_string_array(value: &serde_json::Value) -> Option<Vec<String>> {
+    let array = value.as_array()?;
+    array
+        .iter()
+        .map(|item| item.as_str().map(String::from))
+        .collect()
+}
+
 /// Project every provider in a [`Catalog`] (ordered by id via the catalog's `BTreeMap`), deriving
 /// each `enabled` from `env`.
 pub fn providers(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ProviderV2Info> {
@@ -157,10 +316,11 @@ pub fn models(catalog: &Catalog) -> Vec<ModelV2Info> {
     catalog
         .values()
         .flat_map(|provider| {
+            let npm = provider.npm.as_deref();
             provider
                 .models
                 .values()
-                .map(move |model| model_info(&provider.id, model))
+                .map(move |model| model_info(&provider.id, npm, model))
         })
         .collect()
 }
@@ -181,10 +341,11 @@ pub fn available_models(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<M
         .values()
         .filter(|provider| is_available(&enabled_from_env(provider, env)))
         .flat_map(|provider| {
+            let npm = provider.npm.as_deref();
             provider
                 .models
                 .values()
-                .map(move |model| model_info(&provider.id, model))
+                .map(move |model| model_info(&provider.id, npm, model))
         })
         .filter(|model| model.enabled)
         .collect();
@@ -345,7 +506,11 @@ mod tests {
     #[test]
     fn model_maps_core_fields() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let m = model_info("anthropic", &cat["anthropic"].models["claude-sonnet-4-6"]);
+        let m = model_info(
+            "anthropic",
+            cat["anthropic"].npm.as_deref(),
+            &cat["anthropic"].models["claude-sonnet-4-6"],
+        );
         assert_eq!(m.id, "claude-sonnet-4-6");
         assert_eq!(m.provider_id, "anthropic");
         assert_eq!(m.family.as_deref(), Some("claude-sonnet"));
@@ -382,7 +547,11 @@ mod tests {
     #[test]
     fn model_defaults_when_minimal() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let m = model_info("local", &cat["local"].models["tiny"]);
+        let m = model_info(
+            "local",
+            cat["local"].npm.as_deref(),
+            &cat["local"].models["tiny"],
+        );
         assert_eq!(m.status, ModelStatus::Active); // status absent → active
         assert!(!m.capabilities.tools); // tool_call absent → false
         assert!(m.capabilities.input.is_empty()); // no modalities → []
@@ -400,7 +569,7 @@ mod tests {
                  "provider": { "npm": "@ai-sdk/openai", "api": "https://api.openai.com" } }
         } } }"#;
         let cat = parse_catalog(json).unwrap();
-        let m = model_info("x", &cat["x"].models["m"]);
+        let m = model_info("x", cat["x"].npm.as_deref(), &cat["x"].models["m"]);
         assert_eq!(
             m.api,
             ModelApi::Aisdk {
@@ -420,7 +589,7 @@ mod tests {
                            "context_over_200k": { "input": 6.0, "output": 22.5, "cache_read": 0.6 } } }
         } } }"#;
         let cat = parse_catalog(json).unwrap();
-        let m = model_info("x", &cat["x"].models["m"]);
+        let m = model_info("x", cat["x"].npm.as_deref(), &cat["x"].models["m"]);
         assert_eq!(m.cost.len(), 2);
         assert_eq!(m.cost[0].tier, None);
         assert_eq!(m.cost[0].input, 3.0);
@@ -541,5 +710,72 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "new"); // newest first
         assert_eq!(models[1].id, "old");
+    }
+
+    #[test]
+    fn variants_empty_without_experimental_modes() {
+        let cat = parse_catalog(
+            r#"{ "p": { "id":"p","name":"P","models": {
+              "m": { "id":"m","name":"M","limit":{"context":1,"output":1} } } } }"#,
+        )
+        .unwrap();
+        let m = model_info("p", None, &cat["p"].models["m"]);
+        assert!(m.variants.is_empty());
+    }
+
+    #[test]
+    fn variants_partition_aisdk_options() {
+        let cat = parse_catalog(
+            r#"{ "openai": { "id":"openai","name":"OpenAI","npm":"@ai-sdk/openai","models": {
+              "gpt": { "id":"gpt","name":"GPT","limit":{"context":1,"output":1},
+                "experimental": { "modes": { "reasoning": { "provider": {
+                  "body": { "maxOutputTokens": 1000, "temperature": 0.5, "stop": ["END"],
+                            "reasoningEffort": "high", "service_tier": "flex", "customKey": "v" },
+                  "headers": { "X-Foo": "bar" } } } } } }
+            } } }"#,
+        )
+        .unwrap();
+        let m = model_info(
+            "openai",
+            cat["openai"].npm.as_deref(),
+            &cat["openai"].models["gpt"],
+        );
+        assert_eq!(m.variants.len(), 1);
+        let v = &m.variants[0];
+        assert_eq!(v.id, "reasoning");
+        assert_eq!(v.headers.get("X-Foo").map(String::as_str), Some("bar"));
+        // generation knobs: maxOutputTokens → maxTokens, temperature, stop (string array).
+        let gen = v.generation.as_ref().unwrap();
+        assert_eq!(gen.max_tokens, Some(EffectNumber::Finite(1000.0)));
+        assert_eq!(gen.temperature, Some(EffectNumber::Finite(0.5)));
+        assert_eq!(gen.stop, Some(vec!["END".to_string()]));
+        // openai profile → options (service_tier canonicalizes to serviceTier); unknown → body.
+        let options = v.options.as_ref().unwrap();
+        assert_eq!(options["reasoningEffort"], "high");
+        assert_eq!(options["serviceTier"], "flex");
+        assert!(options.get("customKey").is_none());
+        assert_eq!(v.body["customKey"], "v");
+    }
+
+    #[test]
+    fn variants_use_provider_npm_fallback_for_semantics() {
+        // The model has no own npm; the provider's npm (@ai-sdk/anthropic) drives option semantics.
+        let cat = parse_catalog(
+            r#"{ "anthropic": { "id":"anthropic","name":"Anthropic","npm":"@ai-sdk/anthropic","models": {
+              "claude": { "id":"claude","name":"Claude","limit":{"context":1,"output":1},
+                "experimental": { "modes": { "thinking": { "provider": {
+                  "body": { "thinking": { "type": "enabled" }, "other": 1 } } } } } }
+            } } }"#,
+        )
+        .unwrap();
+        let m = model_info(
+            "anthropic",
+            cat["anthropic"].npm.as_deref(),
+            &cat["anthropic"].models["claude"],
+        );
+        let v = &m.variants[0];
+        let options = v.options.as_ref().unwrap();
+        assert_eq!(options["thinking"]["type"], "enabled"); // anthropic profile → options
+        assert_eq!(v.body["other"], 1); // unrecognized key → passthrough body
     }
 }
