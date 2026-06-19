@@ -2125,6 +2125,7 @@ async fn v2_provider_get(
         file_list,
         permission_list,
         question_list,
+        vcs_get,
         project_list,
         project_current,
         v2_event_subscribe,
@@ -2218,7 +2219,8 @@ async fn v2_provider_get(
         opencode_proto::QuestionRequest,
         opencode_proto::QuestionInfo,
         opencode_proto::QuestionOption,
-        opencode_proto::QuestionTool
+        opencode_proto::QuestionTool,
+        opencode_proto::VcsInfo
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -2334,6 +2336,64 @@ async fn file_list(
     Ok(Json(data))
 }
 
+/// Run `git -C <dir> <args>` and return trimmed stdout, or `None` on any failure (not a repo, git
+/// missing, empty output). Best-effort so `vcs.get` degrades gracefully outside a repository.
+async fn git_field(dir: &str, args: &[&str]) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// `GET /vcs` — version-control info for a directory (group `instance`). Matches the golden `vcs.get`:
+/// 200 `VcsInfo`, 400 `BadRequestError`. Best-effort `git` queries; fields are omitted outside a repo.
+#[utoipa::path(
+    get,
+    path = "/vcs",
+    operation_id = "vcs.get",
+    params(
+        ("directory" = Option<String>, Query, description = "Directory (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "VCS info", body = opencode_proto::VcsInfo),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn vcs_get(
+    State(_state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<opencode_proto::VcsInfo> {
+    let dir = params
+        .get("directory")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        });
+    let branch = git_field(&dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .filter(|b| b != "HEAD"); // detached HEAD → no branch
+    let default_branch = git_field(&dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .await
+        .map(|s| s.strip_prefix("origin/").unwrap_or(&s).to_string());
+    Json(opencode_proto::VcsInfo {
+        branch,
+        default_branch,
+    })
+}
+
 /// `GET /permission` — pending permission requests (group `permission`). Matches the golden
 /// `permission.list`: 200 `[PermissionRequest]`, 400 `BadRequestError`. Pending requests are ephemeral
 /// execution state; until the native runner produces them this is empty (no in-flight approvals).
@@ -2435,6 +2495,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/path", get(path_get));
         router = router.route("/session/{sessionID}/abort", post(session_abort));
         router = router.route("/instance/dispose", post(instance_dispose));
+        router = router.route("/vcs", get(vcs_get));
     }
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
@@ -3227,6 +3288,37 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["name"], "NotFoundError");
         assert_eq!(v["data"]["message"], "Session not found: ses_missing");
+    }
+
+    #[tokio::test]
+    async fn vcs_get_outside_repo_returns_empty_object() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap(); // a fresh temp dir is not a git repo
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("instance"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let uri = format!("/vcs?directory={}", dir.path().display());
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // No repo → both fields omitted (object present, branch absent).
+        assert!(v.is_object());
+        assert!(v.get("branch").is_none());
     }
 
     #[tokio::test]
