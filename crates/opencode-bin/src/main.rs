@@ -7,12 +7,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use opencode_config::catalog::Catalog;
-use opencode_core::catalog::{populate, PopulateOpts};
+use opencode_core::catalog::{populate, refresh, PopulateOpts};
 use opencode_db::Database;
-use opencode_effect::{init_tracing, AppContext, AppServices};
+use opencode_effect::{catalog_handle, init_tracing, AppContext, AppServices, CatalogHandle};
 use opencode_server::{
     proxy::Upstream, RouteTable, RunnerServices, ServerState, SessionCoordinator,
 };
@@ -67,23 +68,53 @@ fn cache_dir() -> PathBuf {
     PathBuf::from(home).join(".cache/opencode")
 }
 
+/// How often the background task re-fetches the catalog (mirrors the on-disk cache TTL).
+const CATALOG_REFRESH_INTERVAL: Duration = opencode_core::catalog::CACHE_TTL;
+
 /// Load the models.dev catalog best-effort for the composition root: mirrors the TS load order
 /// (`OPENCODE_MODELS_PATH` → on-disk cache → fetch) via [`opencode_core::catalog::populate`]. Any
 /// failure (offline, parse error, missing cache with fetch disabled) degrades to an empty catalog with
 /// a warning, so the server always boots — the model/provider routes then serve an empty list until a
-/// catalog is available. A periodic background refresh is a documented follow-up.
-async fn load_catalog(opts: &PopulateOpts, cache_path: &Path) -> Arc<Catalog> {
+/// catalog is available.
+async fn load_catalog(opts: &PopulateOpts, cache_path: &Path) -> Catalog {
     let client = reqwest::Client::new();
     match populate(&client, cache_path, opts).await {
         Ok(catalog) => {
             tracing::info!(providers = catalog.len(), "models.dev catalog loaded");
-            Arc::new(catalog)
+            catalog
         }
         Err(err) => {
             tracing::warn!(error = %err, "models.dev catalog unavailable; serving an empty catalog");
-            Arc::new(Catalog::new())
+            Catalog::new()
         }
     }
+}
+
+/// Spawn a background task that periodically refreshes the on-disk catalog cache and hot-swaps the
+/// in-memory catalog ([`CatalogHandle`]). Skips entirely when there's no remote source to refresh from
+/// (an explicit `OPENCODE_MODELS_PATH`, or fetching disabled), since the catalog is then fixed.
+fn spawn_catalog_refresh(handle: CatalogHandle, cache_path: PathBuf, opts: PopulateOpts) {
+    if opts.models_path.is_some() || opts.disable_fetch {
+        return;
+    }
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        loop {
+            tokio::time::sleep(CATALOG_REFRESH_INTERVAL).await;
+            if let Err(err) = refresh(&client, &cache_path, &opts.source, false).await {
+                tracing::warn!(error = %err, "catalog background refresh failed");
+                continue;
+            }
+            match populate(&client, &cache_path, &opts).await {
+                Ok(fresh) => {
+                    let providers = fresh.len();
+                    *handle.write().expect("catalog lock poisoned") = Arc::new(fresh);
+                    tracing::debug!(providers, "catalog refreshed");
+                }
+                Err(err) => tracing::warn!(error = %err, "catalog reload after refresh failed"),
+            }
+        }
+    });
 }
 
 /// Resolve the database path from the `--db`/`OPENCODE_DB` flag, mirroring TS `Database.path()`:
@@ -103,7 +134,7 @@ fn resolve_db_path(flag: Option<&str>, data_dir: &Path) -> PathBuf {
 /// Migration policy ("TS migrates, Rust verifies"): a database that is **behind** this build (missing
 /// expected migrations) is fatal — the TypeScript server must apply migrations first. A database
 /// **ahead** of this build, or one with no journal yet, only warns.
-async fn build_app_context(db_path: &Path, catalog: Arc<Catalog>) -> anyhow::Result<AppContext> {
+async fn build_app_context(db_path: &Path, catalog: CatalogHandle) -> anyhow::Result<AppContext> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() && db_path.as_os_str() != ":memory:" {
             std::fs::create_dir_all(parent).ok();
@@ -155,7 +186,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let db_path = resolve_db_path(cli.db.as_deref(), &data_dir());
-    let catalog = load_catalog(&PopulateOpts::from_env(), &cache_dir().join("models.json")).await;
+    let cache_path = cache_dir().join("models.json");
+    let opts = PopulateOpts::from_env();
+    let catalog = catalog_handle(load_catalog(&opts, &cache_path).await);
+    spawn_catalog_refresh(catalog.clone(), cache_path, opts);
     let ctx = build_app_context(&db_path, catalog).await?;
 
     // The native tools resolve relative paths against the server's working directory.
@@ -207,9 +241,12 @@ mod tests {
     async fn build_app_context_wires_a_working_event_store() {
         // A fresh file DB has no journal → warns (not fatal) and yields a usable event store.
         let dir = tempfile::tempdir().unwrap();
-        let ctx = build_app_context(&dir.path().join("opencode.db"), Arc::new(Catalog::new()))
-            .await
-            .unwrap();
+        let ctx = build_app_context(
+            &dir.path().join("opencode.db"),
+            catalog_handle(Catalog::new()),
+        )
+        .await
+        .unwrap();
         assert!(ctx.catalog().is_empty());
         let store = ctx.event_store();
         let head = store
