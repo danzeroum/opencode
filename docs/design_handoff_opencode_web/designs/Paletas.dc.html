@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{background:#17181b;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased;}
+  *::-webkit-scrollbar{width:11px;height:11px;}
+  *::-webkit-scrollbar-thumb{background:#33363c;border-radius:6px;border:3px solid #17181b;}
+  *::-webkit-scrollbar-track{background:transparent;}
+</style>
+</helmet>
+<div style="min-height:100vh;background:#17181b;color:#e8eaed;padding:34px 40px 64px;">
+
+  <!-- header -->
+  <div style="max-width:1180px;margin:0 auto 30px;">
+    <div style="display:flex;align-items:center;gap:11px;margin-bottom:12px;">
+      <svg width="18" height="22" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+      <span style="font-weight:600;font-size:15px;">opencode web</span>
+      <span style="font-size:10px;color:#8a8f99;border:1px solid #33363c;border-radius:4px;padding:2px 7px;">paletas</span>
+    </div>
+    <h1 style="margin:0 0 7px;font-size:24px;font-weight:600;letter-spacing:-0.4px;">Direções de cor</h1>
+    <p style="margin:0;font-size:13px;color:#9aa0aa;max-width:680px;line-height:1.6;">Cada paleta aplicada a um recorte real da interface — top bar, agente ativo, a régua de precedência dos 7 níveis e os controles. Tudo herda IBM Plex Mono e os raios de 3–8px. Quatro famílias: claras, nobres e <span style="color:#8fc89a;">natureza</span>. Me diga qual direção seguir e eu aplico ao app inteiro (dark/light + os 38 presets).</p>
+  </div>
+
+  <!-- ESCURA (ref) -->
+  <div style="max-width:1180px;margin:0 auto 14px;display:flex;align-items:center;gap:12px;">
+    <span style="font-size:11px;letter-spacing:1.5px;color:#8a8f99;text-transform:uppercase;">Atual</span>
+    <div style="flex:1;height:1px;background:#2a2c31;"></div>
+    <span style="font-size:11px;color:#6a6f79;">tema nativo · referência</span>
+  </div>
+  <div style="max-width:1180px;margin:0 auto 40px;display:grid;grid-template-columns:repeat(auto-fill,minmax(348px,1fr));gap:18px;">
+    <sc-for list="{{ refPalettes }}" as="p" hint-placeholder-count="1">
+      <!-- CARD -->
+      <div style="border:1px solid #2a2c31;border-radius:13px;background:#0e0f11;overflow:hidden;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px 11px;">
+          <div><div style="font-size:14px;font-weight:600;">{{ p.name }}</div><div style="font-size:10.5px;color:#8a8f99;margin-top:2px;">{{ p.note }}</div></div>
+          <span style="{{ p.modeTagStyle }}">{{ p.mode }}</span>
+        </div>
+        <div style="margin:0 12px;{{ p.screenStyle }}">
+          <div style="{{ p.barStyle }}">
+            <svg width="13" height="16" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="{{ p.markDim }}"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="{{ p.primary }}"></path></svg>
+            <span style="{{ p.wordStyle }}">opencode</span>
+            <span style="{{ p.chipStyle }}">web</span>
+            <span style="flex:1;"></span>
+            <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotAccent }}"></span>
+          </div>
+          <div style="padding:13px 14px;display:flex;flex-direction:column;gap:13px;">
+            <div>
+              <div style="{{ p.capStyle }}">Agente ativo</div>
+              <div style="{{ p.agentRowStyle }}">
+                <span style="{{ p.dotPrimary }}"></span>
+                <span style="{{ p.agentNameStyle }}">build</span>
+                <span style="{{ p.tagStyle }}">primary</span>
+                <span style="flex:1;"></span>
+                <span style="{{ p.modelStyle }}">◍ sonnet-4-5</span>
+              </div>
+            </div>
+            <div>
+              <div style="{{ p.capStyle }}">Precedência · remote → managed</div>
+              <div style="display:flex;gap:5px;">
+                <sc-for list="{{ p.levels }}" as="l" hint-placeholder-count="7">
+                  <span title="{{ l.label }}" style="width:100%;height:15px;border-radius:3px;background:{{ l.color }};"></span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="{{ p.btnStyle }}">Salvar</span>
+              <span style="{{ p.btnGhostStyle }}">Testar</span>
+              <span style="flex:1;"></span>
+              <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotYellow }}"></span><span style="{{ p.dotRed }}"></span>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:0;padding:13px 14px 14px;">
+          <sc-for list="{{ p.swatches }}" as="sw" hint-placeholder-count="5">
+            <div style="flex:1;text-align:center;">
+              <div style="height:30px;border-radius:5px;background:{{ sw.hex }};border:1px solid rgba(255,255,255,0.07);"></div>
+              <div style="font-size:8.5px;color:#7a7f89;margin-top:5px;letter-spacing:0.2px;">{{ sw.label }}</div>
+              <div style="font-size:8px;color:#5a5f69;">{{ sw.hex }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+  <!-- CLARAS -->
+  <div style="max-width:1180px;margin:0 auto 14px;display:flex;align-items:center;gap:12px;">
+    <span style="font-size:11px;letter-spacing:1.5px;color:#8a8f99;text-transform:uppercase;">Claras</span>
+    <div style="flex:1;height:1px;background:#2a2c31;"></div>
+    <span style="font-size:11px;color:#6a6f79;">fundo claro · alto contraste de leitura</span>
+  </div>
+  <div style="max-width:1180px;margin:0 auto 40px;display:grid;grid-template-columns:repeat(auto-fill,minmax(348px,1fr));gap:18px;">
+    <sc-for list="{{ lightPalettes }}" as="p" hint-placeholder-count="3">
+      <div style="border:1px solid #2a2c31;border-radius:13px;background:#0e0f11;overflow:hidden;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px 11px;">
+          <div><div style="font-size:14px;font-weight:600;">{{ p.name }}</div><div style="font-size:10.5px;color:#8a8f99;margin-top:2px;">{{ p.note }}</div></div>
+          <span style="{{ p.modeTagStyle }}">{{ p.mode }}</span>
+        </div>
+        <div style="margin:0 12px;{{ p.screenStyle }}">
+          <div style="{{ p.barStyle }}">
+            <svg width="13" height="16" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="{{ p.markDim }}"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="{{ p.primary }}"></path></svg>
+            <span style="{{ p.wordStyle }}">opencode</span>
+            <span style="{{ p.chipStyle }}">web</span>
+            <span style="flex:1;"></span>
+            <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotAccent }}"></span>
+          </div>
+          <div style="padding:13px 14px;display:flex;flex-direction:column;gap:13px;">
+            <div>
+              <div style="{{ p.capStyle }}">Agente ativo</div>
+              <div style="{{ p.agentRowStyle }}">
+                <span style="{{ p.dotPrimary }}"></span>
+                <span style="{{ p.agentNameStyle }}">build</span>
+                <span style="{{ p.tagStyle }}">primary</span>
+                <span style="flex:1;"></span>
+                <span style="{{ p.modelStyle }}">◍ sonnet-4-5</span>
+              </div>
+            </div>
+            <div>
+              <div style="{{ p.capStyle }}">Precedência · remote → managed</div>
+              <div style="display:flex;gap:5px;">
+                <sc-for list="{{ p.levels }}" as="l" hint-placeholder-count="7">
+                  <span title="{{ l.label }}" style="width:100%;height:15px;border-radius:3px;background:{{ l.color }};"></span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="{{ p.btnStyle }}">Salvar</span>
+              <span style="{{ p.btnGhostStyle }}">Testar</span>
+              <span style="flex:1;"></span>
+              <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotYellow }}"></span><span style="{{ p.dotRed }}"></span>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:0;padding:13px 14px 14px;">
+          <sc-for list="{{ p.swatches }}" as="sw" hint-placeholder-count="5">
+            <div style="flex:1;text-align:center;">
+              <div style="height:30px;border-radius:5px;background:{{ sw.hex }};border:1px solid rgba(0,0,0,0.12);"></div>
+              <div style="font-size:8.5px;color:#7a7f89;margin-top:5px;letter-spacing:0.2px;">{{ sw.label }}</div>
+              <div style="font-size:8px;color:#5a5f69;">{{ sw.hex }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+  <!-- NOBRES -->
+  <div style="max-width:1180px;margin:0 auto 14px;display:flex;align-items:center;gap:12px;">
+    <span style="font-size:11px;letter-spacing:1.5px;color:#8a8f99;text-transform:uppercase;">Nobres</span>
+    <div style="flex:1;height:1px;background:#2a2c31;"></div>
+    <span style="font-size:11px;color:#6a6f79;">fundos profundos · metais e tons joia</span>
+  </div>
+  <div style="max-width:1180px;margin:0 auto 10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(348px,1fr));gap:18px;">
+    <sc-for list="{{ noblePalettes }}" as="p" hint-placeholder-count="4">
+      <div style="border:1px solid #2a2c31;border-radius:13px;background:#0e0f11;overflow:hidden;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px 11px;">
+          <div><div style="font-size:14px;font-weight:600;">{{ p.name }}</div><div style="font-size:10.5px;color:#8a8f99;margin-top:2px;">{{ p.note }}</div></div>
+          <span style="{{ p.modeTagStyle }}">{{ p.mode }}</span>
+        </div>
+        <div style="margin:0 12px;{{ p.screenStyle }}">
+          <div style="{{ p.barStyle }}">
+            <svg width="13" height="16" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="{{ p.markDim }}"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="{{ p.primary }}"></path></svg>
+            <span style="{{ p.wordStyle }}">opencode</span>
+            <span style="{{ p.chipStyle }}">web</span>
+            <span style="flex:1;"></span>
+            <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotAccent }}"></span>
+          </div>
+          <div style="padding:13px 14px;display:flex;flex-direction:column;gap:13px;">
+            <div>
+              <div style="{{ p.capStyle }}">Agente ativo</div>
+              <div style="{{ p.agentRowStyle }}">
+                <span style="{{ p.dotPrimary }}"></span>
+                <span style="{{ p.agentNameStyle }}">build</span>
+                <span style="{{ p.tagStyle }}">primary</span>
+                <span style="flex:1;"></span>
+                <span style="{{ p.modelStyle }}">◍ sonnet-4-5</span>
+              </div>
+            </div>
+            <div>
+              <div style="{{ p.capStyle }}">Precedência · remote → managed</div>
+              <div style="display:flex;gap:5px;">
+                <sc-for list="{{ p.levels }}" as="l" hint-placeholder-count="7">
+                  <span title="{{ l.label }}" style="width:100%;height:15px;border-radius:3px;background:{{ l.color }};"></span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="{{ p.btnStyle }}">Salvar</span>
+              <span style="{{ p.btnGhostStyle }}">Testar</span>
+              <span style="flex:1;"></span>
+              <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotYellow }}"></span><span style="{{ p.dotRed }}"></span>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:0;padding:13px 14px 14px;">
+          <sc-for list="{{ p.swatches }}" as="sw" hint-placeholder-count="5">
+            <div style="flex:1;text-align:center;">
+              <div style="height:30px;border-radius:5px;background:{{ sw.hex }};border:1px solid rgba(255,255,255,0.08);"></div>
+              <div style="font-size:8.5px;color:#7a7f89;margin-top:5px;letter-spacing:0.2px;">{{ sw.label }}</div>
+              <div style="font-size:8px;color:#5a5f69;">{{ sw.hex }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+  <!-- NATUREZA -->
+  <div style="max-width:1180px;margin:40px auto 14px;display:flex;align-items:center;gap:12px;">
+    <span style="font-size:11px;letter-spacing:1.5px;color:#8a8f99;text-transform:uppercase;">Natureza</span>
+    <div style="flex:1;height:1px;background:#2a2c31;"></div>
+    <span style="font-size:11px;color:#6a6f79;">florestas · musgo · argila · oceano</span>
+  </div>
+  <div style="max-width:1180px;margin:0 auto 10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(348px,1fr));gap:18px;">
+    <sc-for list="{{ naturePalettes }}" as="p" hint-placeholder-count="5">
+      <div style="border:1px solid #2a2c31;border-radius:13px;background:#0e0f11;overflow:hidden;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px 11px;">
+          <div><div style="font-size:14px;font-weight:600;">{{ p.name }}</div><div style="font-size:10.5px;color:#8a8f99;margin-top:2px;">{{ p.note }}</div></div>
+          <span style="{{ p.modeTagStyle }}">{{ p.mode }}</span>
+        </div>
+        <div style="margin:0 12px;{{ p.screenStyle }}">
+          <div style="{{ p.barStyle }}">
+            <svg width="13" height="16" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="{{ p.markDim }}"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="{{ p.primary }}"></path></svg>
+            <span style="{{ p.wordStyle }}">opencode</span>
+            <span style="{{ p.chipStyle }}">web</span>
+            <span style="flex:1;"></span>
+            <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotAccent }}"></span>
+          </div>
+          <div style="padding:13px 14px;display:flex;flex-direction:column;gap:13px;">
+            <div>
+              <div style="{{ p.capStyle }}">Agente ativo</div>
+              <div style="{{ p.agentRowStyle }}">
+                <span style="{{ p.dotPrimary }}"></span>
+                <span style="{{ p.agentNameStyle }}">build</span>
+                <span style="{{ p.tagStyle }}">primary</span>
+                <span style="flex:1;"></span>
+                <span style="{{ p.modelStyle }}">◍ sonnet-4-5</span>
+              </div>
+            </div>
+            <div>
+              <div style="{{ p.capStyle }}">Precedência · remote → managed</div>
+              <div style="display:flex;gap:5px;">
+                <sc-for list="{{ p.levels }}" as="l" hint-placeholder-count="7">
+                  <span title="{{ l.label }}" style="width:100%;height:15px;border-radius:3px;background:{{ l.color }};"></span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="{{ p.btnStyle }}">Salvar</span>
+              <span style="{{ p.btnGhostStyle }}">Testar</span>
+              <span style="flex:1;"></span>
+              <span style="{{ p.dotGreen }}"></span><span style="{{ p.dotYellow }}"></span><span style="{{ p.dotRed }}"></span>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:0;padding:13px 14px 14px;">
+          <sc-for list="{{ p.swatches }}" as="sw" hint-placeholder-count="5">
+            <div style="flex:1;text-align:center;">
+              <div style="height:30px;border-radius:5px;background:{{ sw.hex }};border:1px solid rgba(255,255,255,0.07);"></div>
+              <div style="font-size:8.5px;color:#7a7f89;margin-top:5px;letter-spacing:0.2px;">{{ sw.label }}</div>
+              <div style="font-size:8px;color:#5a5f69;">{{ sw.hex }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  mk(p){
+    // p: {id,name,note,mode,modeKind,bg,surf,elev,bd,ink,sec,mut,faint,primary,primaryInk,accent,green,red,yellow,markDim,levels:[7]}
+    const onLight = p.modeKind==='light';
+    const tagBd = p.primary+'66';
+    const modeColors = { Clara:['#3e9e5b','rgba(62,158,91,0.12)'], Nobre:['#d4af37','rgba(212,175,55,0.13)'], Escura:['#9d7cd8','rgba(157,124,216,0.13)'], Natureza:['#5aa06a','rgba(90,160,106,0.14)'] };
+    const mc = modeColors[p.mode]||['#8a8f99','rgba(255,255,255,0.06)'];
+    const dot=(c)=>`width:8px;height:8px;border-radius:50%;background:${c};flex:none;`;
+    return {
+      name:p.name, note:p.note, mode:p.mode, markDim:p.markDim, primary:p.primary,
+      modeTagStyle:`font-size:9.5px;font-weight:600;letter-spacing:0.4px;color:${mc[0]};background:${mc[1]};border:1px solid ${mc[0]}44;border-radius:5px;padding:3px 9px;`,
+      screenStyle:`background:${p.bg};border:1px solid ${p.bd};border-radius:9px;overflow:hidden;`,
+      barStyle:`display:flex;align-items:center;gap:8px;padding:9px 12px;background:${p.surf};border-bottom:1px solid ${p.bd};`,
+      wordStyle:`font-weight:600;font-size:12px;color:${p.ink};`,
+      chipStyle:`font-size:8.5px;color:${p.mut};border:1px solid ${p.bd};border-radius:4px;padding:1px 5px;`,
+      capStyle:`font-size:9px;letter-spacing:0.8px;color:${p.mut};text-transform:uppercase;margin-bottom:7px;`,
+      agentRowStyle:`display:flex;align-items:center;gap:8px;padding:8px 11px;border-radius:7px;border:1px solid ${p.primary}55;background:${this.tint(p.primary,onLight?0.10:0.09,p.elev)};`,
+      agentNameStyle:`font-weight:600;font-size:12px;color:${p.ink};`,
+      tagStyle:`font-size:8px;color:${p.primary};border:1px solid ${tagBd};border-radius:4px;padding:1px 5px;`,
+      modelStyle:`font-size:10px;color:${p.accent};`,
+      btnStyle:`font-size:11px;font-weight:600;color:${p.primaryInk};background:${p.primary};border-radius:6px;padding:6px 14px;`,
+      btnGhostStyle:`font-size:11px;color:${p.sec};border:1px solid ${p.bd};border-radius:6px;padding:5px 13px;`,
+      dotPrimary:dot(p.primary), dotAccent:dot(p.accent), dotGreen:dot(p.green), dotYellow:dot(p.yellow), dotRed:dot(p.red),
+      levels:[
+        {label:'remote',color:p.levels[0]},{label:'global',color:p.levels[1]},{label:'custom',color:p.levels[2]},
+        {label:'project',color:p.levels[3]},{label:'.opencode',color:p.levels[4]},{label:'inline',color:p.levels[5]},{label:'managed',color:p.levels[6]},
+      ],
+      swatches:[
+        {label:'bg',hex:p.bg},{label:'surface',hex:p.surf},{label:'ink',hex:p.ink},{label:'primary',hex:p.primary},{label:'accent',hex:p.accent},
+      ],
+    };
+  }
+  // mix a color toward base by alpha — simple rgba overlay approximation returns rgba layered look
+  tint(hex,a,base){ const c=this.hx(hex); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+  hx(h){ h=h.replace('#',''); if(h.length===3)h=h.split('').map(x=>x+x).join(''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+
+  renderVals(){
+    const REF=[
+      {id:'opencode',name:'opencode',note:'âmbar + violeta sobre carvão',mode:'Escura',modeKind:'dark',
+       bg:'#0a0a0a',surf:'#101010',elev:'#141414',bd:'#242424',ink:'#eeeeee',sec:'#cfcfcf',mut:'#9a9a9a',faint:'#5a5a5a',
+       primary:'#fab283',primaryInk:'#1a1206',accent:'#9d7cd8',green:'#7fb069',red:'#e06c75',yellow:'#e6c07b',markDim:'#3a3a3a',
+       levels:['#5a9cf8','#e6c07b','#e09a4b','#7fb069','#9d7cd8','#ac8e68','#e06c75']},
+    ];
+    const LIGHT=[
+      {id:'paper',name:'Paper',note:'branco puro · azul nativo + âmbar',mode:'Clara',modeKind:'light',
+       bg:'#ffffff',surf:'#f6f6f4',elev:'#ffffff',bd:'#e4e4e0',ink:'#1a1a1a',sec:'#3a3a3a',mut:'#6a6a6a',faint:'#9a9a9a',
+       primary:'#3b7dd8',primaryInk:'#ffffff',accent:'#d68c27',green:'#3e9e5b',red:'#cf4b4b',yellow:'#c08a2e',markDim:'#cfcfcf',
+       levels:['#3b7dd8','#c08a2e','#d27d2c','#3e9e5b','#8a5cc0','#9a7a52','#cf4b4b']},
+      {id:'parchment',name:'Pergaminho',note:'creme quente · terracota + ametista',mode:'Clara',modeKind:'light',
+       bg:'#faf7f0',surf:'#f2ecdf',elev:'#fffdf8',bd:'#e6ddca',ink:'#2c2519',sec:'#4a3f2d',mut:'#7a6e58',faint:'#a89a80',
+       primary:'#b5762e',primaryInk:'#fffaf0',accent:'#7a5ba8',green:'#5a8a4a',red:'#b5503e',yellow:'#b08a2e',markDim:'#d8cdb4',
+       levels:['#3f72a8','#b08a2e','#c07a2e','#5a8a4a','#7a5ba8','#8a6e48','#b5503e']},
+      {id:'slate',name:'Ardósia',note:'cinza frio nórdico · azul aço',mode:'Clara',modeKind:'light',
+       bg:'#f5f7fa',surf:'#eceff4',elev:'#ffffff',bd:'#dde3ec',ink:'#2e3440',sec:'#434c5e',mut:'#6b7689',faint:'#9aa3b2',
+       primary:'#5e81ac',primaryInk:'#ffffff',accent:'#9b6fa6',green:'#6a9955',red:'#bf616a',yellow:'#b9943e',markDim:'#cdd5e0',
+       levels:['#5e81ac','#b9943e','#c08552','#6a9955','#9b6fa6','#8a7355','#bf616a']},
+    ];
+    const NOBLE=[
+      {id:'royal',name:'Midnight Royal',note:'azul-meia-noite + ouro',mode:'Nobre',modeKind:'dark',
+       bg:'#0c1322',surf:'#121b30',elev:'#16203a',bd:'#26324d',ink:'#eef1f8',sec:'#c2cadb',mut:'#8b97b3',faint:'#5b6788',
+       primary:'#d4af37',primaryInk:'#1a1606',accent:'#8d7ddb',green:'#6db58a',red:'#df7080',yellow:'#e0c266',markDim:'#2a3854',
+       levels:['#6aa0f0','#e0c266','#e0a14e','#6db58a','#8d7ddb','#b39361','#df7080']},
+      {id:'emerald',name:'Emerald Noir',note:'verde profundo + champanhe',mode:'Nobre',modeKind:'dark',
+       bg:'#08120e',surf:'#0e1b15',elev:'#12211a',bd:'#1f3a2e',ink:'#e9f1ec',sec:'#c0d2c8',mut:'#8aa499',faint:'#5a7468',
+       primary:'#c9a85c',primaryInk:'#10160a',accent:'#5fc596',green:'#5fb98a',red:'#d97a7f',yellow:'#d6b85e',markDim:'#214034',
+       levels:['#5aa0c8','#d6b85e','#cf9b54','#5fb98a','#9a87c8','#a98c5e','#d97a7f']},
+      {id:'bordeaux',name:'Bordeaux',note:'vinho + champanhe rosé',mode:'Nobre',modeKind:'dark',
+       bg:'#160a10',surf:'#211019',elev:'#281420',bd:'#3d2230',ink:'#f4e9ee',sec:'#d8c2cc',mut:'#a98c99',faint:'#76586a',
+       primary:'#c9a25f',primaryInk:'#1a1008',accent:'#cf6f87',green:'#7aae84',red:'#df6b78',yellow:'#dab36a',markDim:'#3a2230',
+       levels:['#8f9cd8','#dab36a','#d39a5e','#7aae84','#b07cc0','#b08a64','#df6b78']},
+      {id:'platinum',name:'Platinum Graphite',note:'grafite monocromático · platina',mode:'Nobre',modeKind:'dark',
+       bg:'#16181b',surf:'#1d2024',elev:'#22262b',bd:'#33383f',ink:'#eef1f4',sec:'#c4ccd4',mut:'#8c97a3',faint:'#5c6670',
+       primary:'#cdd4dc',primaryInk:'#1a1d20',accent:'#9bb0c4',green:'#85b596',red:'#d98a90',yellow:'#d4be86',markDim:'#3a4048',
+       levels:['#8fb0d8','#d4be86','#cda06a','#85b596','#a99bc8','#a89578','#d98a90']},
+    ];
+    const NATURE=[
+      {id:'floresta',name:'Floresta',note:'conífera profunda · luz de sol no dossel',mode:'Natureza',modeKind:'dark',
+       bg:'#0b1410',surf:'#11201a',elev:'#16271f',bd:'#234035',ink:'#e8f0e9',sec:'#c2d4c7',mut:'#88a394',faint:'#5a766a',
+       primary:'#d9a94e',primaryInk:'#1a1408',accent:'#a884c8',green:'#6fb083',red:'#d97a72',yellow:'#d9c46a',markDim:'#234035',
+       levels:['#5fa3d8','#d9c46a','#d99a4e','#6fb083','#a884c8','#a98a5e','#d97a72']},
+      {id:'micelio',name:'Micélio',note:'húmus quente · cogumelo âmbar + esporo',mode:'Natureza',modeKind:'dark',
+       bg:'#13100b',surf:'#1d1813',elev:'#241d16',bd:'#362d20',ink:'#efe7da',sec:'#d2c6b2',mut:'#a3947c',faint:'#6f6150',
+       primary:'#e0a85c',primaryInk:'#1a1308',accent:'#b08cd0',green:'#8aab6a',red:'#d98a7a',yellow:'#dcc06a',markDim:'#362d20',
+       levels:['#6a9cc8','#dcc06a','#d99a52','#8aab6a','#b08cd0','#b0905e','#d98a7a']},
+      {id:'recife',name:'Recife',note:'abismo marinho · coral + bioluminescência',mode:'Natureza',modeKind:'dark',
+       bg:'#07141a',surf:'#0d1f27',elev:'#112730',bd:'#1f3d48',ink:'#e6f1f3',sec:'#bcd4d8',mut:'#84a3aa',faint:'#54767e',
+       primary:'#df8a5c',primaryInk:'#16100a',accent:'#4fc2cb',green:'#57b896',red:'#e0727f',yellow:'#d9bd64',markDim:'#1f3d48',
+       levels:['#4fb0d8','#d9bd64','#d99a4e','#57b896','#9a8cd0','#a88a64','#e0727f']},
+      {id:'musgo',name:'Musgo',note:'sálvia clara · líquen + urze',mode:'Natureza',modeKind:'light',
+       bg:'#edf0e4',surf:'#e4e9d6',elev:'#f7f9ef',bd:'#d2d8c0',ink:'#2b3124',sec:'#444c38',mut:'#6f7960',faint:'#9aa488',
+       primary:'#6d7a36',primaryInk:'#f7f9ef',accent:'#8a6aa6',green:'#5a8a44',red:'#b35040',yellow:'#a8862e',markDim:'#cdd4ba',
+       levels:['#4a7a9e','#a8862e','#b07a34','#5a8a44','#8a6aa6','#82724a','#b35040']},
+      {id:'argila',name:'Argila',note:'areia quente · terracota + folha de sálvia',mode:'Natureza',modeKind:'light',
+       bg:'#f4ede2',surf:'#ece2d2',elev:'#fdf8ef',bd:'#e0d3bf',ink:'#382c20',sec:'#54442f',mut:'#837058',faint:'#ab9a80',
+       primary:'#bf6a3c',primaryInk:'#fdf6ec',accent:'#6e8a5a',green:'#5e8a48',red:'#b1503c',yellow:'#b0852c',markDim:'#d9cab2',
+       levels:['#4a78a0','#b0852c','#bf6a3c','#5e8a48','#7d6aa0','#8a6e48','#b1503c']},
+    ];
+    return {
+      refPalettes:REF.map(p=>this.mk(p)),
+      lightPalettes:LIGHT.map(p=>this.mk(p)),
+      noblePalettes:NOBLE.map(p=>this.mk(p)),
+      naturePalettes:NATURE.map(p=>this.mk(p)),
+    };
+  }
+}
+</script>
+</body>
+</html>

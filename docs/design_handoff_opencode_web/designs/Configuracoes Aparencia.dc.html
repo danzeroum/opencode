@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{background:#0a0a0a;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased;}
+  ::selection{background:rgba(250,178,131,0.28);}
+  *::-webkit-scrollbar{width:10px;height:10px;}
+  *::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:5px;border:2px solid #0a0a0a;}
+  *::-webkit-scrollbar-track{background:transparent;}
+  button,input{font-family:inherit;}button:focus,input:focus{outline:none;}
+  @keyframes ap-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.8)}}
+  @keyframes ap-fade{from{opacity:0}to{opacity:1}}
+</style>
+</helmet>
+<div style="position:fixed;inset:0;display:flex;flex-direction:column;background:#0a0a0a;color:#e8e8e8;font-size:13px;line-height:1.5;overflow:hidden;">
+
+  <!-- TOP BAR (chrome — stays neutral) -->
+  <header style="height:48px;flex:none;display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid #1a1a1a;background:#0c0c0c;z-index:20;">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <svg width="16" height="20" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+      <span style="font-weight:600;">opencode</span>
+      <span style="color:#3a3a3a;">/</span><span style="color:#9a9a9a;">Configurações</span>
+      <span style="color:#3a3a3a;">/</span><span style="color:#cfcfcf;">Aparência</span>
+    </div>
+    <div style="flex:1;"></div>
+    <span style="font-size:10.5px;color:#7a7a7a;">salvo em <span style="color:#cfcfcf;">~/.config/opencode/opencode.json</span> · campo <span style="color:#9d7cd8;">theme</span></span>
+  </header>
+
+  <div style="flex:1;display:flex;min-height:0;">
+
+    <!-- ============ LEFT: CATALOG ============ -->
+    <div style="width:430px;flex:none;border-right:1px solid #1a1a1a;background:#0b0b0b;display:flex;flex-direction:column;min-height:0;">
+      <div style="flex:none;padding:18px 18px 12px;">
+        <h1 style="margin:0 0 4px;font-size:17px;font-weight:600;">Tema</h1>
+        <p style="margin:0 0 13px;font-size:11.5px;color:#8a8a8a;">{{ themeCount }} temas internos · 38 presets da comunidade. Cada um define dark e light.</p>
+        <div style="display:flex;align-items:center;gap:9px;background:#0e0e0e;border:1px solid #242424;border-radius:8px;padding:8px 11px;">
+          <span style="color:#6a6a6a;">⌕</span>
+          <input value="{{ query }}" onInput="{{ onSearch }}" placeholder="buscar tema…" style="flex:1;background:transparent;border:none;color:#eee;font-size:12.5px;" />
+          <sc-if value="{{ hasQuery }}" hint-placeholder-val="{{ false }}"><button onClick="{{ clearSearch }}" style="background:transparent;border:none;color:#7a7a7a;cursor:pointer;font-size:13px;">✕</button></sc-if>
+        </div>
+      </div>
+
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:0 18px 22px;">
+        <sc-for list="{{ groups }}" as="g" hint-placeholder-count="4">
+          <div style="margin-bottom:16px;">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px;position:sticky;top:0;background:#0b0b0b;padding:4px 0;z-index:1;">
+              <span style="font-size:9.5px;letter-spacing:1.2px;color:{{ g.color }};text-transform:uppercase;font-weight:600;">{{ g.label }}</span>
+              <div style="flex:1;height:1px;background:#1a1a1a;"></div>
+              <span style="font-size:9.5px;color:#5a5a5a;">{{ g.count }}</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:7px;">
+              <sc-for list="{{ g.items }}" as="t" hint-placeholder-count="3">
+                <button onClick="{{ t.onClick }}" style="{{ t.rowStyle }}">
+                  <!-- mini swatch preview -->
+                  <span style="display:flex;width:46px;height:34px;border-radius:6px;overflow:hidden;border:1px solid {{ t.miniBd }};flex:none;">
+                    <span style="width:40%;background:{{ t.bg }};"></span>
+                    <span style="flex:1;display:flex;flex-direction:column;">
+                      <span style="flex:1;background:{{ t.primary }};"></span>
+                      <span style="flex:1;background:{{ t.accent }};"></span>
+                    </span>
+                  </span>
+                  <div style="flex:1;min-width:0;text-align:left;">
+                    <div style="display:flex;align-items:center;gap:7px;">
+                      <span style="font-size:13px;font-weight:600;color:#e8e8e8;">{{ t.name }}</span>
+                      <span style="{{ t.modeTagStyle }}">{{ t.modeShort }}</span>
+                      <sc-if value="{{ t.isDefault }}" hint-placeholder-val="{{ false }}"><span style="font-size:8.5px;color:#7fb069;border:1px solid rgba(127,176,105,0.4);border-radius:4px;padding:0 5px;">default</span></sc-if>
+                    </div>
+                    <div style="font-size:10px;color:#7a7a7a;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ t.note }}</div>
+                  </div>
+                  <!-- swatch dots -->
+                  <div style="display:flex;gap:3px;flex:none;">
+                    <span style="width:9px;height:9px;border-radius:50%;background:{{ t.primary }};"></span>
+                    <span style="width:9px;height:9px;border-radius:50%;background:{{ t.accent }};"></span>
+                    <span style="width:9px;height:9px;border-radius:50%;background:{{ t.green }};"></span>
+                  </div>
+                  <span style="{{ t.checkStyle }}">✓</span>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+        </sc-for>
+        <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+          <div style="text-align:center;padding:30px 0;font-size:12px;color:#6a6a6a;">nenhum tema para "<span style="color:#cfcfcf;">{{ query }}</span>"</div>
+        </sc-if>
+      </div>
+    </div>
+
+    <!-- ============ RIGHT: LIVE PREVIEW ============ -->
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:#080808;">
+      <!-- controls -->
+      <div style="flex:none;display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid #1a1a1a;">
+        <div>
+          <div style="display:flex;align-items:center;gap:9px;">
+            <span style="font-size:15px;font-weight:600;">{{ selName }}</span>
+            <span style="{{ selModeTagStyle }}">{{ selMode }}</span>
+          </div>
+          <div style="font-size:10.5px;color:#7a7a7a;margin-top:2px;">{{ selNote }}</div>
+        </div>
+        <div style="flex:1;"></div>
+        <!-- mode toggle -->
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-size:10px;color:#6a6a6a;text-transform:uppercase;letter-spacing:0.6px;">Modo</span>
+          <div style="display:flex;background:#141414;border:1px solid #242424;border-radius:7px;padding:2px;gap:2px;">
+            <sc-for list="{{ modeOptions }}" as="m" hint-placeholder-count="3">
+              <button onClick="{{ m.onClick }}" style="{{ m.style }}">{{ m.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+        <button onClick="{{ applyTheme }}" style="{{ applyStyle }}">{{ applyLabel }}</button>
+      </div>
+
+      <!-- preview canvas -->
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:26px;display:flex;align-items:flex-start;justify-content:center;">
+        <div style="width:100%;max-width:720px;border-radius:14px;overflow:hidden;border:1px solid {{ pv.bd }};box-shadow:0 20px 60px rgba(0,0,0,0.5);animation:ap-fade 0.25s ease;{{ pv.frame }}">
+          <!-- preview topbar -->
+          <div style="display:flex;align-items:center;gap:9px;padding:11px 15px;border-bottom:1px solid {{ pv.bd }};background:{{ pv.surf }};">
+            <svg width="14" height="17" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="{{ pv.markDim }}"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="{{ pv.primary }}"></path></svg>
+            <span style="font-weight:600;font-size:13px;color:{{ pv.ink }};">opencode</span>
+            <span style="font-size:9px;color:{{ pv.mut }};border:1px solid {{ pv.bd }};border-radius:4px;padding:1px 6px;">web</span>
+            <div style="flex:1;"></div>
+            <span style="width:7px;height:7px;border-radius:50%;background:{{ pv.green }};"></span>
+            <span style="font-size:10.5px;color:{{ pv.mut }};">localhost:4096</span>
+            <span style="margin-left:6px;font-size:10.5px;color:{{ pv.accent }};">◍ sonnet-4-5</span>
+          </div>
+
+          <div style="display:flex;min-height:340px;background:{{ pv.bg }};">
+            <!-- preview sidebar -->
+            <div style="width:172px;flex:none;border-right:1px solid {{ pv.bd }};padding:13px 12px;background:{{ pv.surf }};">
+              <div style="font-size:8.5px;letter-spacing:1px;color:{{ pv.mut }};text-transform:uppercase;margin-bottom:9px;">Agentes</div>
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:7px;border:1px solid {{ pv.primaryBd }};background:{{ pv.primaryTint }};margin-bottom:6px;">
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ pv.primary }};flex:none;"></span>
+                <span style="font-size:12px;font-weight:600;color:{{ pv.ink }};">build</span>
+                <span style="flex:1;"></span>
+                <span style="font-size:8px;color:{{ pv.primary }};border:1px solid {{ pv.primaryBd }};border-radius:4px;padding:0 4px;">on</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:7px;margin-bottom:6px;">
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ pv.faint }};flex:none;"></span>
+                <span style="font-size:12px;color:{{ pv.sec }};">plan</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:7px;">
+                <span style="color:{{ pv.accent }};font-size:11px;">@</span>
+                <span style="font-size:12px;color:{{ pv.sec }};">general</span>
+              </div>
+              <div style="margin-top:14px;font-size:8.5px;letter-spacing:1px;color:{{ pv.mut }};text-transform:uppercase;margin-bottom:9px;">Precedência</div>
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <sc-for list="{{ pv.levels }}" as="l" hint-placeholder-count="7">
+                  <div style="display:flex;align-items:center;gap:7px;">
+                    <span style="width:9px;height:9px;border-radius:2px;background:{{ l.color }};flex:none;"></span>
+                    <span style="font-size:9.5px;color:{{ pv.sec }};">{{ l.label }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <!-- preview main -->
+            <div style="flex:1;min-width:0;padding:15px 16px;display:flex;flex-direction:column;gap:12px;">
+              <!-- user msg -->
+              <div style="align-self:flex-end;max-width:78%;background:{{ pv.elev }};border:1px solid {{ pv.bd }};border-radius:9px;padding:9px 12px;font-size:11.5px;color:{{ pv.ink }};">adicione um endpoint GET /healthz com teste</div>
+              <!-- assistant -->
+              <div style="display:flex;gap:9px;align-items:flex-start;">
+                <span style="width:22px;height:22px;border-radius:5px;background:{{ pv.primaryTint }};border:1px solid {{ pv.primaryBd }};display:flex;align-items:center;justify-content:center;flex:none;">
+                  <svg width="10" height="12" viewBox="0 0 24 30"><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="{{ pv.primary }}"></path></svg>
+                </span>
+                <div style="flex:1;font-size:11.5px;color:{{ pv.sec }};">Vou adicionar a rota e o teste correspondente.</div>
+              </div>
+              <!-- tool card -->
+              <div style="margin-left:31px;display:flex;align-items:center;gap:9px;background:{{ pv.elev }};border:1px solid {{ pv.bd }};border-radius:7px;padding:7px 11px;">
+                <span style="font-size:8.5px;font-weight:700;letter-spacing:0.5px;color:{{ pv.primaryInk }};background:{{ pv.primary }};border-radius:4px;padding:2px 6px;">EDIT</span>
+                <span style="font-size:11px;color:{{ pv.ink }};font-weight:500;">router.ts</span>
+                <span style="flex:1;"></span>
+                <span style="font-size:10px;color:{{ pv.mut }};">+9 −0</span>
+                <span style="color:{{ pv.green }};">✓</span>
+              </div>
+              <!-- status row -->
+              <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ pv.green }};"></span>
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ pv.yellow }};"></span>
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ pv.red }};"></span>
+                <span style="font-size:10px;color:{{ pv.mut }};margin-left:3px;">snapshot · 7 checkpoints</span>
+              </div>
+              <div style="flex:1;"></div>
+              <!-- composer + buttons -->
+              <div style="background:{{ pv.elev }};border:1px solid {{ pv.bd }};border-radius:9px;padding:9px 11px;display:flex;align-items:center;gap:8px;">
+                <span style="color:{{ pv.primary }};font-weight:700;">›</span>
+                <span style="flex:1;font-size:11px;color:{{ pv.mut }};">mensagem, ou / para comandos…</span>
+                <span style="font-size:10.5px;font-weight:600;color:{{ pv.primaryInk }};background:{{ pv.primary }};border-radius:6px;padding:5px 12px;">Enviar</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- token strip -->
+          <div style="display:flex;gap:0;padding:11px 14px;background:{{ pv.surf }};border-top:1px solid {{ pv.bd }};">
+            <sc-for list="{{ pv.swatches }}" as="sw" hint-placeholder-count="6">
+              <div style="flex:1;text-align:center;">
+                <div style="height:22px;border-radius:4px;background:{{ sw.hex }};border:1px solid {{ pv.swBd }};"></div>
+                <div style="font-size:8px;color:{{ pv.mut }};margin-top:4px;">{{ sw.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { selected:'argila', mode:'dark', applied:'argila', query:'' };
+
+  themes(){ return [
+    // native
+    {id:'opencode',group:'native',name:'opencode',note:'âmbar + violeta sobre carvão',modeKind:'dark',
+     bg:'#0a0a0a',surf:'#101010',elev:'#141414',bd:'#242424',ink:'#eeeeee',sec:'#cfcfcf',mut:'#9a9a9a',faint:'#5a5a5a',
+     primary:'#fab283',primaryInk:'#1a1206',accent:'#9d7cd8',green:'#7fb069',red:'#e06c75',yellow:'#e6c07b',markDim:'#3a3a3a',
+     levels:['#5a9cf8','#e6c07b','#e09a4b','#7fb069','#9d7cd8','#ac8e68','#e06c75']},
+    // light
+    {id:'paper',group:'light',name:'Paper',note:'branco puro · azul nativo + âmbar',modeKind:'light',
+     bg:'#ffffff',surf:'#f6f6f4',elev:'#ffffff',bd:'#e4e4e0',ink:'#1a1a1a',sec:'#3a3a3a',mut:'#6a6a6a',faint:'#9a9a9a',
+     primary:'#3b7dd8',primaryInk:'#ffffff',accent:'#d68c27',green:'#3e9e5b',red:'#cf4b4b',yellow:'#c08a2e',markDim:'#cfcfcf',
+     levels:['#3b7dd8','#c08a2e','#d27d2c','#3e9e5b','#8a5cc0','#9a7a52','#cf4b4b']},
+    {id:'pergaminho',group:'light',name:'Pergaminho',note:'creme quente · terracota + ametista',modeKind:'light',
+     bg:'#faf7f0',surf:'#f2ecdf',elev:'#fffdf8',bd:'#e6ddca',ink:'#2c2519',sec:'#4a3f2d',mut:'#7a6e58',faint:'#a89a80',
+     primary:'#b5762e',primaryInk:'#fffaf0',accent:'#7a5ba8',green:'#5a8a4a',red:'#b5503e',yellow:'#b08a2e',markDim:'#d8cdb4',
+     levels:['#3f72a8','#b08a2e','#c07a2e','#5a8a4a','#7a5ba8','#8a6e48','#b5503e']},
+    {id:'ardosia',group:'light',name:'Ardósia',note:'cinza frio nórdico · azul aço',modeKind:'light',
+     bg:'#f5f7fa',surf:'#eceff4',elev:'#ffffff',bd:'#dde3ec',ink:'#2e3440',sec:'#434c5e',mut:'#6b7689',faint:'#9aa3b2',
+     primary:'#5e81ac',primaryInk:'#ffffff',accent:'#9b6fa6',green:'#6a9955',red:'#bf616a',yellow:'#b9943e',markDim:'#cdd5e0',
+     levels:['#5e81ac','#b9943e','#c08552','#6a9955','#9b6fa6','#8a7355','#bf616a']},
+    // noble
+    {id:'royal',group:'noble',name:'Midnight Royal',note:'azul-meia-noite + ouro',modeKind:'dark',
+     bg:'#0c1322',surf:'#121b30',elev:'#16203a',bd:'#26324d',ink:'#eef1f8',sec:'#c2cadb',mut:'#8b97b3',faint:'#5b6788',
+     primary:'#d4af37',primaryInk:'#1a1606',accent:'#8d7ddb',green:'#6db58a',red:'#df7080',yellow:'#e0c266',markDim:'#2a3854',
+     levels:['#6aa0f0','#e0c266','#e0a14e','#6db58a','#8d7ddb','#b39361','#df7080']},
+    {id:'emerald',group:'noble',name:'Emerald Noir',note:'verde profundo + champanhe',modeKind:'dark',
+     bg:'#08120e',surf:'#0e1b15',elev:'#12211a',bd:'#1f3a2e',ink:'#e9f1ec',sec:'#c0d2c8',mut:'#8aa499',faint:'#5a7468',
+     primary:'#c9a85c',primaryInk:'#10160a',accent:'#5fc596',green:'#5fb98a',red:'#d97a7f',yellow:'#d6b85e',markDim:'#214034',
+     levels:['#5aa0c8','#d6b85e','#cf9b54','#5fb98a','#9a87c8','#a98c5e','#d97a7f']},
+    {id:'bordeaux',group:'noble',name:'Bordeaux',note:'vinho + champanhe rosé',modeKind:'dark',
+     bg:'#160a10',surf:'#211019',elev:'#281420',bd:'#3d2230',ink:'#f4e9ee',sec:'#d8c2cc',mut:'#a98c99',faint:'#76586a',
+     primary:'#c9a25f',primaryInk:'#1a1008',accent:'#cf6f87',green:'#7aae84',red:'#df6b78',yellow:'#dab36a',markDim:'#3a2230',
+     levels:['#8f9cd8','#dab36a','#d39a5e','#7aae84','#b07cc0','#b08a64','#df6b78']},
+    {id:'platinum',group:'noble',name:'Platinum Graphite',note:'grafite monocromático · platina',modeKind:'dark',
+     bg:'#16181b',surf:'#1d2024',elev:'#22262b',bd:'#33383f',ink:'#eef1f4',sec:'#c4ccd4',mut:'#8c97a3',faint:'#5c6670',
+     primary:'#cdd4dc',primaryInk:'#1a1d20',accent:'#9bb0c4',green:'#85b596',red:'#d98a90',yellow:'#d4be86',markDim:'#3a4048',
+     levels:['#8fb0d8','#d4be86','#cda06a','#85b596','#a99bc8','#a89578','#d98a90']},
+    // nature
+    {id:'floresta',group:'nature',name:'Floresta',note:'conífera profunda · luz no dossel',modeKind:'dark',
+     bg:'#0b1410',surf:'#11201a',elev:'#16271f',bd:'#234035',ink:'#e8f0e9',sec:'#c2d4c7',mut:'#88a394',faint:'#5a766a',
+     primary:'#d9a94e',primaryInk:'#1a1408',accent:'#a884c8',green:'#6fb083',red:'#d97a72',yellow:'#d9c46a',markDim:'#234035',
+     levels:['#5fa3d8','#d9c46a','#d99a4e','#6fb083','#a884c8','#a98a5e','#d97a72']},
+    {id:'micelio',group:'nature',name:'Micélio',note:'húmus quente · cogumelo + esporo',modeKind:'dark',
+     bg:'#13100b',surf:'#1d1813',elev:'#241d16',bd:'#362d20',ink:'#efe7da',sec:'#d2c6b2',mut:'#a3947c',faint:'#6f6150',
+     primary:'#e0a85c',primaryInk:'#1a1308',accent:'#b08cd0',green:'#8aab6a',red:'#d98a7a',yellow:'#dcc06a',markDim:'#362d20',
+     levels:['#6a9cc8','#dcc06a','#d99a52','#8aab6a','#b08cd0','#b0905e','#d98a7a']},
+    {id:'recife',group:'nature',name:'Recife',note:'abismo marinho · coral + bioluminescência',modeKind:'dark',
+     bg:'#07141a',surf:'#0d1f27',elev:'#112730',bd:'#1f3d48',ink:'#e6f1f3',sec:'#bcd4d8',mut:'#84a3aa',faint:'#54767e',
+     primary:'#df8a5c',primaryInk:'#16100a',accent:'#4fc2cb',green:'#57b896',red:'#e0727f',yellow:'#d9bd64',markDim:'#1f3d48',
+     levels:['#4fb0d8','#d9bd64','#d99a4e','#57b896','#9a8cd0','#a88a64','#e0727f']},
+    {id:'musgo',group:'nature',name:'Musgo',note:'sálvia clara · líquen + urze',modeKind:'light',
+     bg:'#edf0e4',surf:'#e4e9d6',elev:'#f7f9ef',bd:'#d2d8c0',ink:'#2b3124',sec:'#444c38',mut:'#6f7960',faint:'#9aa488',
+     primary:'#6d7a36',primaryInk:'#f7f9ef',accent:'#8a6aa6',green:'#5a8a44',red:'#b35040',yellow:'#a8862e',markDim:'#cdd4ba',
+     levels:['#4a7a9e','#a8862e','#b07a34','#5a8a44','#8a6aa6','#82724a','#b35040']},
+    {id:'argila',group:'nature',name:'Argila',note:'areia quente · terracota + folha de sálvia',modeKind:'light',
+     bg:'#f4ede2',surf:'#ece2d2',elev:'#fdf8ef',bd:'#e0d3bf',ink:'#382c20',sec:'#54442f',mut:'#837058',faint:'#ab9a80',
+     primary:'#bf6a3c',primaryInk:'#fdf6ec',accent:'#6e8a5a',green:'#5e8a48',red:'#b1503c',yellow:'#b0852c',markDim:'#d9cab2',
+     levels:['#4a78a0','#b0852c','#bf6a3c','#5e8a48','#7d6aa0','#8a6e48','#b1503c']},
+  ]; }
+
+  groupMeta(){ return {
+    native:{label:'Nativo',color:'#fab283'}, light:{label:'Claras',color:'#5a9cf8'},
+    noble:{label:'Nobres',color:'#d4af37'}, nature:{label:'Natureza',color:'#7fb069'},
+  }; }
+
+  select=(id)=>()=>this.setState({selected:id});
+  setMode=(m)=>()=>this.setState({mode:m});
+  onSearch=(e)=>this.setState({query:e.target.value});
+  clearSearch=()=>this.setState({query:''});
+  apply=()=>this.setState({applied:this.state.selected});
+
+  hx(h){ h=h.replace('#',''); if(h.length===3)h=h.split('').map(x=>x+x).join(''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+  tint(hex,a){ const c=this.hx(hex); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+  renderVals(){
+    const s=this.state, all=this.themes(), gm=this.groupMeta();
+    const q=(s.query||'').trim().toLowerCase();
+    const filtered=all.filter(t=>!q||t.name.toLowerCase().includes(q)||t.note.toLowerCase().includes(q)||gm[t.group].label.toLowerCase().includes(q));
+    const modeTag=(kind)=>{ const c=kind==='light'?'#3e9e5b':'#9d7cd8'; return `font-size:8px;letter-spacing:0.4px;text-transform:uppercase;color:${c};border:1px solid ${c}50;border-radius:4px;padding:0 5px;`; };
+
+    const order=['native','light','noble','nature'];
+    const groups=order.map(gk=>{ const items=filtered.filter(t=>t.group===gk); if(!items.length) return null;
+      return { label:gm[gk].label, color:gm[gk].color, count:items.length+(items.length===1?' tema':' temas'),
+        items:items.map(t=>{ const sel=s.selected===t.id;
+          return { name:t.name, note:t.note, modeShort:t.modeKind==='light'?'light':'dark', isDefault:t.id==='argila',
+            bg:t.bg, primary:t.primary, accent:t.accent, green:t.green, miniBd:t.modeKind==='light'?'rgba(0,0,0,0.12)':'rgba(255,255,255,0.08)',
+            onClick:this.select(t.id), modeTagStyle:modeTag(t.modeKind),
+            rowStyle:`display:flex;align-items:center;gap:11px;width:100%;padding:9px 10px;border-radius:10px;cursor:pointer;text-align:left;transition:all 0.13s;border:1px solid ${sel?'rgba(250,178,131,0.5)':'#1c1c1c'};background:${sel?'rgba(250,178,131,0.06)':'#0e0e0e'};`,
+            checkStyle:`font-size:12px;color:#fab283;flex:none;width:14px;text-align:center;opacity:${sel?1:0};`,
+          };
+        }),
+      };
+    }).filter(Boolean);
+
+    // preview = selected theme
+    const t=all.find(x=>x.id===s.selected)||all[0];
+    const applied=all.find(x=>x.id===s.applied);
+    const isApplied=s.selected===s.applied;
+    const lvLabels=['remote','global','custom','project','.opencode','inline','managed'];
+    const pv={
+      bg:t.bg, surf:t.surf, elev:t.elev, bd:t.bd, ink:t.ink, sec:t.sec, mut:t.mut, faint:t.faint,
+      primary:t.primary, primaryInk:t.primaryInk, accent:t.accent, green:t.green, red:t.red, yellow:t.yellow, markDim:t.markDim,
+      primaryTint:this.tint(t.primary,t.modeKind==='light'?0.1:0.09), primaryBd:this.tint(t.primary,0.4),
+      frame:`background:${t.bg};`, swBd:t.modeKind==='light'?'rgba(0,0,0,0.1)':'rgba(255,255,255,0.07)',
+      levels:t.levels.map((c,i)=>({color:c,label:lvLabels[i]})),
+      swatches:[{label:'bg',hex:t.bg},{label:'surface',hex:t.surf},{label:'ink',hex:t.ink},{label:'primary',hex:t.primary},{label:'accent',hex:t.accent},{label:'green',hex:t.green}],
+    };
+
+    const modeOpt=(val,label)=>({label,onClick:this.setMode(val),
+      style:`padding:5px 11px;border-radius:5px;border:none;cursor:pointer;font-size:11px;font-weight:600;background:${s.mode===val?'#262626':'transparent'};color:${s.mode===val?'#fab283':'#8a8a8a'};`});
+
+    return {
+      themeCount:all.length,
+      query:s.query, hasQuery:q.length>0, onSearch:this.onSearch, clearSearch:this.clearSearch, noResults:groups.length===0,
+      groups,
+      selName:t.name, selNote:t.note, selMode:t.modeKind==='light'?'Clara':'Escura',
+      selModeTagStyle:modeTag(t.modeKind),
+      modeOptions:[modeOpt('auto','Auto'),modeOpt('dark','Dark'),modeOpt('light','Light')],
+      applyTheme:this.apply,
+      applyLabel:isApplied?'✓ Aplicado':'Aplicar tema',
+      applyStyle:`background:${isApplied?'transparent':'#fab283'};color:${isApplied?'#7fb069':'#1a1206'};border:1px solid ${isApplied?'rgba(127,176,105,0.4)':'transparent'};border-radius:7px;padding:8px 16px;font-weight:600;font-size:12px;cursor:${isApplied?'default':'pointer'};`,
+      pv,
+    };
+  }
+}
+</script>
+</body>
+</html>

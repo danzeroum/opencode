@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{background:#0a0a0a;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased;}
+  ::selection{background:rgba(250,178,131,0.28);}
+  *::-webkit-scrollbar{width:10px;height:10px;}
+  *::-webkit-scrollbar-thumb{background:#262626;border-radius:5px;border:2px solid #0a0a0a;}
+  *::-webkit-scrollbar-thumb:hover{background:#333;}
+  *::-webkit-scrollbar-track{background:transparent;}
+  input,textarea,button{font-family:inherit;}
+  input:focus,textarea:focus,button:focus{outline:none;}
+  @keyframes oc-blink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+  @keyframes oc-spin{to{transform:rotate(360deg)}}
+  @keyframes oc-fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+</style>
+</helmet>
+<div style="position:fixed;inset:0;display:flex;flex-direction:column;background:#0a0a0a;color:#eeeeee;font-size:13px;line-height:1.5;overflow:hidden;">
+
+  <!-- ============ TOP BAR ============ -->
+  <header style="height:48px;flex:none;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid #1c1c1c;background:#0c0c0c;z-index:30;">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <svg width="17" height="21" viewBox="0 0 24 30" fill="none" style="display:block;">
+        <path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path>
+        <path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path>
+      </svg>
+      <span style="font-weight:600;letter-spacing:-0.2px;">opencode</span>
+      <span style="font-size:10px;color:#6a6a6a;border:1px solid #262626;border-radius:4px;padding:1px 5px;margin-left:2px;">web</span>
+    </div>
+
+    <div style="display:flex;background:#141414;border:1px solid #242424;border-radius:7px;padding:2px;gap:2px;">
+      <button onClick="{{ goWorkspace }}" style="{{ tabWorkspaceStyle }}">Workspace</button>
+      <button onClick="{{ goAdmin }}" style="{{ tabAdminStyle }}">Admin</button>
+    </div>
+
+    <div style="flex:1;"></div>
+
+    <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#8a8a8a;">
+      <span style="width:7px;height:7px;border-radius:50%;background:#7fb069;box-shadow:0 0 6px rgba(127,176,105,0.6);"></span>
+      <span>localhost:4096</span>
+    </div>
+    <div style="width:1px;height:18px;background:#242424;"></div>
+    <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:#8a8a8a;">
+      <span style="color:#9d7cd8;">◍</span>
+      <span style="color:#cfcfcf;">{{ headerModel }}</span>
+    </div>
+    <button title="Tema" style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;background:#141414;border:1px solid #242424;border-radius:6px;color:#cfcfcf;cursor:pointer;font-size:13px;">◐</button>
+  </header>
+
+  <div style="flex:1;display:flex;min-height:0;">
+
+    <!-- ============ SIDEBAR ============ -->
+    <aside style="width:248px;flex:none;border-right:1px solid #1c1c1c;background:#0c0c0c;display:flex;flex-direction:column;min-height:0;">
+
+      <!-- WORKSPACE SIDEBAR -->
+      <sc-if value="{{ isWorkspace }}" hint-placeholder-val="{{ true }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;overflow-y:auto;">
+        <div style="padding:14px 14px 8px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+            <span style="font-size:10px;letter-spacing:1.2px;color:#6a6a6a;text-transform:uppercase;">Agentes primários</span>
+            <span style="font-size:10px;color:#5a5a5a;">Tab ⇄</span>
+          </div>
+          <sc-for list="{{ primaryAgents }}" as="a" hint-placeholder-count="2">
+            <button onClick="{{ a.onClick }}" style="{{ a.rowStyle }}">
+              <span style="{{ a.dotStyle }}"></span>
+              <span style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-width:0;flex:1;">
+                <span style="display:flex;align-items:center;gap:6px;width:100%;">
+                  <span style="font-weight:600;font-size:13px;">{{ a.name }}</span>
+                  <span style="{{ a.tagStyle }}">{{ a.tag }}</span>
+                </span>
+                <span style="font-size:10.5px;color:#7a7a7a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;">{{ a.desc }}</span>
+              </span>
+            </button>
+          </sc-for>
+        </div>
+
+        <div style="padding:8px 14px;">
+          <div style="font-size:10px;letter-spacing:1.2px;color:#6a6a6a;text-transform:uppercase;margin-bottom:10px;">Subagentes <span style="color:#5a5a5a;text-transform:none;letter-spacing:0;">· @menção</span></div>
+          <sc-for list="{{ subAgents }}" as="a" hint-placeholder-count="3">
+            <button onClick="{{ a.onClick }}" style="{{ a.rowStyle }}">
+              <span style="color:#9d7cd8;font-size:12px;">@</span>
+              <span style="flex:1;text-align:left;font-size:12.5px;color:{{ a.nameColor }};">{{ a.name }}</span>
+              <span style="{{ a.tagStyle }}">{{ a.tag }}</span>
+            </button>
+          </sc-for>
+        </div>
+
+        <div style="flex:1;"></div>
+        <div style="padding:12px 14px;border-top:1px solid #1c1c1c;">
+          <div style="font-size:10px;letter-spacing:1.2px;color:#6a6a6a;text-transform:uppercase;margin-bottom:8px;">Sessões</div>
+          <sc-for list="{{ sessions }}" as="s" hint-placeholder-count="3">
+            <div style="{{ s.style }}">
+              <span style="width:5px;height:5px;border-radius:50%;background:{{ s.dot }};flex:none;"></span>
+              <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ s.title }}</span>
+              <span style="color:#5a5a5a;font-size:10px;">{{ s.time }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ADMIN SIDEBAR -->
+      <sc-if value="{{ isAdmin }}" hint-placeholder-val="{{ false }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;overflow-y:auto;padding:14px 10px;">
+        <div style="font-size:10px;letter-spacing:1.2px;color:#6a6a6a;text-transform:uppercase;padding:0 6px 10px;">Administração</div>
+        <sc-for list="{{ adminNav }}" as="n" hint-placeholder-count="9">
+          <button onClick="{{ n.onClick }}" style="{{ n.style }}">
+            <span style="width:16px;text-align:center;color:{{ n.iconColor }};flex:none;">{{ n.icon }}</span>
+            <span style="flex:1;text-align:left;">{{ n.label }}</span>
+            <sc-if value="{{ n.badge }}" hint-placeholder-val="{{ false }}"><span style="font-size:9.5px;color:#0a0a0a;background:{{ n.badgeColor }};border-radius:20px;padding:1px 6px;font-weight:600;">{{ n.badgeText }}</span></sc-if>
+          </button>
+        </sc-for>
+        <div style="flex:1;"></div>
+        <div style="margin:10px 6px 0;padding:11px;border:1px solid #242424;border-radius:7px;background:#101010;">
+          <div style="font-size:10px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:8px;">Precedência</div>
+          <sc-for list="{{ levelLegend }}" as="l" hint-placeholder-count="7">
+            <div style="display:flex;align-items:center;gap:7px;padding:2px 0;font-size:10.5px;">
+              <span style="width:8px;height:8px;border-radius:2px;background:{{ l.color }};flex:none;"></span>
+              <span style="color:#9a9a9a;flex:1;">{{ l.label }}</span>
+              <sc-if value="{{ l.locked }}" hint-placeholder-val="{{ false }}"><span style="color:#5a5a5a;font-size:9px;">🔒 read-only</span></sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+    </aside>
+
+    <!-- ============ MAIN ============ -->
+    <main style="flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;position:relative;">
+
+      <!-- ===== WORKSPACE ===== -->
+      <sc-if value="{{ isWorkspace }}" hint-placeholder-val="{{ true }}">
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;">
+        <!-- context strip -->
+        <div style="height:46px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;border-bottom:1px solid #1c1c1c;background:#0b0b0b;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:{{ wsAgentDot }};box-shadow:0 0 7px {{ wsAgentDot }};"></span>
+            <span style="font-weight:600;">{{ wsAgentName }}</span>
+            <span style="{{ wsAgentTagStyle }}">{{ wsAgentTag }}</span>
+          </div>
+          <span style="color:#3a3a3a;flex:none;">·</span>
+          <span style="font-size:12px;color:#9a9a9a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;">{{ wsAgentDesc }}</span>
+          <div style="display:flex;align-items:center;gap:7px;font-size:11.5px;color:#8a8a8a;flex:none;white-space:nowrap;"><span style="color:#9d7cd8;">◍</span>{{ wsModel }}</div>
+          <div style="width:1px;height:16px;background:#242424;flex:none;"></div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:11.5px;flex:none;white-space:nowrap;color:{{ snapColor }};">
+            <span>{{ snapGlyph }}</span><span>{{ snapLabel }}</span>
+          </div>
+        </div>
+
+        <!-- messages -->
+        <div style="flex:1;overflow-y:auto;padding:24px 0 8px;">
+          <div style="max-width:780px;margin:0 auto;padding:0 24px;display:flex;flex-direction:column;gap:18px;">
+            <sc-for list="{{ messages }}" as="m" hint-placeholder-count="6">
+              <div style="{{ m.wrap }}">
+                <sc-if value="{{ m.isUser }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;gap:11px;align-items:flex-start;">
+                    <span style="width:24px;height:24px;border-radius:5px;background:#1c1c1c;border:1px solid #2a2a2a;display:flex;align-items:center;justify-content:center;font-size:10px;color:#9a9a9a;flex:none;">VC</span>
+                    <div style="background:#141414;border:1px solid #232323;border-radius:8px;padding:11px 14px;color:#e2e2e2;">{{ m.text }}</div>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ m.isAssistant }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;gap:11px;align-items:flex-start;">
+                    <span style="width:24px;height:24px;border-radius:5px;background:rgba(250,178,131,0.12);border:1px solid rgba(250,178,131,0.3);display:flex;align-items:center;justify-content:center;flex:none;">
+                      <svg width="11" height="14" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="#7a5a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+                    </span>
+                    <div style="flex:1;padding-top:2px;color:#d6d6d6;">
+                      <div>{{ m.text }}</div>
+                      <sc-if value="{{ m.hasChecklist }}" hint-placeholder-val="{{ false }}">
+                        <div style="margin-top:10px;display:flex;flex-direction:column;gap:5px;">
+                          <sc-for list="{{ m.checklist }}" as="c" hint-placeholder-count="3">
+                            <div style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:#b8b8b8;"><span style="color:#7fb069;">✓</span><span>{{ c }}</span></div>
+                          </sc-for>
+                        </div>
+                      </sc-if>
+                    </div>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ m.isTool }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin-left:35px;display:flex;align-items:center;gap:10px;background:#0e0e0e;border:1px solid #1e1e1e;border-radius:7px;padding:8px 12px;">
+                    <span style="{{ m.toolBadge }}">{{ m.tool }}</span>
+                    <span style="font-size:12px;color:#bcbcbc;font-weight:500;">{{ m.target }}</span>
+                    <span style="flex:1;"></span>
+                    <span style="font-size:11px;color:#7a7a7a;">{{ m.meta }}</span>
+                    <span style="color:#7fb069;font-size:12px;">✓</span>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <!-- composer -->
+        <div style="flex:none;padding:0 24px 18px;position:relative;">
+          <div style="max-width:780px;margin:0 auto;position:relative;">
+            <!-- command palette -->
+            <sc-if value="{{ paletteOpen }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;bottom:calc(100% + 8px);left:0;right:0;background:#121212;border:1px solid #2c2c2c;border-radius:9px;box-shadow:0 14px 40px rgba(0,0,0,0.6);overflow:hidden;animation:oc-fade 0.12s ease;z-index:20;">
+                <div style="padding:7px 13px;border-bottom:1px solid #1e1e1e;font-size:10px;letter-spacing:1px;color:#6a6a6a;text-transform:uppercase;display:flex;justify-content:space-between;">
+                  <span>Comandos</span><span style="color:#5a5a5a;text-transform:none;letter-spacing:0;">↑↓ navegar · ⏎ executar · Tab completar</span>
+                </div>
+                <div style="max-height:230px;overflow-y:auto;">
+                  <sc-for list="{{ palette }}" as="c" hint-placeholder-count="5">
+                    <button onMouseDown="{{ c.onPick }}" style="{{ c.style }}">
+                      <span style="color:{{ c.color }};font-weight:600;min-width:96px;text-align:left;">/{{ c.name }}</span>
+                      <span style="flex:1;text-align:left;font-size:12px;color:#9a9a9a;">{{ c.desc }}</span>
+                      <sc-if value="{{ c.custom }}" hint-placeholder-val="{{ false }}"><span style="font-size:9px;color:#9d7cd8;border:1px solid rgba(157,124,216,0.4);border-radius:4px;padding:1px 5px;">custom</span></sc-if>
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+
+            <div style="background:#111111;border:1px solid {{ composerBorder }};border-radius:11px;padding:11px 13px;transition:border-color 0.15s;">
+              <div style="display:flex;align-items:flex-start;gap:9px;">
+                <span style="color:{{ promptColor }};font-weight:700;padding-top:1px;">{{ promptGlyph }}</span>
+                <input value="{{ input }}" onInput="{{ onInput }}" onKeyDown="{{ onInputKey }}" placeholder="Mensagem, ou / para comandos, @ para arquivos…" style="flex:1;background:transparent;border:none;color:#eee;font-size:13.5px;padding:1px 0;" />
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;margin-top:11px;padding-top:10px;border-top:1px solid #1c1c1c;">
+                <sc-for list="{{ quickActions }}" as="q" hint-placeholder-count="4">
+                  <button onClick="{{ q.onClick }}" title="{{ q.title }}" style="{{ q.style }}">{{ q.label }}</button>
+                </sc-for>
+                <button title="Anexar arquivo/imagem" style="display:flex;align-items:center;justify-content:center;width:28px;height:26px;background:transparent;border:1px solid #262626;border-radius:6px;color:#8a8a8a;cursor:pointer;font-size:13px;">⊕</button>
+                <div style="flex:1;"></div>
+                <span style="font-size:10.5px;color:#5a5a5a;">{{ tokenInfo }}</span>
+                <button onClick="{{ onSend }}" style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:6px 13px;font-weight:600;font-size:12.5px;cursor:pointer;">Enviar <span style="opacity:0.7;">⏎</span></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ===== ADMIN ROUTER ===== -->
+      <sc-if value="{{ isAdmin }}" hint-placeholder-val="{{ false }}">
+      <div style="flex:1;overflow-y:auto;min-height:0;">
+
+        <!-- DASHBOARD -->
+        <sc-if value="{{ showDashboard }}" hint-placeholder-val="{{ true }}">
+        <div style="max-width:1040px;margin:0 auto;padding:28px 32px 48px;">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px;">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Visão geral</h1>
+              <p style="margin:0;font-size:12.5px;color:#8a8a8a;">Estado do sistema, provedores e a cascata de configuração ativa.</p>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <span style="font-size:11px;color:#8a8a8a;border:1px solid #242424;border-radius:6px;padding:6px 11px;">config: <span style="color:#cfcfcf;">opencode.json</span></span>
+            </div>
+          </div>
+
+          <!-- stat cards -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;">
+            <sc-for list="{{ statCards }}" as="s" hint-placeholder-count="4">
+              <div style="background:#101010;border:1px solid #1f1f1f;border-radius:9px;padding:14px 15px;">
+                <div style="font-size:10.5px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;margin-bottom:9px;">{{ s.label }}</div>
+                <div style="display:flex;align-items:baseline;gap:7px;"><span style="font-size:24px;font-weight:600;color:{{ s.color }};">{{ s.value }}</span><span style="font-size:11px;color:#8a8a8a;">{{ s.unit }}</span></div>
+                <div style="font-size:10.5px;color:#6a6a6a;margin-top:6px;">{{ s.sub }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:14px;margin-bottom:14px;">
+            <!-- providers status -->
+            <div style="background:#101010;border:1px solid #1f1f1f;border-radius:10px;padding:16px 17px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:13px;">
+                <span style="font-size:12.5px;font-weight:600;">Provedores</span>
+                <button onClick="{{ goProviders }}" style="font-size:11px;color:#fab283;background:transparent;border:none;cursor:pointer;">Gerenciar →</button>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px;">
+                <sc-for list="{{ dashProviders }}" as="p" hint-placeholder-count="4">
+                  <div style="display:flex;align-items:center;gap:11px;padding:8px 4px;border-bottom:1px solid #161616;">
+                    <span style="width:8px;height:8px;border-radius:50%;background:{{ p.dot }};box-shadow:0 0 6px {{ p.glow }};flex:none;"></span>
+                    <span style="font-weight:500;flex:none;width:128px;">{{ p.name }}</span>
+                    <span style="font-size:11px;color:#7a7a7a;flex:1;">{{ p.models }}</span>
+                    <span style="font-size:11px;color:{{ p.statusColor }};">{{ p.status }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <!-- conflicts / alerts -->
+            <div style="background:#101010;border:1px solid #1f1f1f;border-radius:10px;padding:16px 17px;">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:13px;">Avisos & conflitos</div>
+              <div style="display:flex;flex-direction:column;gap:9px;">
+                <sc-for list="{{ alerts }}" as="a" hint-placeholder-count="3">
+                  <div style="display:flex;gap:10px;align-items:flex-start;padding:10px 11px;background:{{ a.bg }};border:1px solid {{ a.border }};border-radius:7px;">
+                    <span style="color:{{ a.color }};font-size:13px;flex:none;line-height:1.3;">{{ a.icon }}</span>
+                    <div><div style="font-size:12px;color:#dcdcdc;font-weight:500;">{{ a.title }}</div><div style="font-size:11px;color:#8a8a8a;margin-top:2px;">{{ a.body }}</div></div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <!-- precedence trail -->
+          <div style="background:#101010;border:1px solid #1f1f1f;border-radius:10px;padding:16px 17px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+              <span style="font-size:12.5px;font-weight:600;">Cascata de configuração</span>
+              <span style="font-size:11px;color:#7a7a7a;">campo <span style="color:#cfcfcf;">model</span> — resolvido da base ao topo</span>
+            </div>
+            <p style="margin:0 0 16px;font-size:11.5px;color:#7a7a7a;">Cada nível sobrescreve o anterior. O valor vencedor é o do nível mais alto que define o campo.</p>
+            <div style="display:flex;flex-direction:column;gap:0;">
+              <sc-for list="{{ cascadeTrail }}" as="c" hint-placeholder-count="7">
+                <div style="display:flex;align-items:center;gap:0;">
+                  <div style="display:flex;flex-direction:column;align-items:center;width:30px;flex:none;">
+                    <div style="width:1px;height:10px;background:{{ c.lineTop }};"></div>
+                    <span style="width:13px;height:13px;border-radius:3px;background:{{ c.color }};border:2px solid #101010;box-shadow:0 0 0 1px {{ c.color }};flex:none;"></span>
+                    <div style="width:1px;height:10px;background:{{ c.lineBottom }};"></div>
+                  </div>
+                  <div style="{{ c.cardStyle }}">
+                    <span style="font-size:9.5px;font-weight:600;letter-spacing:0.5px;color:{{ c.color }};width:64px;flex:none;">{{ c.code }}</span>
+                    <span style="font-size:11.5px;color:#bcbcbc;width:150px;flex:none;">{{ c.label }}</span>
+                    <span style="font-size:11.5px;color:{{ c.valueColor }};font-weight:{{ c.valueWeight }};flex:1;{{ c.strike }}">{{ c.value }}</span>
+                    <span style="font-size:10.5px;color:{{ c.tagColor }};">{{ c.tag }}</span>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- GENERAL -->
+        <sc-if value="{{ showGeneral }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Configuração geral</h1>
+          <p style="margin:0 0 22px;font-size:12.5px;color:#8a8a8a;">Modelo, snapshots, formatter e compartilhamento. O badge mostra de onde cada valor vem.</p>
+          <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:11px;padding:6px 18px 14px;">
+            <sc-for list="{{ generalFields }}" as="f" hint-placeholder-count="8">
+              <div style="{{ f.rowStyle }}">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;color:#dcdcdc;font-weight:500;">{{ f.label }}</div>
+                  <div style="font-size:11px;color:#7a7a7a;margin-top:3px;">{{ f.hint }}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;width:96px;flex:none;">
+                  <span style="width:8px;height:8px;border-radius:2px;background:{{ f.badgeColor }};flex:none;"></span>
+                  <span style="font-size:9.5px;font-weight:600;letter-spacing:0.4px;color:{{ f.badgeColor }};">{{ f.badgeCode }}</span>
+                </div>
+                <div style="width:230px;display:flex;align-items:center;justify-content:flex-end;gap:9px;flex:none;">
+                  <span style="font-size:12.5px;color:{{ f.ctrlColor }};border:1px solid #242424;border-radius:6px;padding:6px 12px;background:#0c0c0c;white-space:nowrap;">{{ f.value }}</span>
+                  <sc-if value="{{ f.locked }}" hint-placeholder-val="{{ false }}"><span title="Gerenciado pelo administrador — read-only" style="color:#e06c75;font-size:12px;flex:none;">🔒</span></sc-if>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:14px;display:flex;align-items:center;gap:10px;font-size:11.5px;color:#7a7a7a;">
+            <span style="width:8px;height:8px;border-radius:2px;background:#7fb069;"></span>
+            Alterações salvas no nível <span style="color:#7fb069;">Projeto</span> · <span style="color:#fab283;cursor:pointer;">mudar destino →</span>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- AGENTS LIST -->
+        <sc-if value="{{ showAgents }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:22px;">
+            <div><h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Agentes</h1>
+            <p style="margin:0;font-size:12.5px;color:#8a8a8a;">Defina prompts, modelos, permissões e ferramentas por agente.</p></div>
+            <button style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 14px;font-weight:600;font-size:12.5px;cursor:pointer;">+ Novo agente</button>
+          </div>
+          <sc-for list="{{ agentList }}" as="a" hint-placeholder-count="5">
+            <div onClick="{{ a.onClick }}" style="{{ a.rowStyle }}">
+              <span style="width:9px;height:9px;border-radius:50%;background:{{ a.statusColor }};flex:none;"></span>
+              <div style="width:150px;flex:none;">
+                <div style="display:flex;align-items:center;gap:8px;"><span style="font-weight:600;font-size:14px;">{{ a.name }}</span>
+                <span style="font-size:9px;color:{{ a.tagColor }};background:{{ a.tagBg }};border-radius:4px;padding:1px 6px;">{{ a.tag }}</span></div>
+              </div>
+              <span style="flex:1;font-size:12px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ a.desc }}</span>
+              <span style="font-size:11px;color:#9d7cd8;flex:none;">◍ {{ a.model }}</span>
+              <div style="display:flex;align-items:center;gap:5px;width:96px;flex:none;justify-content:flex-end;">
+                <span style="width:7px;height:7px;border-radius:2px;background:{{ a.badgeColor }};"></span>
+                <span style="font-size:9.5px;font-weight:600;color:{{ a.badgeColor }};">{{ a.badgeCode }}</span>
+              </div>
+              <span style="color:#5a5a5a;flex:none;">›</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- AGENT EDITOR -->
+        <sc-if value="{{ showAgentEditor }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1000px;margin:0 auto;padding:24px 32px 48px;">
+          <button onClick="{{ backToAgents }}" style="background:transparent;border:none;color:#8a8a8a;font-size:12px;cursor:pointer;padding:0;margin-bottom:16px;">← Agentes</button>
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;">
+            <h1 style="margin:0;font-size:22px;font-weight:600;">{{ eaName }}</h1>
+            <span style="font-size:10px;color:{{ eaTagColor }};border:1px solid {{ eaTagColor }}66;border-radius:5px;padding:2px 8px;">{{ eaTag }}</span>
+            <div style="display:flex;align-items:center;gap:6px;border:1px solid {{ eaBadgeColor }}55;border-radius:5px;padding:2px 9px;">
+              <span style="width:8px;height:8px;border-radius:2px;background:{{ eaBadgeColor }};"></span>
+              <span style="font-size:9.5px;font-weight:600;color:{{ eaBadgeColor }};">{{ eaBadgeCode }}</span>
+            </div>
+            <div style="flex:1;"></div>
+            <button style="background:transparent;border:1px solid #2a2a2a;border-radius:7px;padding:7px 14px;font-size:12px;color:#cfcfcf;cursor:pointer;">▷ Testar agente</button>
+            <button style="background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:7px 16px;font-weight:600;font-size:12.5px;cursor:pointer;">Salvar</button>
+          </div>
+          <p style="margin:0 0 18px;font-size:12px;color:#7a7a7a;">{{ eaDesc }}</p>
+
+          <div style="display:flex;background:#141414;border:1px solid #242424;border-radius:8px;padding:2px;gap:2px;width:fit-content;margin-bottom:20px;">
+            <button onClick="{{ setAgentVisual }}" style="{{ atVisualStyle }}">Visual</button>
+            <button onClick="{{ setAgentText }}" style="{{ atTextStyle }}">Markdown</button>
+          </div>
+
+          <sc-if value="{{ agentTabVisual }}" hint-placeholder-val="{{ true }}">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+            <!-- left: identity -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
+              <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;padding:17px;">
+                <div style="font-size:11px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;margin-bottom:14px;">Identidade & modelo</div>
+                <div style="display:flex;flex-direction:column;gap:14px;">
+                  <div><div style="font-size:11.5px;color:#9a9a9a;margin-bottom:6px;">Modelo LLM</div>
+                    <div style="display:flex;align-items:center;justify-content:space-between;border:1px solid #242424;border-radius:7px;padding:9px 12px;background:#0c0c0c;font-size:12.5px;color:#cfcfcf;"><span><span style="color:#9d7cd8;">◍</span> {{ eaModel }}</span><span style="color:#6a6a6a;">▾</span></div>
+                  </div>
+                  <div><div style="display:flex;justify-content:space-between;margin-bottom:7px;"><span style="font-size:11.5px;color:#9a9a9a;">Temperatura</span><span style="font-size:12px;color:#fab283;font-weight:600;">{{ eaTemp }}</span></div>
+                    <input type="range" min="0" max="1" step="0.1" value="{{ eaTemp }}" onInput="{{ onTempChange }}" style="width:100%;accent-color:#fab283;cursor:pointer;" />
+                    <div style="display:flex;justify-content:space-between;font-size:10px;color:#5a5a5a;margin-top:3px;"><span>0.0 · determinístico</span><span>1.0 · criativo</span></div>
+                  </div>
+                  <div><div style="font-size:11.5px;color:#9a9a9a;margin-bottom:6px;">Max steps</div>
+                    <div style="border:1px solid #242424;border-radius:7px;padding:9px 12px;background:#0c0c0c;font-size:12.5px;color:#cfcfcf;">40</div>
+                  </div>
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding-top:4px;">
+                    <div><div style="font-size:12.5px;color:#dcdcdc;">Subtask</div><div style="font-size:10.5px;color:#7a7a7a;">pode ser invocado por outro agente</div></div>
+                    <div style="width:38px;height:22px;border-radius:12px;background:#242424;position:relative;cursor:pointer;"><span style="position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#888;"></span></div>
+                  </div>
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;border-top:1px solid #1a1a1a;">
+                    <div><div style="font-size:12.5px;color:#dcdcdc;">Habilitado</div><div style="font-size:10.5px;color:#7a7a7a;">disponível no workspace</div></div>
+                    <div onClick="{{ onToggleEnabled }}" style="{{ enabledToggleStyle }}"><span style="{{ enabledKnobStyle }}"></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- right: permissions / tools / prompt -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
+              <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;padding:17px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:13px;">
+                  <span style="font-size:11px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;">Permissões</span>
+                  <span style="font-size:10px;color:#5a5a5a;">clique para alternar</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:7px;">
+                  <sc-for list="{{ permRows }}" as="p" hint-placeholder-count="5">
+                    <div onClick="{{ p.onClick }}" style="{{ p.rowStyle }}">
+                      <span style="font-size:12.5px;color:#cfcfcf;">{{ p.tool }}</span>
+                      <span style="{{ p.valStyle }}">{{ p.value }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+              <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;padding:17px;">
+                <div style="font-size:11px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;margin-bottom:13px;">Ferramentas</div>
+                <div style="display:flex;flex-wrap:wrap;gap:7px;">
+                  <sc-for list="{{ eaToolList }}" as="tl" hint-placeholder-count="8">
+                    <span style="{{ tl.style }}"><span style="width:7px;height:7px;border-radius:2px;background:{{ tl.box }};"></span>{{ tl.name }}</span>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;padding:17px;margin-top:16px;">
+            <div style="font-size:11px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;margin-bottom:12px;">System prompt</div>
+            <div style="background:#0c0c0c;border:1px solid #1e1e1e;border-radius:8px;padding:14px;font-size:12.5px;color:#cfcfcf;line-height:1.7;min-height:90px;">{{ eaPrompt }}</div>
+          </div>
+          </sc-if>
+
+          <sc-if value="{{ agentTabText }}" hint-placeholder-val="{{ false }}">
+          <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:8px;padding:10px 15px;border-bottom:1px solid #1e1e1e;background:#0c0c0c;">
+              <span style="color:#9d7cd8;">◆</span><span style="font-size:11.5px;color:#9a9a9a;">.opencode/agents/{{ eaName }}.md</span>
+              <span style="flex:1;"></span><span style="font-size:10px;color:#5a5a5a;">frontmatter YAML + corpo Markdown</span>
+            </div>
+            <div style="padding:16px 18px;background:#0a0a0a;"><pre style="margin:0;white-space:pre-wrap;font-family:inherit;font-size:12.5px;line-height:1.75;color:#cfcfcf;">{{ eaMarkdown }}</pre></div>
+          </div>
+          </sc-if>
+        </div>
+        </sc-if>
+
+        <!-- COMMANDS LIST -->
+        <sc-if value="{{ showCommands }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:22px;">
+            <div><h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Comandos</h1>
+            <p style="margin:0;font-size:12.5px;color:#8a8a8a;">Atalhos <span style="color:#fab283;">/comando</span> com templates e placeholders dinâmicos.</p></div>
+            <button style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 14px;font-weight:600;font-size:12.5px;cursor:pointer;">+ Novo comando</button>
+          </div>
+          <sc-for list="{{ commandList }}" as="c" hint-placeholder-count="4">
+            <div onClick="{{ c.onClick }}" style="{{ c.rowStyle }}">
+              <span style="color:#fab283;font-weight:700;flex:none;width:14px;">/</span>
+              <span style="font-weight:600;font-size:14px;width:130px;flex:none;">{{ c.name }}</span>
+              <span style="flex:1;font-size:12px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ c.desc }}</span>
+              <span style="font-size:11px;color:#7a7a7a;flex:none;">→ {{ c.agent }}</span>
+              <div style="display:flex;align-items:center;gap:5px;width:96px;flex:none;justify-content:flex-end;">
+                <span style="width:7px;height:7px;border-radius:2px;background:{{ c.badgeColor }};"></span>
+                <span style="font-size:9.5px;font-weight:600;color:{{ c.badgeColor }};">{{ c.badgeCode }}</span>
+              </div>
+              <span style="color:#5a5a5a;flex:none;">›</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- COMMAND EDITOR -->
+        <sc-if value="{{ showCommandEditor }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1000px;margin:0 auto;padding:24px 32px 48px;">
+          <button onClick="{{ backToCommands }}" style="background:transparent;border:none;color:#8a8a8a;font-size:12px;cursor:pointer;padding:0;margin-bottom:16px;">← Comandos</button>
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+            <h1 style="margin:0;font-size:22px;font-weight:600;"><span style="color:#fab283;">/</span>{{ ecName }}</h1>
+            <div style="display:flex;align-items:center;gap:6px;border:1px solid {{ ecBadgeColor }}55;border-radius:5px;padding:2px 9px;">
+              <span style="width:8px;height:8px;border-radius:2px;background:{{ ecBadgeColor }};"></span>
+              <span style="font-size:9.5px;font-weight:600;color:{{ ecBadgeColor }};">{{ ecBadgeCode }}</span>
+            </div>
+            <div style="flex:1;"></div>
+            <button style="background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:7px 16px;font-weight:600;font-size:12.5px;cursor:pointer;">Salvar</button>
+          </div>
+          <p style="margin:0 0 18px;font-size:12px;color:#7a7a7a;">{{ ecDesc }}</p>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+            <!-- left: config + template -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
+              <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;padding:17px;">
+                <div style="font-size:11px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;margin-bottom:14px;">Execução</div>
+                <div style="display:flex;flex-direction:column;gap:13px;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:12px;color:#9a9a9a;">Agente executante</span>
+                    <span style="font-size:12px;color:#cfcfcf;border:1px solid #242424;border-radius:6px;padding:5px 11px;background:#0c0c0c;">{{ ecAgent }} ▾</span></div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:12px;color:#9a9a9a;">Modelo override</span>
+                    <span style="font-size:12px;color:#cfcfcf;border:1px solid #242424;border-radius:6px;padding:5px 11px;background:#0c0c0c;">{{ ecModel }} ▾</span></div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:12px;color:#9a9a9a;">Subtask</span>
+                    <span style="font-size:11px;color:#7fb069;border:1px solid rgba(127,176,105,0.3);border-radius:6px;padding:4px 10px;">sim · roda isolado</span></div>
+                </div>
+              </div>
+              <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;overflow:hidden;flex:1;">
+                <div style="display:flex;align-items:center;gap:8px;padding:10px 15px;border-bottom:1px solid #1e1e1e;background:#0c0c0c;">
+                  <span style="color:#fab283;">⌨</span><span style="font-size:11px;letter-spacing:0.6px;color:#9a9a9a;text-transform:uppercase;">Template</span>
+                </div>
+                <div style="padding:15px 16px;background:#0a0a0a;"><pre style="margin:0;white-space:pre-wrap;font-family:inherit;font-size:12.5px;line-height:1.75;color:#cfcfcf;">{{ ecTemplate }}</pre></div>
+              </div>
+            </div>
+            <!-- right: playground -->
+            <div style="display:flex;flex-direction:column;gap:16px;">
+              <div style="background:#0f0f0f;border:1px solid rgba(250,178,131,0.25);border-radius:10px;overflow:hidden;">
+                <div style="display:flex;align-items:center;gap:8px;padding:11px 16px;border-bottom:1px solid #1e1e1e;background:rgba(250,178,131,0.05);">
+                  <span style="color:#fab283;">▷</span><span style="font-size:11.5px;font-weight:600;color:#fab283;">Playground</span>
+                  <span style="font-size:10.5px;color:#7a7a7a;">— teste antes de salvar</span>
+                </div>
+                <div style="padding:16px;">
+                  <div style="font-size:11px;color:#9a9a9a;margin-bottom:7px;">Argumentos de exemplo</div>
+                  <div style="display:flex;align-items:center;gap:9px;background:#0c0c0c;border:1px solid #242424;border-radius:8px;padding:9px 12px;margin-bottom:16px;">
+                    <span style="color:#fab283;font-weight:700;">/{{ ecName }}</span>
+                    <input value="{{ cmdArgs }}" onInput="{{ onCmdArgs }}" placeholder="Button --variant primary" style="flex:1;background:transparent;border:none;color:#eee;font-size:12.5px;" />
+                  </div>
+                  <div style="font-size:11px;color:#9a9a9a;margin-bottom:7px;">Prompt resolvido</div>
+                  <div style="background:#0a0a0a;border:1px solid #1e1e1e;border-radius:8px;padding:14px;min-height:120px;">
+                    <div>{{ cmdResolvedEl }}</div>
+                  </div>
+                </div>
+              </div>
+              <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:10px;padding:15px 17px;">
+                <div style="font-size:11px;letter-spacing:0.6px;color:#7a7a7a;text-transform:uppercase;margin-bottom:12px;">Placeholders</div>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                  <sc-for list="{{ placeholderHelp }}" as="h" hint-placeholder-count="4">
+                    <div style="display:flex;gap:11px;align-items:baseline;">
+                      <span style="font-family:inherit;font-size:11.5px;color:{{ h.color }};background:#0c0c0c;border:1px solid #1e1e1e;border-radius:5px;padding:3px 8px;white-space:nowrap;flex:none;min-width:92px;">{{ h.token }}</span>
+                      <span style="font-size:11.5px;color:#8a8a8a;">{{ h.desc }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- PROVIDERS -->
+        <sc-if value="{{ showProviders }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Provedores</h1>
+          <p style="margin:0 0 22px;font-size:12.5px;color:#8a8a8a;">Credenciais e modelos. Chaves são mascaradas após salvar e nunca exibidas em texto plano.</p>
+          <sc-for list="{{ providerList }}" as="p" hint-placeholder-count="6">
+            <div style="{{ p.cardStyle }}">
+              <div style="display:flex;align-items:center;gap:13px;padding:14px 17px;border-bottom:1px solid #1a1a1a;">
+                <span style="width:9px;height:9px;border-radius:50%;background:{{ p.dot }};box-shadow:0 0 7px {{ p.dot }};flex:none;"></span>
+                <span style="font-weight:600;font-size:14px;width:150px;flex:none;">{{ p.name }}</span>
+                <span style="flex:1;font-size:11px;color:#7a7a7a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ p.models }}</span>
+                <div style="display:flex;align-items:center;gap:5px;flex:none;">
+                  <span style="width:7px;height:7px;border-radius:2px;background:{{ p.badgeColor }};"></span>
+                  <span style="font-size:9.5px;font-weight:600;color:{{ p.badgeColor }};">{{ p.badgeCode }}</span>
+                </div>
+                <span style="font-size:11.5px;color:{{ p.statusColor }};width:108px;text-align:right;flex:none;">{{ p.status }}</span>
+                <button onClick="{{ p.onTest }}" style="background:transparent;border:1px solid #2a2a2a;border-radius:6px;padding:6px 12px;font-size:11.5px;color:#cfcfcf;cursor:pointer;flex:none;">Testar</button>
+              </div>
+              <div style="padding:14px 17px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;">
+                <sc-for list="{{ p.fields }}" as="f" hint-placeholder-count="2">
+                  <div><div style="font-size:11px;color:#8a8a8a;margin-bottom:6px;">{{ f.label }}</div>
+                    <div style="border:1px solid #242424;border-radius:7px;padding:8px 11px;background:#0c0c0c;font-size:12px;color:#cfcfcf;font-family:inherit;">{{ f.display }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- POLICIES -->
+        <sc-if value="{{ showPolicies }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px;">
+            <div><h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Políticas</h1>
+            <p style="margin:0;font-size:12.5px;color:#8a8a8a;">Regras allow / deny / ask por ação e recurso. Maior prioridade vence.</p></div>
+            <button style="background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 14px;font-weight:600;font-size:12.5px;cursor:pointer;">+ Nova regra</button>
+          </div>
+          <div style="display:grid;grid-template-columns:90px 90px 1fr 70px;gap:14px;padding:0 16px 10px;font-size:10px;letter-spacing:0.6px;color:#6a6a6a;text-transform:uppercase;">
+            <span>Efeito</span><span>Ação</span><span>Recurso</span><span>Prioridade</span>
+          </div>
+          <sc-for list="{{ policyRows }}" as="p" hint-placeholder-count="5">
+            <div style="{{ p.rowStyle }}">
+              <span style="{{ p.effectStyle }}">{{ p.effect }}</span>
+              <span style="font-size:12.5px;color:#cfcfcf;">{{ p.action }}</span>
+              <span style="font-size:12px;color:#9a9a9a;font-family:inherit;">{{ p.resource }}</span>
+              <span style="font-size:12px;color:#7a7a7a;">{{ p.priority }}</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- SERVER -->
+        <sc-if value="{{ showServer }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Servidor web</h1>
+          <p style="margin:0 0 22px;font-size:12.5px;color:#8a8a8a;">Porta, host, descoberta mDNS, CORS e autenticação.</p>
+          <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:11px;padding:6px 18px 14px;">
+            <sc-for list="{{ serverFields }}" as="f" hint-placeholder-count="6">
+              <div style="{{ f.rowStyle }}">
+                <div style="flex:1;min-width:0;"><div style="font-size:13px;color:#dcdcdc;font-weight:500;">{{ f.label }}</div><div style="font-size:11px;color:#7a7a7a;margin-top:3px;">{{ f.hint }}</div></div>
+                <div style="display:flex;align-items:center;gap:6px;width:96px;flex:none;"><span style="width:8px;height:8px;border-radius:2px;background:{{ f.badgeColor }};"></span><span style="font-size:9.5px;font-weight:600;color:{{ f.badgeColor }};">{{ f.badgeCode }}</span></div>
+                <div style="width:230px;display:flex;align-items:center;justify-content:flex-end;gap:9px;flex:none;"><span style="font-size:12.5px;color:{{ f.ctrlColor }};border:1px solid #242424;border-radius:6px;padding:6px 12px;background:#0c0c0c;white-space:nowrap;">{{ f.value }}</span><sc-if value="{{ f.locked }}" hint-placeholder-val="{{ false }}"><span title="read-only" style="color:#e06c75;font-size:12px;">🔒</span></sc-if></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- TUI -->
+        <sc-if value="{{ showTui }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:920px;margin:0 auto;padding:28px 32px 48px;">
+          <h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">TUI / Keybinds</h1>
+          <p style="margin:0 0 22px;font-size:12.5px;color:#8a8a8a;">Tema, atalhos e comportamento do terminal — espelha tui.json.</p>
+          <div style="background:#0f0f0f;border:1px solid #1f1f1f;border-radius:11px;padding:6px 18px 14px;">
+            <sc-for list="{{ tuiFields }}" as="f" hint-placeholder-count="6">
+              <div style="{{ f.rowStyle }}">
+                <div style="flex:1;min-width:0;"><div style="font-size:13px;color:#dcdcdc;font-weight:500;">{{ f.label }}</div><div style="font-size:11px;color:#7a7a7a;margin-top:3px;">{{ f.hint }}</div></div>
+                <div style="display:flex;align-items:center;gap:6px;width:96px;flex:none;"><span style="width:8px;height:8px;border-radius:2px;background:{{ f.badgeColor }};"></span><span style="font-size:9.5px;font-weight:600;color:{{ f.badgeColor }};">{{ f.badgeCode }}</span></div>
+                <div style="width:230px;display:flex;align-items:center;justify-content:flex-end;gap:9px;flex:none;"><span style="font-size:12.5px;color:{{ f.ctrlColor }};border:1px solid #242424;border-radius:6px;padding:6px 12px;background:#0c0c0c;white-space:nowrap;">{{ f.value }}</span></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- SNAPSHOTS -->
+        <sc-if value="{{ showSnapshots }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:860px;margin:0 auto;padding:28px 32px 48px;">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px;">
+            <div><h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Snapshots</h1>
+            <p style="margin:0;font-size:12.5px;color:#8a8a8a;">Checkpoints automáticos via git interno. Reverta qualquer alteração do agente.</p></div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button onClick="{{ onUndo }}" style="display:flex;align-items:center;gap:6px;background:transparent;border:1px solid #2a2a2a;border-radius:7px;padding:7px 13px;font-size:12px;color:#fab283;cursor:pointer;">↶ Undo</button>
+              <button onClick="{{ onRedo }}" style="display:flex;align-items:center;gap:6px;background:transparent;border:1px solid #2a2a2a;border-radius:7px;padding:7px 13px;font-size:12px;color:#cfcfcf;cursor:pointer;">↷ Redo</button>
+            </div>
+          </div>
+          <div style="{{ snapBannerStyle }}">
+            <span style="font-size:13px;">{{ snapBannerIcon }}</span>
+            <span style="font-size:12.5px;flex:1;">{{ snapBannerText }}</span>
+            <div onClick="{{ onToggleSnap }}" style="{{ snapToggleStyle }}"><span style="{{ snapKnobStyle }}"></span></div>
+          </div>
+          <div style="margin-top:20px;">
+            <sc-for list="{{ timeline }}" as="c" hint-placeholder-count="7">
+              <div style="display:flex;align-items:stretch;gap:0;">
+                <div style="display:flex;flex-direction:column;align-items:center;width:34px;flex:none;">
+                  <div style="width:1px;flex:1;background:#262626;"></div>
+                  <span style="font-size:13px;color:{{ c.dot }};line-height:1;">{{ c.glyph }}</span>
+                  <div style="width:1px;flex:1;background:{{ c.lineBottomColor }};"></div>
+                </div>
+                <div style="{{ c.rowStyle }}">
+                  <span style="font-size:10px;color:#6a6a6a;width:30px;flex:none;">#{{ c.id }}</span>
+                  <span style="font-size:12.5px;flex:1;color:{{ c.labelColor }};{{ c.strike }}">{{ c.label }}</span>
+                  <span style="font-size:10.5px;color:#7a7a7a;flex:none;">{{ c.agent }} · {{ c.files }}</span>
+                  <span style="font-size:10px;color:{{ c.tagColor }};border:1px solid {{ c.tagColor }}55;border-radius:4px;padding:1px 7px;flex:none;">{{ c.tagText }}</span>
+                  <span style="font-size:10.5px;color:#5a5a5a;width:42px;text-align:right;flex:none;">{{ c.time }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- SHARES -->
+        <sc-if value="{{ showShares }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:860px;margin:0 auto;padding:28px 32px 48px;">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:22px;">
+            <div><h1 style="margin:0 0 4px;font-size:21px;font-weight:600;letter-spacing:-0.3px;">Compartilhados</h1>
+            <p style="margin:0;font-size:12.5px;color:#8a8a8a;">Links públicos gerados via <span style="color:#fab283;">/share</span>. Copie ou revogue a qualquer momento.</p></div>
+            <button style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 14px;font-weight:600;font-size:12.5px;cursor:pointer;">↗ Compartilhar atual</button>
+          </div>
+          <sc-for list="{{ shares }}" as="s" hint-placeholder-count="3">
+            <div style="{{ s.rowStyle }}">
+              <span style="width:9px;height:9px;border-radius:50%;background:{{ s.dot }};flex:none;"></span>
+              <div style="width:210px;flex:none;"><div style="font-size:13px;color:#dcdcdc;font-weight:500;">{{ s.title }}</div><div style="font-size:11px;color:#7a7a7a;margin-top:2px;">{{ s.url }}</div></div>
+              <span style="flex:1;font-size:11px;color:#8a8a8a;">{{ s.views }}</span>
+              <span style="font-size:11px;color:{{ s.statusColor }};border:1px solid {{ s.statusColor }}44;border-radius:5px;padding:3px 9px;flex:none;">{{ s.statusText }}</span>
+              <span style="font-size:10.5px;color:#5a5a5a;width:42px;text-align:right;flex:none;">{{ s.time }}</span>
+              <div style="display:flex;gap:6px;flex:none;width:120px;justify-content:flex-end;">
+                <button style="background:transparent;border:1px solid #2a2a2a;border-radius:6px;padding:5px 10px;font-size:11px;color:#cfcfcf;cursor:pointer;">Copiar</button>
+                <button style="background:transparent;border:1px solid rgba(224,108,117,0.3);border-radius:6px;padding:5px 10px;font-size:11px;color:#e06c75;cursor:pointer;">Revogar</button>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+
+      </div>
+      </sc-if>
+
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = {
+    mode:'workspace', adminView:'dashboard', theme:'dark',
+    activeAgent:'build', input:'',
+    snapshotsEnabled:true, checkpoints:7, redo:0, shareActive:false,
+    agentTab:'visual', editingAgentId:'build',
+    cmdTab:'visual', editingCmdId:'component', cmdArgs:'Button --variant primary',
+    cascadeOpen:null, testingProvider:null,
+    providers:{ anthropic:'connected', 'github-copilot':'connected', openai:'connected', 'amazon-bedrock':'idle', google:'idle', openrouter:'connected' },
+    perms:{
+      build:{write:'allow',edit:'allow',bash:'allow',read:'allow',webfetch:'allow'},
+      plan:{write:'deny',edit:'deny',bash:'ask',read:'allow',webfetch:'allow'},
+      general:{write:'deny',edit:'deny',bash:'ask',read:'allow',webfetch:'allow'},
+      explore:{write:'deny',edit:'deny',bash:'deny',read:'allow',webfetch:'allow'},
+      scout:{write:'deny',edit:'deny',bash:'deny',read:'allow',webfetch:'deny'},
+    },
+    temp:{ build:0, plan:0, general:0.3, explore:0.2, scout:0.1 },
+    enabled:{ build:true, plan:true, general:true, explore:true, scout:false },
+    extra:[],
+    timeline:[
+      {id:7,label:'edit · health.test.ts',agent:'build',cmd:'criar teste',files:'1 arquivo',time:'agora',status:'applied'},
+      {id:6,label:'edit · router.ts',agent:'build',cmd:'add /healthz',files:'1 arquivo',time:'1 min',status:'applied'},
+      {id:5,label:'bash · bun install',agent:'build',cmd:'deps',files:'package.json',time:'4 min',status:'applied'},
+      {id:4,label:'edit · auth.ts (revertido)',agent:'build',cmd:'refactor auth',files:'2 arquivos',time:'12 min',status:'reverted'},
+      {id:3,label:'edit · schema.sql',agent:'plan',cmd:'migration',files:'1 arquivo',time:'20 min',status:'applied'},
+      {id:2,label:'write · README.md',agent:'build',cmd:'/init',files:'1 arquivo',time:'31 min',status:'applied'},
+      {id:1,label:'sessão iniciada',agent:'—',cmd:'—',files:'—',time:'33 min',status:'applied'},
+    ],
+  };
+
+  // ---------- design tokens ----------
+  T(){ return { bg:'#0a0a0a', surf:'#101010', elev:'#141414', elev2:'#181818', bd:'#242424', bdm:'#1c1c1c', ink:'#eeeeee', sec:'#cfcfcf', mut:'#9a9a9a', dim:'#7a7a7a', faint:'#5a5a5a', primary:'#fab283', accent:'#9d7cd8', green:'#7fb069', red:'#e06c75', yellow:'#e6c07b', blue:'#5a9cf8', orange:'#e09a4b', brown:'#ac8e68' }; }
+  LV(){ const t=this.T(); return {
+    remote:{code:'REMOTE',label:'Remote',color:t.blue,desc:'.well-known/opencode',locked:true},
+    global:{code:'GLOBAL',label:'Global',color:t.yellow,desc:'~/.config/opencode'},
+    custom:{code:'CUSTOM',label:'Custom path',color:t.orange,desc:'OPENCODE_CONFIG'},
+    project:{code:'PROJECT',label:'Projeto',color:t.green,desc:'opencode.json'},
+    opencode:{code:'.OPENCODE',label:'.opencode/',color:t.accent,desc:'agents · commands'},
+    inline:{code:'INLINE',label:'Inline',color:t.brown,desc:'OPENCODE_CONFIG_CONTENT',locked:true},
+    managed:{code:'MANAGED',label:'Managed',color:t.red,desc:'/etc/opencode · MDM',locked:true},
+  }; }
+
+  // ---------- nav handlers ----------
+  goWorkspace=()=>this.setState({mode:'workspace'});
+  goAdmin=()=>this.setState({mode:'admin'});
+  goAdminView=(v)=>this.setState({mode:'admin',adminView:v});
+  goProviders=()=>this.setState({mode:'admin',adminView:'providers'});
+
+  // ---------- workspace ----------
+  setActiveAgent=(id)=>this.setState({activeAgent:id});
+  onInput=(e)=>this.setState({input:e.target.value});
+  onInputKey=(e)=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); this.execute(); } };
+  execute=()=>{
+    const v=(this.state.input||'').trim(); if(!v) return;
+    if(v==='/undo'||v.startsWith('/undo')){ this.undo(); this.setState({input:''}); return; }
+    if(v.startsWith('/redo')){ this.redo(); this.setState({input:''}); return; }
+    if(v.startsWith('/share')){ this.setState({shareActive:true,input:''}); return; }
+    if(v.startsWith('/')){ this.setState({extra:[...this.state.extra,{kind:'user',text:v}],input:''}); return; }
+    this.setState({extra:[...this.state.extra,{kind:'user',text:v},{kind:'assistant',text:'Entendido — vou trabalhar nisso agora.'}],input:''});
+  };
+  pick=(name)=>(e)=>{ e.preventDefault(); this.setState({input:'/'+name+' '}); };
+  undo=()=>{ const tl=[...this.state.timeline]; const i=tl.findIndex(x=>x.status==='applied'&&x.id>1); if(i>=0){ tl[i]={...tl[i],status:'reverted'}; this.setState({timeline:tl,checkpoints:Math.max(0,this.state.checkpoints-1),redo:this.state.redo+1}); } };
+  redo=()=>{ const tl=[...this.state.timeline]; for(let i=tl.length-1;i>=0;i--){ if(tl[i].status==='reverted'){ tl[i]={...tl[i],status:'applied'}; this.setState({timeline:tl,checkpoints:this.state.checkpoints+1,redo:Math.max(0,this.state.redo-1)}); break; } } };
+  toggleSnap=()=>this.setState({snapshotsEnabled:!this.state.snapshotsEnabled});
+
+  // ---------- admin editors ----------
+  cyclePerm=(agent,tool)=>()=>{ const order={allow:'ask',ask:'deny',deny:'allow'}; const p={...this.state.perms}; p[agent]={...p[agent],[tool]:order[p[agent][tool]]}; this.setState({perms:p}); };
+  setTemp=(agent)=>(e)=>{ const t={...this.state.temp}; t[agent]=parseFloat(e.target.value); this.setState({temp:t}); };
+  toggleEnabled=(agent)=>()=>{ const en={...this.state.enabled}; en[agent]=!en[agent]; this.setState({enabled:en}); };
+  setAgentTab=(t)=>()=>this.setState({agentTab:t});
+  editAgent=(id)=>()=>this.setState({editingAgentId:id,adminView:'agentEditor',agentTab:'visual'});
+  setCmdTab=(t)=>()=>this.setState({cmdTab:t});
+  editCmd=(id)=>()=>this.setState({editingCmdId:id,adminView:'commandEditor',cmdTab:'visual'});
+  onCmdArgs=(e)=>this.setState({cmdArgs:e.target.value});
+  testProvider=(id)=>()=>{ this.setState({testingProvider:id}); setTimeout(()=>{ const p={...this.state.providers}; p[id]='connected'; this.setState({providers:p,testingProvider:null}); },1100); };
+  toggleCascade=(id)=>()=>this.setState({cascadeOpen:this.state.cascadeOpen===id?null:id});
+
+  // ---------- static data ----------
+  agentMeta(){ return {
+    build:{name:'build',tag:'primary',desc:'Agente padrão, acesso total ao desenvolvimento',model:'claude-sonnet-4-5',level:'project',prompt:'Você é o agente build do OpenCode. Implemente, edite e execute com cuidado. Sempre rode os testes após mudanças.'},
+    plan:{name:'plan',tag:'primary',desc:'Somente leitura — análise e exploração',model:'claude-sonnet-4-5',level:'project',prompt:'Você é o agente plan. Explore e proponha planos. NÃO edite arquivos. Peça permissão antes de comandos bash.'},
+    general:{name:'general',tag:'subagent',desc:'Buscas complexas e tarefas multi-etapa',model:'claude-haiku-4-5',level:'global',prompt:'Subagente de busca. Investigue o codebase e retorne um resumo objetivo.'},
+    explore:{name:'explore',tag:'subagent',desc:'Mapeia a estrutura do repositório',model:'claude-haiku-4-5',level:'opencode',prompt:'Mapeie arquivos e dependências relevantes para a tarefa.'},
+    scout:{name:'scout',tag:'subagent',desc:'Coleta rápida de contexto (desabilitado)',model:'gpt-4o-mini',level:'opencode',prompt:'Colete contexto mínimo necessário.'},
+  }; }
+  cmdMeta(){ return {
+    component:{name:'component',desc:'Cria um componente React + teste',level:'project',agent:'build',model:'inherit',subtask:true,template:'Crie um componente React chamado $1 com as props: $ARGUMENTS.\nSiga o padrão de @src/components/Button.tsx e gere o teste correspondente.\nContexto de lint:\n!`cat .eslintrc.json`'},
+    review:{name:'review',desc:'Revisa o diff atual em busca de bugs',level:'opencode',agent:'plan',model:'inherit',subtask:false,template:'Revise as mudanças abaixo procurando bugs, riscos de segurança e regressões.\n\n!`git diff --staged`'},
+    test:{name:'test',desc:'Gera testes para o arquivo informado',level:'opencode',agent:'build',model:'inherit',subtask:true,template:'Escreva testes unitários completos para @$1 cobrindo os casos: $ARGUMENTS.'},
+    commit:{name:'commit',desc:'Mensagem de commit a partir do diff',level:'global',agent:'general',model:'claude-haiku-4-5',subtask:false,template:'Gere uma mensagem de commit no padrão conventional commits para:\n\n!`git diff --staged --stat`'},
+  }; }
+  providerMeta(){ return [
+    {id:'anthropic',name:'Anthropic',models:'claude-sonnet-4-5 · haiku-4-5 · opus-4',level:'global',fields:['apiKey','timeout']},
+    {id:'github-copilot',name:'GitHub Copilot',models:'gpt-4o · o1 · claude-sonnet',level:'global',fields:['oauth']},
+    {id:'openai',name:'OpenAI',models:'gpt-4o · gpt-4o-mini · o1',level:'project',fields:['apiKey','timeout']},
+    {id:'amazon-bedrock',name:'Amazon Bedrock',models:'anthropic.claude-* · meta.llama',level:'global',fields:['apiKey','region','profile','endpoint']},
+    {id:'google',name:'Google Vertex',models:'gemini-2.0-flash · gemini-1.5-pro',level:'global',fields:['apiKey','region']},
+    {id:'openrouter',name:'OpenRouter',models:'400+ modelos roteados',level:'project',fields:['apiKey']},
+  ]; }
+
+  // ---------- helpers ----------
+  permColor(v){ const t=this.T(); return v==='allow'?t.green:v==='ask'?t.yellow:t.red; }
+  badge(level){ const lv=this.LV()[level]; return {code:lv.code,color:lv.color,locked:!!lv.locked}; }
+
+  resolveTemplate(tpl,args,full){
+    const t=this.T(); const re=/(\$ARGUMENTS|\$\d+|@[^\s]+|!`[^`]*`)/g; const out=[]; let last=0,key=0,m;
+    while((m=re.exec(tpl))!==null){ const idx=m.index, match=m[0];
+      if(idx>last) out.push(React.createElement('span',{key:key++},tpl.slice(last,idx)));
+      let color=t.dim,bg='transparent',content=match;
+      if(match==='$ARGUMENTS'){ content=(full&&full.trim())?full.trim():'∅ (vazio)'; color=t.green; bg='rgba(127,176,105,0.14)'; }
+      else if(/^\$\d+$/.test(match)){ const n=parseInt(match.slice(1)); const val=args[n-1]; const ok=val!==undefined; content=ok?val:match+' ✗'; color=ok?t.green:t.red; bg=ok?'rgba(127,176,105,0.14)':'rgba(224,108,117,0.14)'; }
+      else if(match[0]==='@'){ color=t.blue; bg='rgba(90,156,248,0.14)'; }
+      else if(match[0]==='!'){ color=t.accent; bg='rgba(157,124,216,0.14)'; }
+      out.push(React.createElement('span',{key:key++,style:{color,background:bg,borderRadius:'3px',padding:'1px 4px'}},content));
+      last=idx+match.length;
+    }
+    if(last<tpl.length) out.push(React.createElement('span',{key:key++},tpl.slice(last)));
+    return React.createElement('pre',{style:{margin:0,whiteSpace:'pre-wrap',fontFamily:'inherit',fontSize:'12.5px',lineHeight:1.75,color:t.sec}},out);
+  }
+
+  renderVals(){
+    const t=this.T(), L=this.LV(), s=this.state;
+    const isWorkspace=s.mode==='workspace', isAdmin=s.mode==='admin', av=s.adminView;
+    const tab=(active)=>({padding:'5px 13px',borderRadius:'5px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:'600',
+      background:active?'#262626':'transparent',color:active?'#fab283':'#8a8a8a'});
+
+    // ----- sidebar: agents -----
+    const meta=this.agentMeta();
+    const mkPrimary=(id)=>{ const m=meta[id]; const active=s.activeAgent===id; return {
+      name:m.name, desc:m.desc, tag:m.tag, onClick:()=>this.setActiveAgent(id),
+      rowStyle:`width:100%;display:flex;align-items:center;gap:10px;padding:9px 10px;margin-bottom:5px;border-radius:7px;cursor:pointer;text-align:left;border:1px solid ${active?'rgba(250,178,131,0.35)':'#1e1e1e'};background:${active?'rgba(250,178,131,0.07)':'#0e0e0e'};`,
+      dotStyle:`width:8px;height:8px;border-radius:50%;flex:none;background:${active?t.primary:'#3a3a3a'};box-shadow:${active?'0 0 7px '+t.primary:'none'};`,
+      tagStyle:`font-size:9px;color:${active?t.primary:t.faint};border:1px solid ${active?'rgba(250,178,131,0.4)':'#2a2a2a'};border-radius:4px;padding:0 5px;`,
+    }; };
+    const mkSub=(id)=>{ const m=meta[id]; const on=s.enabled[id]; return {
+      name:m.name, tag:on?'on':'off', onClick:this.editAgent(id),
+      nameColor: on?'#cfcfcf':'#6a6a6a',
+      rowStyle:`width:100%;display:flex;align-items:center;gap:8px;padding:7px 9px;margin-bottom:3px;border-radius:6px;cursor:pointer;border:1px solid transparent;background:transparent;`,
+      tagStyle:`font-size:9px;color:${on?t.green:t.faint};border:1px solid ${on?'rgba(127,176,105,0.3)':'#2a2a2a'};border-radius:4px;padding:0 5px;`,
+    }; };
+
+    // ----- admin nav -----
+    const navItem=(v,icon,label,iconColor,opts={})=>{ const active=(av===v)||(v==='agents'&&av==='agentEditor')||(v==='commands'&&av==='commandEditor'); return {
+      icon,label,iconColor:active?iconColor:'#6a6a6a',onClick:()=>this.goAdminView(v),
+      badge:!!opts.badge,badgeText:opts.badge,badgeColor:opts.badgeColor||t.primary,
+      style:`width:100%;display:flex;align-items:center;gap:10px;padding:8px 10px;margin-bottom:2px;border-radius:6px;cursor:pointer;text-align:left;font-size:12.5px;border:1px solid ${active?'#262626':'transparent'};background:${active?'#161616':'transparent'};color:${active?'#eee':'#9a9a9a'};`,
+    }; };
+    const adminNav=[
+      navItem('dashboard','◳','Visão geral',t.primary),
+      navItem('general','⚙','Configuração geral',t.sec),
+      navItem('agents','◇','Agentes',t.primary),
+      navItem('commands','/','Comandos',t.accent),
+      navItem('providers','◍','Provedores',t.blue,{badge:'1',badgeColor:t.yellow}),
+      navItem('policies','▦','Políticas',t.green),
+      navItem('server','◈','Servidor web',t.sec),
+      navItem('tui','▤','TUI / Keybinds',t.sec),
+      navItem('snapshots','⊟','Snapshots',t.green),
+      navItem('shares','↗','Compartilhados',t.accent),
+    ];
+    const levelLegend=Object.keys(L).map(k=>({label:L[k].label,color:L[k].color,locked:!!L[k].locked}));
+
+    // ----- workspace context -----
+    const am=meta[s.activeAgent];
+    const wsTag=am.tag;
+
+    // ----- messages -----
+    const seed=[
+      {kind:'user',text:'Adicione um endpoint GET /healthz que retorna { status: "ok" } e cubra com um teste.'},
+      {kind:'assistant',text:'Vou localizar o router HTTP, adicionar a rota e criar o teste correspondente.'},
+      {kind:'tool',tool:'READ',target:'packages/server/src/router.ts',meta:'128 linhas'},
+      {kind:'tool',tool:'EDIT',target:'packages/server/src/router.ts',meta:'+9 −0'},
+      {kind:'tool',tool:'EDIT',target:'packages/server/test/health.test.ts',meta:'novo · +18'},
+      {kind:'tool',tool:'BASH',target:'bun test health',meta:'2 passed · 240ms'},
+      {kind:'assistant',text:'Pronto — endpoint adicionado e validado.',checklist:['GET /healthz → 200 { status: "ok" }','Teste health.test.ts passando','Snapshot #07 criado · reversível com /undo']},
+    ];
+    const toolColor={READ:t.accent,EDIT:t.primary,BASH:t.green};
+    const messages=[...seed,...s.extra].map(m=>({
+      wrap:'',
+      isUser:m.kind==='user',isAssistant:m.kind==='assistant',isTool:m.kind==='tool',
+      text:m.text||'',hasChecklist:!!m.checklist,checklist:m.checklist||[],
+      tool:m.tool||'',target:m.target||'',meta:m.meta||'',
+      toolBadge:`font-size:9.5px;font-weight:700;letter-spacing:0.5px;color:#0a0a0a;background:${toolColor[m.tool]||t.mut};border-radius:4px;padding:2px 7px;flex:none;`,
+    }));
+
+    // ----- palette -----
+    const allCmds=[
+      {name:'init',desc:'Analisa o projeto e gera/atualiza AGENTS.md'},
+      {name:'share',desc:'Cria um link público da conversa atual'},
+      {name:'undo',desc:'Reverte o último snapshot'},
+      {name:'redo',desc:'Reaplica o snapshot revertido'},
+      {name:'new',desc:'Inicia uma nova sessão'},
+      {name:'compact',desc:'Compacta o histórico da sessão'},
+      {name:'models',desc:'Troca o modelo ativo'},
+      {name:'help',desc:'Lista comandos e placeholders'},
+      {name:'component',desc:'Cria um componente React + teste',custom:true},
+      {name:'review',desc:'Revisa o diff atual em busca de bugs',custom:true},
+      {name:'test',desc:'Gera testes para o arquivo @ informado',custom:true},
+      {name:'commit',desc:'Mensagem de commit a partir do git diff',custom:true},
+    ];
+    const q=(s.input||'').startsWith('/')?s.input.slice(1).toLowerCase().split(' ')[0]:'';
+    const palette=allCmds.filter(c=>c.name.includes(q)).map(c=>({
+      name:c.name,desc:c.desc,custom:!!c.custom,color:c.custom?t.accent:t.primary,onPick:this.pick(c.name),
+      style:'width:100%;display:flex;align-items:center;gap:12px;padding:9px 14px;border:none;background:transparent;cursor:pointer;border-bottom:1px solid #161616;',
+    }));
+    const paletteOpen=(s.input||'').startsWith('/')&&palette.length>0;
+
+    // ----- quick actions -----
+    const qa=(label,title,onClick,color)=>({label,title,onClick,style:`background:transparent;border:1px solid #262626;border-radius:6px;padding:5px 10px;font-size:11.5px;color:${color||'#a8a8a8'};cursor:pointer;`});
+    const quickActions=[
+      qa('/init','Gerar AGENTS.md',()=>this.setState({input:'/init '})),
+      qa('/share','Compartilhar conversa',()=>this.setState({shareActive:true}),s.shareActive?t.green:undefined),
+      qa('/undo','Reverter último snapshot',this.undo,t.primary),
+      qa('/redo','Reaplicar snapshot',this.redo),
+    ];
+
+    // ----- dashboard -----
+    const provConn=Object.values(s.providers).filter(v=>v==='connected').length;
+    const statCards=[
+      {label:'Agentes',value:'5',unit:'· 2 primary',color:t.primary,sub:'4 ativos · 1 desabilitado'},
+      {label:'Provedores',value:String(provConn),unit:'conectados',color:t.green,sub:'2 sem credencial'},
+      {label:'Snapshots',value:String(s.checkpoints),unit:'checkpoints',color:s.snapshotsEnabled?t.green:t.red,sub:s.snapshotsEnabled?'undo/redo habilitado':'DESABILITADO — sem undo'},
+      {label:'Comandos',value:'12',unit:'· 4 custom',color:t.accent,sub:'8 built-in · 4 do projeto'},
+    ];
+    const ps=(id)=>{ const st=s.providers[id]; const map={connected:[t.green,'conectado'],idle:[t.faint,'sem credencial'],error:[t.red,'inválido']}; return {dot:map[st][0],glow:map[st][0],status:map[st][1],statusColor:map[st][0]}; };
+    const dashProviders=this.providerMeta().slice(0,5).map(p=>{ const x=ps(p.id); return {name:p.name,models:p.models,dot:x.dot,glow:x.glow,status:x.status,statusColor:x.statusColor}; });
+    const alerts=[
+      {icon:'▲',color:t.yellow,bg:'rgba(230,192,123,0.06)',border:'rgba(230,192,123,0.2)',title:'amazon-bedrock sem credencial',body:'Provedor habilitado mas sem API key. Modelos indisponíveis.'},
+      {icon:'◆',color:t.red,bg:'rgba(224,108,117,0.06)',border:'rgba(224,108,117,0.2)',title:'Política conflitante: agente plan',body:'edit:deny coexiste com tools.write:allow — write será bloqueado.'},
+      {icon:'■',color:t.accent,bg:'rgba(157,124,216,0.06)',border:'rgba(157,124,216,0.2)',title:'1 valor gerenciado (managed)',body:'autoupdate é imposto pelo administrador e está read-only.'},
+    ];
+
+    // ----- cascade trail (model) -----
+    const trail=[
+      {level:'remote',value:'claude-3-5-sonnet',def:true},
+      {level:'global',value:'claude-sonnet-4-5',def:true},
+      {level:'custom',value:'—',def:false},
+      {level:'project',value:'claude-sonnet-4-5',def:true,winner:true},
+      {level:'opencode',value:'—',def:false},
+      {level:'inline',value:'—',def:false},
+      {level:'managed',value:'—',def:false},
+    ];
+    const winnerIdx=trail.findIndex(x=>x.winner);
+    const cascadeTrail=trail.map((c,i)=>{ const lv=L[c.level]; const winner=!!c.winner; const overridden=c.def&&!winner; return {
+      code:lv.code,label:lv.label,value:c.value,color:lv.color,
+      valueColor:winner?'#eee':c.def?t.dim:t.faint, valueWeight:winner?'600':'400',
+      strike:overridden?'text-decoration:line-through;text-decoration-color:#555;':'',
+      tag:winner?'✓ valor efetivo':overridden?'sobrescrito':lv.locked?'read-only':'não definido',
+      tagColor:winner?t.green:overridden?t.dim:t.faint,
+      lineTop:i===0?'transparent':'#2a2a2a', lineBottom:i===trail.length-1?'transparent':'#2a2a2a',
+      cardStyle:`flex:1;display:flex;align-items:center;gap:14px;margin:3px 0;padding:9px 13px;border-radius:7px;border:1px solid ${winner?'rgba(127,176,105,0.35)':'#1e1e1e'};background:${winner?'rgba(127,176,105,0.06)':'#0d0d0d'};`,
+    }; });
+
+    // ----- sessions -----
+    const sessions=[
+      {title:'add /healthz endpoint',time:'agora',dot:t.primary,active:true},
+      {title:'refactor auth module',time:'12m',dot:'#3a3a3a',active:false},
+      {title:'migration: users table',time:'1h',dot:'#3a3a3a',active:false},
+    ].map(x=>({...x,style:`display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;font-size:11.5px;color:${x.active?'#cfcfcf':'#8a8a8a'};background:${x.active?'#141414':'transparent'};cursor:pointer;margin-bottom:2px;`}));
+
+    // ===== AGENTS LIST + EDITOR =====
+    const agentList=Object.keys(meta).map(id=>{ const m=meta[id]; const on=s.enabled[id]; const b=this.badge(m.level); return {
+      name:m.name, tag:m.tag, desc:m.desc, model:m.model, onClick:this.editAgent(id),
+      tagColor:m.tag==='primary'?t.primary:t.accent, tagBg:m.tag==='primary'?'rgba(250,178,131,0.12)':'rgba(157,124,216,0.12)',
+      badgeCode:b.code, badgeColor:b.color, statusText:on?'ativo':'off', statusColor:on?t.green:t.faint,
+      rowStyle:`display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid #1f1f1f;border-radius:9px;background:#0f0f0f;cursor:pointer;margin-bottom:8px;`,
+    }; });
+    const eaId=s.editingAgentId, ea=meta[eaId], eaB=this.badge(ea.level);
+    const eaTemp=s.temp[eaId], eaEnabled=s.enabled[eaId];
+    const permTools=['write','edit','bash','read','webfetch'];
+    const permRows=permTools.map(tool=>{ const v=s.perms[eaId][tool]; const c=this.permColor(v); return {
+      tool, value:v, onClick:this.cyclePerm(eaId,tool),
+      rowStyle:`display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border-radius:7px;border:1px solid #1f1f1f;background:#0d0d0d;cursor:pointer;`,
+      valStyle:`font-size:10.5px;font-weight:700;letter-spacing:0.5px;color:${c};border:1px solid ${c}66;background:${c}1a;border-radius:5px;padding:3px 10px;text-transform:uppercase;`,
+    }; });
+    const eaToolList=[['read',true],['grep',true],['glob',true],['write',eaId==='build'],['edit',eaId==='build'],['bash',eaId!=='explore'&&eaId!=='scout'],['webfetch',eaId!=='scout'],['task',eaId==='build'||eaId==='plan']]
+      .map(([n,on])=>({name:n,on,style:`display:flex;align-items:center;gap:7px;padding:6px 10px;border-radius:6px;font-size:11.5px;border:1px solid ${on?'rgba(127,176,105,0.3)':'#1f1f1f'};background:${on?'rgba(127,176,105,0.07)':'#0d0d0d'};color:${on?'#cfcfcf':'#6a6a6a'};`,box:on?t.green:'#333'}));
+    const eaMarkdown=`---\ndescription: ${ea.desc}\nmode: ${ea.tag}\nmodel: ${ea.model}\ntemperature: ${eaTemp}\ntools:\n  write: ${eaId==='build'}\n  edit: ${eaId==='build'}\n  bash: ${s.perms[eaId].bash!=='deny'}\npermission:\n  edit: ${s.perms[eaId].edit}\n  bash: ${s.perms[eaId].bash}\n---\n\n${ea.prompt}`;
+
+    // ===== COMMANDS LIST + EDITOR =====
+    const cmdMeta=this.cmdMeta();
+    const commandList=Object.keys(cmdMeta).map(id=>{ const c=cmdMeta[id]; const b=this.badge(c.level); return {
+      name:c.name, desc:c.desc, agent:c.agent, model:c.model, onClick:this.editCmd(id),
+      badgeCode:b.code, badgeColor:b.color, subtask:c.subtask,
+      rowStyle:`display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid #1f1f1f;border-radius:9px;background:#0f0f0f;cursor:pointer;margin-bottom:8px;`,
+    }; });
+    const ecId=s.editingCmdId, ec=cmdMeta[ecId], ecB=this.badge(ec.level);
+    const ecArgs=(s.cmdArgs||'').trim().split(/\s+/).filter(Boolean);
+    const cmdResolvedEl=this.resolveTemplate(ec.template,ecArgs,s.cmdArgs);
+    const placeholderHelp=[
+      {token:'$ARGUMENTS',desc:'tudo que o usuário digitar após o comando',color:t.green},
+      {token:'$1 $2 $3',desc:'argumentos posicionais separados por espaço',color:t.green},
+      {token:'@arquivo',desc:'injeta o conteúdo do arquivo no prompt',color:t.blue},
+      {token:'!`comando`',desc:'injeta a saída de um comando shell',color:t.accent},
+    ];
+
+    // ===== PROVIDERS =====
+    const fieldDef={ apiKey:{label:'API Key',type:'secret'}, timeout:{label:'Timeout (request)',type:'text',val:'120s'}, region:{label:'Região AWS',type:'text',val:'us-east-1'}, profile:{label:'Perfil AWS',type:'text',val:'default'}, endpoint:{label:'Endpoint custom',type:'text',val:'—'}, oauth:{label:'OAuth',type:'oauth'} };
+    const providerList=this.providerMeta().map(p=>{ const st=s.providers[p.id]; const testing=s.testingProvider===p.id; const b=this.badge(p.level);
+      const map={connected:[t.green,'conectado'],idle:[t.faint,'sem credencial'],error:[t.red,'inválido']};
+      const sc=testing?[t.yellow,'testando…']:map[st];
+      return { id:p.id, name:p.name, models:p.models, badgeCode:b.code, badgeColor:b.color,
+        dot:sc[0], status:sc[1], statusColor:sc[0], testing,
+        onTest:this.testProvider(p.id),
+        fields:p.fields.map(f=>{ const fd=fieldDef[f]; let display; if(fd.type==='secret'){ display=st==='connected'?'••••••••••  ····9a2f':'não definido'; } else if(fd.type==='oauth'){ display='✓ autorizado via GitHub'; } else { display=fd.val||'—'; } return { label:fd.label, type:fd.type, display }; }),
+        cardStyle:`border:1px solid ${st==='connected'?'#222':'#1f1f1f'};border-radius:10px;background:#0f0f0f;overflow:hidden;margin-bottom:12px;`,
+      }; });
+
+    // ===== SNAPSHOTS =====
+    const stColor={applied:t.green,reverted:t.red,pending:t.yellow};
+    const stGlyph={applied:'●',reverted:'⊘',pending:'◐'};
+    const timeline=s.timeline.map((x,i)=>({ id:x.id, label:x.label, agent:x.agent, cmd:x.cmd, files:x.files, time:x.time, status:x.status,
+      dot:stColor[x.status], glyph:stGlyph[x.status],
+      isLast:i===s.timeline.length-1, lineBottomColor:i===s.timeline.length-1?'transparent':'#262626',
+      labelColor:x.status==='reverted'?t.dim:'#dcdcdc', strike:x.status==='reverted'?'text-decoration:line-through;text-decoration-color:#444;':'',
+      rowStyle:`flex:1;display:flex;align-items:center;gap:14px;padding:11px 14px;border-radius:8px;border:1px solid ${x.status==='applied'?'#1f1f1f':'#1a1a1a'};background:${x.status==='reverted'?'#0c0c0c':'#0f0f0f'};margin:2px 0;`,
+      tagColor:stColor[x.status], tagText:x.status==='applied'?'aplicado':x.status==='reverted'?'revertido':'pendente',
+    }));
+
+    // ===== SHARES =====
+    const shares=[
+      {title:'add /healthz endpoint',status:'public',url:'opencode.ai/s/k3f9a2',views:'24 acessos',time:'agora'},
+      {title:'refactor auth module',status:'revoked',url:'—',views:'link revogado',time:'12 min'},
+      {title:'migration: users table',status:'private',url:'não compartilhado',views:'—',time:'1h'},
+    ].map(x=>{ const map={public:[t.green,'público'],revoked:[t.red,'revogado'],private:[t.faint,'privado']}; return {
+      ...x, dot:map[x.status][0], statusText:map[x.status][1], statusColor:map[x.status][0],
+      canCopy:x.status==='public', canRevoke:x.status==='public',
+      rowStyle:`display:flex;align-items:center;gap:14px;padding:14px 16px;border:1px solid #1f1f1f;border-radius:9px;background:#0f0f0f;margin-bottom:8px;`,
+    }; });
+
+    // ===== CONFIG FORMS (general / server / tui / policies) =====
+    const field=(label,value,type,level,hint)=>{ const lv=L[level]; return { label,value,type,hint:hint||'',
+      badgeCode:lv.code, badgeColor:lv.color, locked:!!lv.locked,
+      rowStyle:`display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid #181818;`,
+      ctrlColor: type==='on'?t.green:type==='off'?t.faint:'#cfcfcf',
+    }; };
+    const generalFields=[
+      field('model','claude-sonnet-4-5','select','project','Modelo principal usado pelos agentes primary'),
+      field('small_model','claude-haiku-4-5','select','global','Modelo leve para tarefas auxiliares e títulos'),
+      field('theme','opencode','select','global','Tema da interface (38 disponíveis)'),
+      field('autoupdate','desativado','off','managed','Imposto pelo administrador — read-only'),
+      field('snapshot',s.snapshotsEnabled?'habilitado':'desabilitado',s.snapshotsEnabled?'on':'off','project','Checkpoints automáticos para undo/redo'),
+      field('share','manual','select','global','Política de compartilhamento de conversas'),
+      field('formatter · prettier','habilitado','on','project','Formata arquivos após edição'),
+      field('instructions','AGENTS.md','text','project','Arquivos de contexto carregados na sessão'),
+    ];
+    const serverFields=[
+      field('port','4096','text','project'),
+      field('hostname','127.0.0.1','text','global'),
+      field('mdns','habilitado','on','global','Descoberta na rede local'),
+      field('mdns.domain','opencode.local','text','global'),
+      field('cors.origins','app://localhost, http://localhost:3000','text','project'),
+      field('auth','token bearer','select','managed','Autenticação imposta pelo admin'),
+    ];
+    const tuiFields=[
+      field('tui.theme','opencode','select','global'),
+      field('tui.scroll_speed','3','text','global'),
+      field('tui.mouse','habilitado','on','global'),
+      field('keybinds.leader','ctrl+x','text','project'),
+      field('notifications','habilitado','on','global'),
+      field('tui.compact_mode','desabilitado','off','global'),
+    ];
+    const policyRows=[
+      {effect:'allow',action:'bash',resource:'git *, ls, cat, grep',priority:10},
+      {effect:'deny',action:'bash',resource:'rm -rf *, sudo *',priority:100},
+      {effect:'allow',action:'edit',resource:'src/**, packages/**',priority:10},
+      {effect:'deny',action:'edit',resource:'.env, **/secrets/**',priority:100},
+      {effect:'ask',action:'webfetch',resource:'* (qualquer URL)',priority:5},
+    ].map(p=>{ const c=p.effect==='allow'?t.green:p.effect==='deny'?t.red:t.yellow; return {
+      ...p, color:c, effectStyle:`font-size:10.5px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;color:${c};border:1px solid ${c}66;background:${c}1a;border-radius:5px;padding:3px 9px;`,
+      rowStyle:`display:grid;grid-template-columns:90px 90px 1fr 70px;align-items:center;gap:14px;padding:13px 16px;border:1px solid #1f1f1f;border-radius:8px;background:#0f0f0f;margin-bottom:7px;`,
+    }; });
+
+    return {
+      isWorkspace, isAdmin,
+      showDashboard:isAdmin&&av==='dashboard',
+      showGeneral:isAdmin&&av==='general',
+      showAgents:isAdmin&&av==='agents',
+      showAgentEditor:isAdmin&&av==='agentEditor',
+      showCommands:isAdmin&&av==='commands',
+      showCommandEditor:isAdmin&&av==='commandEditor',
+      showProviders:isAdmin&&av==='providers',
+      showPolicies:isAdmin&&av==='policies',
+      showServer:isAdmin&&av==='server',
+      showTui:isAdmin&&av==='tui',
+      showSnapshots:isAdmin&&av==='snapshots',
+      showShares:isAdmin&&av==='shares',
+      tabWorkspaceStyle:this._st(tab(isWorkspace)),
+      tabAdminStyle:this._st(tab(isAdmin)),
+      goWorkspace:this.goWorkspace, goAdmin:this.goAdmin, goProviders:this.goProviders,
+      headerModel:am.model,
+      primaryAgents:['build','plan'].map(mkPrimary),
+      subAgents:['general','explore','scout'].map(mkSub),
+      sessions, adminNav, levelLegend,
+      // workspace
+      wsAgentName:am.name, wsAgentDesc:am.desc, wsAgentTag:wsTag, wsModel:am.model,
+      wsAgentDot:s.activeAgent==='plan'?t.accent:t.primary,
+      wsAgentTagStyle:`font-size:9.5px;color:${t.primary};border:1px solid rgba(250,178,131,0.4);border-radius:4px;padding:1px 6px;`,
+      snapColor:s.snapshotsEnabled?t.green:t.red, snapGlyph:s.snapshotsEnabled?'⊟':'⊘',
+      snapLabel:s.snapshotsEnabled?('snapshot · '+s.checkpoints+' checkpoints'):'snapshot OFF',
+      messages, palette, paletteOpen, input:s.input,
+      onInput:this.onInput, onInputKey:this.onInputKey, onSend:this.execute,
+      composerBorder:(s.input||'').length?'#3a3a3a':'#242424',
+      promptGlyph:(s.input||'').startsWith('/')?'/':'›', promptColor:(s.input||'').startsWith('/')?t.accent:t.primary,
+      quickActions, tokenInfo:'context 18.2k / 200k',
+      // dashboard
+      statCards, dashProviders, alerts, cascadeTrail,
+      // agents
+      agentList,
+      eaName:ea.name, eaTag:ea.tag, eaDesc:ea.desc, eaModel:ea.model, eaPrompt:ea.prompt,
+      eaBadgeCode:eaB.code, eaBadgeColor:eaB.color, eaTemp, eaEnabled,
+      eaTagColor:ea.tag==='primary'?t.primary:t.accent,
+      enabledToggleStyle:`width:38px;height:22px;border-radius:12px;position:relative;cursor:pointer;background:${eaEnabled?'#fab283':'#242424'};transition:background 0.15s;`,
+      enabledKnobStyle:`position:absolute;top:3px;${eaEnabled?'right:3px':'left:3px'};width:16px;height:16px;border-radius:50%;background:${eaEnabled?'#1a1206':'#888'};`,
+      agentTabVisual:s.agentTab==='visual', agentTabText:s.agentTab==='text',
+      atVisualStyle:this._st(tab(s.agentTab==='visual')), atTextStyle:this._st(tab(s.agentTab==='text')),
+      setAgentVisual:this.setAgentTab('visual'), setAgentText:this.setAgentTab('text'),
+      permRows, eaToolList, eaMarkdown, onTempChange:this.setTemp(eaId), onToggleEnabled:this.toggleEnabled(eaId),
+      backToAgents:()=>this.goAdminView('agents'),
+      // commands
+      commandList,
+      ecName:ec.name, ecDesc:ec.desc, ecAgent:ec.agent, ecModel:ec.model, ecSubtask:ec.subtask, ecTemplate:ec.template,
+      ecBadgeCode:ecB.code, ecBadgeColor:ecB.color,
+      cmdTabVisual:s.cmdTab==='visual', cmdTabText:s.cmdTab==='text',
+      ctVisualStyle:this._st(tab(s.cmdTab==='visual')), ctTextStyle:this._st(tab(s.cmdTab==='text')),
+      setCmdVisual:this.setCmdTab('visual'), setCmdText:this.setCmdTab('text'),
+      cmdResolvedEl, cmdArgs:s.cmdArgs, onCmdArgs:this.onCmdArgs, placeholderHelp,
+      backToCommands:()=>this.goAdminView('commands'),
+      // providers
+      providerList,
+      // snapshots
+      timeline, snapEnabled:s.snapshotsEnabled, snapCount:s.checkpoints, redoCount:s.redo,
+      onUndo:this.undo, onRedo:this.redo, onToggleSnap:this.toggleSnap,
+      snapBannerStyle:`display:flex;align-items:center;gap:12px;padding:13px 16px;border-radius:9px;border:1px solid ${s.snapshotsEnabled?'rgba(127,176,105,0.3)':'rgba(224,108,117,0.35)'};background:${s.snapshotsEnabled?'rgba(127,176,105,0.06)':'rgba(224,108,117,0.07)'};color:${s.snapshotsEnabled?'#9ec98a':'#e89aa0'};`,
+      snapBannerIcon:s.snapshotsEnabled?'⊟':'⚠',
+      snapBannerText:s.snapshotsEnabled?(`Snapshots habilitados · ${s.checkpoints} checkpoints · undo/redo ativo`):'Snapshots DESABILITADOS — sem undo/redo. Alterações do agente não podem ser revertidas.',
+      snapToggleStyle:`width:38px;height:22px;border-radius:12px;position:relative;cursor:pointer;flex:none;background:${s.snapshotsEnabled?'#7fb069':'#242424'};`,
+      snapKnobStyle:`position:absolute;top:3px;${s.snapshotsEnabled?'right:3px':'left:3px'};width:16px;height:16px;border-radius:50%;background:${s.snapshotsEnabled?'#0a0a0a':'#888'};`,
+      // shares
+      shares,
+      // config forms
+      generalFields, serverFields, tuiFields, policyRows,
+    };
+  }
+  _st(o){ return Object.entries(o).map(([k,v])=>k.replace(/[A-Z]/g,m=>'-'+m.toLowerCase())+':'+v).join(';'); }
+}
+</script>
+</body>
+</html>

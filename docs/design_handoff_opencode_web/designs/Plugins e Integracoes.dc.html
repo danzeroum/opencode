@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{background:#0a0a0a;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased;}
+  ::selection{background:rgba(250,178,131,0.28);}
+  *::-webkit-scrollbar{width:10px;height:10px;}
+  *::-webkit-scrollbar-thumb{background:#262626;border-radius:5px;border:2px solid #0a0a0a;}
+  *::-webkit-scrollbar-thumb:hover{background:#333;}
+  *::-webkit-scrollbar-track{background:transparent;}
+  button{font-family:inherit;}button:focus{outline:none;}
+  @keyframes pi-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.8)}}
+  @keyframes pi-flow{0%{left:0%;opacity:0}10%{opacity:1}90%{opacity:1}100%{left:100%;opacity:0}}
+  @keyframes pi-retry{0%{transform:rotate(0)}70%,100%{transform:rotate(360deg)}}
+  @keyframes pi-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+</style>
+</helmet>
+<div style="position:fixed;inset:0;display:flex;flex-direction:column;background:radial-gradient(1100px 420px at 75% -8%,rgba(157,124,216,0.05),transparent 70%),#0a0a0a;color:#e8e8e8;font-size:13px;line-height:1.5;overflow:hidden;">
+
+  <!-- ============ TOP BAR ============ -->
+  <header style="height:50px;flex:none;display:flex;align-items:center;gap:16px;padding:0 18px;border-bottom:1px solid #1a1a1a;background:#0c0c0c;z-index:30;">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <svg width="17" height="21" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+      <span style="font-weight:600;letter-spacing:-0.2px;">opencode</span>
+      <span style="color:#3a3a3a;">/</span>
+      <span style="color:#cfcfcf;">Extensões</span>
+    </div>
+    <div style="display:flex;background:#141414;border:1px solid #242424;border-radius:8px;padding:2px;gap:2px;">
+      <button onClick="{{ goPlugins }}" style="{{ tabPluginsStyle }}">Plugins <span style="opacity:0.6;">{{ pluginCount }}</span></button>
+      <button onClick="{{ goMcp }}" style="{{ tabMcpStyle }}">MCP <span style="opacity:0.6;">{{ mcpCount }}</span></button>
+      <button onClick="{{ goIntegrations }}" style="{{ tabIntegStyle }}">Integrações <span style="opacity:0.6;">{{ integCount }}</span></button>
+    </div>
+    <div style="flex:1;"></div>
+    <div style="display:flex;align-items:center;gap:7px;font-size:10.5px;color:#7a7a7a;border:1px solid #232323;border-radius:6px;padding:4px 9px;">
+      <span style="color:#9d7cd8;">⎉</span> JS host
+      <span style="width:6px;height:6px;border-radius:50%;background:#7fb069;animation:pi-pulse 2s ease-in-out infinite;"></span>
+      <span style="color:#9ec98a;">running</span>
+      <span style="color:#5a5a5a;">·</span><span>RPC :7411</span>
+    </div>
+    <span style="font-size:10.5px;color:#7a7a7a;">Fase <span style="color:#fab283;">5</span> · rust-migration</span>
+  </header>
+
+  <div style="flex:1;min-height:0;overflow-y:auto;">
+    <div style="max-width:1180px;margin:0 auto;padding:22px 24px 56px;">
+
+      <!-- ============ HOST ARCH STRIP ============ -->
+      <div style="display:flex;align-items:stretch;gap:0;border:1px solid #1c1c1c;border-radius:12px;background:linear-gradient(180deg,#0e0e0e,#0b0b0b);overflow:hidden;margin-bottom:18px;">
+        <div style="flex:none;display:flex;align-items:center;gap:11px;padding:14px 18px;border-right:1px solid #181818;">
+          <svg width="15" height="16" viewBox="0 0 40 44" fill="none"><path d="M20 3 L34 11 V31 L20 39 L6 31 V11 Z" stroke="#fab283" stroke-width="2.4" fill="none"></path><circle cx="20" cy="21" r="3" fill="#fab283"></circle></svg>
+          <div style="line-height:1.25;"><div style="font-size:12px;font-weight:600;color:#fab283;">opencode-core</div><div style="font-size:9.5px;color:#7a7a7a;">Rust · nativo</div></div>
+        </div>
+        <div style="flex:1;display:flex;align-items:center;justify-content:center;gap:14px;padding:14px 18px;position:relative;min-width:0;">
+          <div style="position:absolute;left:0;right:0;top:50%;height:2px;background:repeating-linear-gradient(90deg,#222 0 7px,transparent 7px 14px);"></div>
+          <div style="position:relative;display:flex;align-items:center;gap:8px;background:#0c0c0c;border:1px solid #232323;border-radius:7px;padding:6px 12px;z-index:1;">
+            <span style="color:#9d7cd8;">⇄</span><span style="font-size:11px;color:#bcbcbc;">local RPC / JSON</span>
+          </div>
+        </div>
+        <div style="flex:none;display:flex;align-items:center;gap:11px;padding:14px 18px;border-left:1px solid #181818;">
+          <span style="font-size:15px;">⎉</span>
+          <div style="line-height:1.25;"><div style="font-size:12px;font-weight:600;color:#9d7cd8;">JS plugin host</div><div style="font-size:9.5px;color:#7a7a7a;">out-of-process · Bun</div></div>
+        </div>
+        <div style="flex:none;display:flex;align-items:center;gap:11px;padding:14px 18px;border-left:1px solid #181818;">
+          <span style="font-size:14px;color:#5a9cf8;">◍</span>
+          <div style="line-height:1.25;"><div style="font-size:12px;font-weight:600;color:#5a9cf8;">MCP · rmcp</div><div style="font-size:9.5px;color:#7a7a7a;">stdio · sse · http</div></div>
+        </div>
+      </div>
+
+      <!-- ============ PLUGINS TAB ============ -->
+      <sc-if value="{{ isPlugins }}" hint-placeholder-val="{{ true }}">
+      <div>
+        <!-- HOOK PIPELINE -->
+        <section style="border:1px solid #1c1c1c;border-radius:13px;background:#0b0b0b;overflow:hidden;margin-bottom:18px;">
+          <div style="display:flex;align-items:center;gap:10px;padding:13px 17px;border-bottom:1px solid #181818;">
+            <span style="font-size:12.5px;font-weight:600;">Pipeline de hooks</span>
+            <span style="font-size:10.5px;color:#7a7a7a;">um turno de sessão — onde cada plugin injeta</span>
+            <div style="flex:1;"></div>
+            <sc-if value="{{ selectedName }}" hint-placeholder-val="{{ false }}">
+              <span style="font-size:10.5px;color:#9d7cd8;">▣ destacando: {{ selectedName }}</span>
+            </sc-if>
+          </div>
+          <div style="padding:18px 17px 20px;overflow-x:auto;">
+            <div style="display:flex;align-items:stretch;gap:0;min-width:880px;">
+              <sc-for list="{{ pipeline }}" as="h" hint-placeholder-count="9">
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;position:relative;">
+                  <!-- connector -->
+                  <sc-if value="{{ h.showArrow }}" hint-placeholder-val="{{ true }}">
+                    <span style="position:absolute;top:13px;right:-7px;color:#2e2e2e;font-size:13px;z-index:2;">›</span>
+                  </sc-if>
+                  <!-- node -->
+                  <div style="{{ h.nodeStyle }}">
+                    <span style="font-size:9px;color:{{ h.stageColor }};letter-spacing:0.4px;">{{ h.stageLabel }}</span>
+                  </div>
+                  <!-- hook name -->
+                  <div style="margin-top:9px;text-align:center;font-size:9.5px;line-height:1.4;color:{{ h.nameColor }};font-weight:{{ h.nameWeight }};max-width:96px;">{{ h.name }}</div>
+                  <!-- tap markers -->
+                  <div style="margin-top:8px;display:flex;flex-direction:column;gap:3px;align-items:center;min-height:18px;">
+                    <sc-for list="{{ h.taps }}" as="tp" hint-placeholder-count="1">
+                      <span title="{{ tp.plugin }}" style="{{ tp.style }}"></span>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </section>
+
+        <!-- INSTALLED PLUGINS -->
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:14px;">
+          <div>
+            <h1 style="margin:0 0 3px;font-size:18px;font-weight:600;">Plugins instalados</h1>
+            <p style="margin:0;font-size:11.5px;color:#8a8a8a;">array <span style="color:#9d7cd8;">plugin</span> do config · cada entrada é <span style="color:#cfcfcf;">"name"</span> ou <span style="color:#cfcfcf;">["name", options]</span></p>
+          </div>
+          <button onClick="{{ openInstall }}" style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 13px;font-weight:600;font-size:12px;cursor:pointer;">+ Adicionar plugin</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;">
+          <sc-for list="{{ plugins }}" as="p" hint-placeholder-count="4">
+            <div onClick="{{ p.onClick }}" style="{{ p.cardStyle }}">
+              <div style="display:flex;align-items:flex-start;gap:11px;">
+                <span style="width:34px;height:34px;border-radius:8px;background:{{ p.iconBg }};border:1px solid {{ p.iconBd }};display:flex;align-items:center;justify-content:center;font-size:15px;flex:none;">{{ p.icon }}</span>
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ p.name }}</span>
+                    <span style="{{ p.sourceStyle }}">{{ p.source }}</span>
+                  </div>
+                  <div style="font-size:11px;color:#8a8a8a;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ p.desc }}</div>
+                </div>
+                <div onClick="{{ p.onToggle }}" style="{{ p.toggleStyle }}"><span style="{{ p.knobStyle }}"></span></div>
+              </div>
+              <!-- hooks -->
+              <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:5px;">
+                <sc-for list="{{ p.hooks }}" as="hk" hint-placeholder-count="3">
+                  <span style="{{ hk.style }}">{{ hk.name }}</span>
+                </sc-for>
+              </div>
+              <!-- footer -->
+              <div style="margin-top:12px;padding-top:10px;border-top:1px solid #181818;display:flex;align-items:center;gap:12px;font-size:10.5px;color:#7a7a7a;">
+                <span style="display:flex;align-items:center;gap:5px;"><span style="width:6px;height:6px;border-radius:50%;background:{{ p.runColor }};"></span>{{ p.runState }}</span>
+                <sc-if value="{{ p.hasOptions }}" hint-placeholder-val="{{ false }}"><span style="color:#9a9a9a;">⚙ {{ p.optionsLabel }}</span></sc-if>
+                <span style="flex:1;"></span>
+                <span>{{ p.hookCount }} hooks</span>
+                <button onClick="{{ p.onDetails }}" style="background:transparent;border:1px solid #2a2a2a;border-radius:6px;padding:3px 9px;font-size:10px;color:#cfcfcf;cursor:pointer;">Detalhes ›</button>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ============ MCP TAB ============ -->
+      <sc-if value="{{ isMcp }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:14px;">
+          <div>
+            <h1 style="margin:0 0 3px;font-size:18px;font-weight:600;">MCP servers</h1>
+            <p style="margin:0;font-size:11.5px;color:#8a8a8a;">Model Context Protocol via crate <span style="color:#5a9cf8;">rmcp</span> · reconnect + <span style="color:#cfcfcf;">onsessionexpired</span> portados do patch TS</p>
+          </div>
+          <button style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 13px;font-weight:600;font-size:12px;cursor:pointer;">+ Conectar server</button>
+        </div>
+        <sc-for list="{{ mcpServers }}" as="m" hint-placeholder-count="4">
+          <div style="border:1px solid #1c1c1c;border-radius:11px;background:#0b0b0b;overflow:hidden;margin-bottom:11px;">
+            <div style="display:flex;align-items:center;gap:13px;padding:13px 16px;">
+              <span style="width:9px;height:9px;border-radius:50%;background:{{ m.dot }};box-shadow:0 0 7px {{ m.dot }};flex:none;{{ m.dotAnim }}"></span>
+              <span style="font-weight:600;font-size:13.5px;width:150px;flex:none;">{{ m.name }}</span>
+              <span style="{{ m.transportStyle }}">{{ m.transport }}</span>
+              <span style="flex:1;font-size:11px;color:#8a8a8a;font-family:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ m.command }}</span>
+              <span style="font-size:11px;color:{{ m.statusColor }};flex:none;">{{ m.status }}</span>
+              <div onClick="{{ m.onToggle }}" style="{{ m.toggleStyle }}"><span style="{{ m.knobStyle }}"></span></div>
+            </div>
+            <sc-if value="{{ m.expanded }}" hint-placeholder-val="{{ true }}">
+            <div style="padding:0 16px 14px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;">
+                <span style="font-size:9.5px;letter-spacing:0.6px;color:#6a6a6a;text-transform:uppercase;">tools expostas</span>
+                <div style="flex:1;height:1px;background:#181818;"></div>
+                <span style="font-size:10px;color:#7a7a7a;">{{ m.toolCount }}</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                <sc-for list="{{ m.tools }}" as="t" hint-placeholder-count="4">
+                  <span style="font-size:10.5px;color:#9fb4d8;border:1px solid #232a36;background:#0e1116;border-radius:6px;padding:3px 9px;">{{ t }}</span>
+                </sc-for>
+              </div>
+              <sc-if value="{{ m.reconnecting }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-top:11px;display:flex;align-items:center;gap:9px;padding:8px 11px;border-radius:7px;background:rgba(230,192,123,0.06);border:1px solid rgba(230,192,123,0.2);">
+                  <span style="color:#e6c07b;display:inline-block;animation:pi-retry 1.8s linear infinite;">↻</span>
+                  <span style="font-size:10.5px;color:#d8c89a;">sessão expirada — reconectando (tentativa {{ m.retryN }})</span>
+                </div>
+              </sc-if>
+            </div>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+      </sc-if>
+
+      <!-- ============ INTEGRATIONS TAB ============ -->
+      <sc-if value="{{ isInteg }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="margin-bottom:14px;">
+          <h1 style="margin:0 0 3px;font-size:18px;font-weight:600;">Integrações</h1>
+          <p style="margin:0;font-size:11.5px;color:#8a8a8a;">adapters <span style="color:#fab283;">in-core</span> (crate <span style="color:#cfcfcf;">opencode-integration</span>) · o bot <span style="color:#cfcfcf;">packages/slack</span> standalone permanece em TS</p>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px;margin-bottom:16px;">
+          <sc-for list="{{ integrations }}" as="g" hint-placeholder-count="3">
+            <div style="{{ g.cardStyle }}">
+              <div style="display:flex;align-items:center;gap:11px;">
+                <span style="width:36px;height:36px;border-radius:9px;background:{{ g.iconBg }};display:flex;align-items:center;justify-content:center;flex:none;">{{ g.iconEl }}</span>
+                <div style="flex:1;min-width:0;"><div style="font-weight:600;font-size:14px;">{{ g.name }}</div><div style="font-size:10.5px;color:#8a8a8a;">{{ g.kind }}</div></div>
+              </div>
+              <div style="margin-top:13px;display:flex;align-items:center;gap:7px;">
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ g.dot }};flex:none;"></span>
+                <span style="font-size:11px;color:{{ g.statusColor }};">{{ g.status }}</span>
+              </div>
+              <div style="margin-top:11px;display:flex;flex-direction:column;gap:5px;">
+                <sc-for list="{{ g.caps }}" as="c" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:7px;font-size:10.5px;color:#9a9a9a;"><span style="color:{{ c.color }};">{{ c.glyph }}</span>{{ c.label }}</div>
+                </sc-for>
+              </div>
+              <button style="{{ g.btnStyle }}">{{ g.btnLabel }}</button>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:10px;padding:13px 15px;border-radius:10px;background:rgba(90,156,248,0.04);border:1px solid rgba(90,156,248,0.16);">
+          <span style="color:#5a9cf8;font-size:14px;">ℹ</span>
+          <div style="font-size:11.5px;color:#9a9a9a;line-height:1.6;">Apenas a <span style="color:#cfcfcf;">lógica de integração dentro do core</span> é portada para Rust. Serviços externos que consomem o SDK por HTTP — como o bot do Slack (<span style="color:#cfcfcf;">packages/slack</span>) — continuam TypeScript e falam com o backend pelo mesmo contrato <span style="color:#9d7cd8;">/openapi.json</span>.</div>
+        </div>
+      </div>
+      </sc-if>
+
+    </div>
+  </div>
+
+  <!-- ============ PLUGIN DETAIL DRAWER ============ -->
+  <sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;inset:0;z-index:50;">
+    <div onClick="{{ closeDrawer }}" style="position:absolute;inset:0;background:rgba(0,0,0,0.55);animation:pi-rise 0.15s ease;"></div>
+    <div style="position:absolute;top:0;right:0;bottom:0;width:472px;max-width:92vw;background:#0b0b0b;border-left:1px solid #242424;box-shadow:-30px 0 60px rgba(0,0,0,0.5);display:flex;flex-direction:column;animation:pi-rise 0.2s cubic-bezier(.4,0,.2,1);">
+      <!-- drawer header -->
+      <div style="flex:none;padding:18px 20px;border-bottom:1px solid #1a1a1a;">
+        <div style="display:flex;align-items:flex-start;gap:12px;">
+          <span style="width:40px;height:40px;border-radius:10px;background:{{ dIconBg }};border:1px solid {{ dIconBd }};display:flex;align-items:center;justify-content:center;font-size:18px;flex:none;">{{ dIcon }}</span>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ dName }}</span>
+              <span style="{{ dSourceStyle }}">{{ dSource }}</span>
+            </div>
+            <div style="font-size:11px;color:#8a8a8a;margin-top:3px;">{{ dDesc }}</div>
+          </div>
+          <button onClick="{{ closeDrawer }}" style="width:28px;height:28px;border-radius:7px;background:#141414;border:1px solid #242424;color:#cfcfcf;cursor:pointer;font-size:15px;flex:none;line-height:1;">✕</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:14px;font-size:11px;">
+          <span style="display:flex;align-items:center;gap:6px;"><span style="width:7px;height:7px;border-radius:50%;background:{{ dStatusColor }};"></span><span style="color:{{ dStatusColor }};">{{ dStatusText }}</span></span>
+          <span style="color:#5a5a5a;">·</span>
+          <span style="color:#9a9a9a;">v{{ dVersion }}</span>
+          <sc-if value="{{ dDispose }}" hint-placeholder-val="{{ false }}"><span style="color:#5a5a5a;">·</span><span style="color:#9a9a9a;">dispose() ✓</span></sc-if>
+        </div>
+      </div>
+
+      <!-- drawer scroll -->
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:18px 20px 28px;">
+
+        <!-- origem -->
+        <div style="margin-bottom:20px;">
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:9px;">Origem · entry do config</div>
+          <div style="background:#0e0e0e;border:1px solid #1a1a1a;border-radius:8px;padding:11px 13px;">
+            <div style="font-size:11px;color:#5a8a4a;margin-bottom:5px;">"plugin": [</div>
+            <div style="font-size:12px;color:#fab283;padding-left:14px;">{{ dSpec }}</div>
+            <div style="font-size:11px;color:#5a8a4a;margin-top:5px;">]</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:10.5px;color:#7a7a7a;"><span style="color:#9d7cd8;">⎉</span>resolvido em <span style="color:#9a9a9a;">{{ dInstall }}</span></div>
+        </div>
+
+        <!-- options -->
+        <sc-if value="{{ dHasOptions }}" hint-placeholder-val="{{ true }}">
+        <div style="margin-bottom:20px;">
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:9px;">PluginOptions</div>
+          <div style="display:flex;flex-direction:column;gap:7px;">
+            <sc-for list="{{ dOptions }}" as="o" hint-placeholder-count="2">
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid #1a1a1a;border-radius:8px;background:#0e0e0e;">
+                <span style="font-size:12px;color:#cfcfcf;flex:1;">{{ o.label }}</span>
+                <sc-if value="{{ o.isBool }}" hint-placeholder-val="{{ true }}">
+                  <div onClick="{{ o.onToggle }}" style="{{ o.toggleStyle }}"><span style="{{ o.knobStyle }}"></span></div>
+                </sc-if>
+                <sc-if value="{{ o.isText }}" hint-placeholder-val="{{ false }}">
+                  <span style="font-size:11.5px;color:#fab283;border:1px solid #242424;border-radius:6px;padding:4px 10px;background:#0c0c0c;">{{ o.val }}</span>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- tabs hooks / log -->
+        <div style="display:flex;background:#141414;border:1px solid #242424;border-radius:8px;padding:2px;gap:2px;width:fit-content;margin-bottom:14px;">
+          <button onClick="{{ setHooksTab }}" style="{{ dthStyle }}">Hooks</button>
+          <button onClick="{{ setLogTab }}" style="{{ dtlStyle }}">Log de execução</button>
+        </div>
+
+        <!-- hooks tab -->
+        <sc-if value="{{ dTabHooks }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;gap:11px;">
+          <sc-for list="{{ dHooks }}" as="h" hint-placeholder-count="3">
+            <div style="border:1px solid #1a1a1a;border-radius:9px;background:#0e0e0e;overflow:hidden;">
+              <div style="display:flex;align-items:center;gap:9px;padding:10px 12px;border-bottom:1px solid #161616;">
+                <span style="{{ h.chipStyle }}">{{ h.name }}</span>
+                <span style="font-size:10.5px;color:#8a8a8a;">{{ h.desc }}</span>
+              </div>
+              <div style="padding:11px 12px;display:flex;flex-direction:column;gap:9px;">
+                <div style="display:flex;align-items:flex-start;gap:9px;">
+                  <span style="font-size:9px;color:#6a6a6a;letter-spacing:0.5px;width:42px;flex:none;padding-top:3px;">INPUT</span>
+                  <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                    <sc-for list="{{ h.inputs }}" as="i" hint-placeholder-count="3">
+                      <span style="font-size:10px;color:#9a9a9a;border:1px solid #232323;border-radius:5px;padding:2px 7px;background:#0c0c0c;">{{ i }}</span>
+                    </sc-for>
+                  </div>
+                </div>
+                <sc-if value="{{ h.hasOut }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:flex-start;gap:9px;">
+                  <span style="font-size:9px;color:{{ h.color }};letter-spacing:0.5px;width:42px;flex:none;padding-top:3px;">OUTPUT</span>
+                  <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                    <sc-for list="{{ h.outputs }}" as="o" hint-placeholder-count="2">
+                      <span style="font-size:10px;color:{{ h.color }};border:1px solid {{ h.color }}40;border-radius:5px;padding:2px 7px;background:{{ h.color }}10;">{{ o }}</span>
+                    </sc-for>
+                  </div>
+                </div>
+                </sc-if>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- log tab -->
+        <sc-if value="{{ dTabLog }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid #1a1a1a;border-radius:9px;background:#0a0a0a;overflow:hidden;">
+          <sc-for list="{{ dLog }}" as="l" hint-placeholder-count="3">
+            <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 13px;border-bottom:1px solid #141414;">
+              <span style="font-size:10px;color:#6a6a6a;width:54px;flex:none;padding-top:1px;">{{ l.t }}</span>
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:11px;color:#9d7cd8;">{{ l.hook }}</span><span style="font-size:10px;color:#5a5a5a;">{{ l.sess }}</span></div>
+                <div style="font-size:11px;color:#9a9a9a;margin-top:2px;">{{ l.note }}</div>
+              </div>
+              <span style="font-size:10px;color:#7a7a7a;flex:none;">{{ l.dur }}</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- input surface / permissions -->
+        <div style="margin-top:20px;">
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:9px;">PluginInput · acesso concedido</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;">
+            <sc-for list="{{ inputSurface }}" as="x" hint-placeholder-count="6">
+              <div style="{{ x.style }}">
+                <span style="font-size:11px;color:{{ x.grantColor }};flex:none;width:12px;text-align:center;">{{ x.granted }}</span>
+                <span style="font-size:11px;color:{{ x.kColor }};min-width:0;">{{ x.k }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <!-- drawer footer -->
+      <div style="flex:none;display:flex;align-items:center;gap:9px;padding:14px 20px;border-top:1px solid #1a1a1a;background:#0c0c0c;">
+        <button style="background:transparent;border:1px solid rgba(224,108,117,0.3);color:#e06c75;border-radius:7px;padding:7px 13px;font-size:11.5px;cursor:pointer;">Remover</button>
+        <div style="flex:1;"></div>
+        <button style="background:transparent;border:1px solid #2a2a2a;color:#cfcfcf;border-radius:7px;padding:7px 13px;font-size:11.5px;cursor:pointer;">Recarregar host</button>
+        <button onClick="{{ closeDrawer }}" style="background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:7px 16px;font-weight:600;font-size:12px;cursor:pointer;">Salvar</button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ============ INSTALL MODAL ============ -->
+  <sc-if value="{{ installOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;">
+    <div onClick="{{ closeInstall }}" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);animation:pi-rise 0.15s ease;"></div>
+    <div style="position:relative;width:580px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:#0c0c0c;border:1px solid #242424;border-radius:14px;box-shadow:0 30px 70px rgba(0,0,0,0.6);animation:pi-rise 0.2s cubic-bezier(.4,0,.2,1);overflow:hidden;">
+      <!-- header + steps -->
+      <div style="flex:none;padding:17px 20px;border-bottom:1px solid #1a1a1a;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:15px;">
+          <span style="font-size:14px;font-weight:600;">Adicionar plugin</span>
+          <span style="font-size:10.5px;color:#7a7a7a;">→ entra no array <span style="color:#9d7cd8;">plugin</span> do config</span>
+          <div style="flex:1;"></div>
+          <button onClick="{{ closeInstall }}" style="width:26px;height:26px;border-radius:6px;background:#141414;border:1px solid #242424;color:#cfcfcf;cursor:pointer;font-size:14px;line-height:1;">✕</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:0;">
+          <sc-for list="{{ stepDots }}" as="d" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:8px;flex:none;">
+              <span style="{{ d.numStyle }}">{{ d.n }}</span>
+              <span style="font-size:11px;color:{{ d.labelColor }};">{{ d.label }}</span>
+            </div>
+            <sc-if value="{{ d.showBar }}" hint-placeholder-val="{{ true }}"><span style="width:34px;height:1px;background:{{ d.barColor }};margin:0 11px;"></span></sc-if>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:20px;">
+
+        <!-- STEP 1: SOURCE -->
+        <sc-if value="{{ instStepSource }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <div style="display:flex;background:#141414;border:1px solid #242424;border-radius:7px;padding:2px;gap:2px;margin-bottom:13px;">
+            <button onClick="{{ setKindNpm }}" style="{{ kindNpmStyle }}">npm</button>
+            <button onClick="{{ setKindLocal }}" style="{{ kindLocalStyle }}">caminho local</button>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;background:#0e0e0e;border:1px solid #242424;border-radius:9px;padding:11px 13px;margin-bottom:7px;">
+            <span style="color:#5a8a4a;">$</span>
+            <input value="{{ installSrc }}" onInput="{{ setInstallSrc }}" placeholder="@scope/plugin  ou  ./plugins/meu.ts" style="flex:1;background:transparent;border:none;color:#eee;font-size:13px;" />
+          </div>
+          <div style="font-size:10.5px;color:#6a6a6a;margin-bottom:20px;">npm resolve do registry · caminho local resolve relativo à raiz do projeto</div>
+
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:10px;">Sugestões do registry</div>
+          <div style="display:flex;flex-direction:column;gap:7px;">
+            <sc-for list="{{ suggestions }}" as="g" hint-placeholder-count="4">
+              <button onClick="{{ g.onPick }}" style="display:flex;align-items:center;gap:11px;text-align:left;padding:10px 12px;border:1px solid #1c1c1c;border-radius:9px;background:#0e0e0e;cursor:pointer;">
+                <span style="font-size:15px;flex:none;">{{ g.icon }}</span>
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:7px;"><span style="font-size:12.5px;font-weight:600;color:#e8e8e8;">{{ g.name }}</span><span style="font-size:8.5px;letter-spacing:0.5px;text-transform:uppercase;color:{{ g.kindColor }};border:1px solid {{ g.kindColor }}40;border-radius:4px;padding:0 5px;">{{ g.kind }}</span></div>
+                  <div style="font-size:10.5px;color:#8a8a8a;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ g.desc }}</div>
+                </div>
+                <span style="color:#5a5a5a;flex:none;">+</span>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- STEP 2: RESOLVING -->
+        <sc-if value="{{ instStepResolving }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:46px 0;gap:16px;">
+          <span style="width:30px;height:30px;border:2px solid #242424;border-top-color:#fab283;border-radius:50%;animation:pi-retry 0.8s linear infinite;"></span>
+          <div style="text-align:center;">
+            <div style="font-size:12.5px;color:#cfcfcf;">Resolvendo <span style="color:#fab283;">{{ installSrc }}</span></div>
+            <div style="font-size:10.5px;color:#7a7a7a;margin-top:6px;">buscando manifest · inspecionando hooks exportados · checando capacidades</div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- STEP 3: REVIEW -->
+        <sc-if value="{{ instStepReview }}" hint-placeholder-val="{{ false }}">
+        <div>
+          <!-- resolved header -->
+          <div style="display:flex;align-items:flex-start;gap:12px;padding-bottom:15px;border-bottom:1px solid #181818;margin-bottom:16px;">
+            <span style="width:42px;height:42px;border-radius:10px;background:rgba(157,124,216,0.1);border:1px solid rgba(157,124,216,0.3);display:flex;align-items:center;justify-content:center;font-size:19px;flex:none;">{{ instIcon }}</span>
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:14.5px;font-weight:600;">{{ instName }}</span><span style="font-size:8.5px;letter-spacing:0.5px;text-transform:uppercase;color:{{ instKindColor }};border:1px solid {{ instKindColor }}40;border-radius:4px;padding:1px 5px;">{{ instKind }}</span></div>
+              <div style="font-size:11px;color:#8a8a8a;margin-top:3px;">{{ instDesc }}</div>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:7px;font-size:10.5px;color:#7a7a7a;"><span>v{{ instVersion }}</span><span style="color:#3a3a3a;">·</span><span>{{ instAuthor }}</span><sc-if value="{{ instStars }}" hint-placeholder-val="{{ false }}"><span style="color:#3a3a3a;">·</span><span>★ {{ instStars }}</span></sc-if></div>
+            </div>
+          </div>
+
+          <!-- hooks it registers -->
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:10px;">Registra estes hooks</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px;">
+            <sc-for list="{{ instHooks }}" as="h" hint-placeholder-count="3"><span style="{{ h.style }}">{{ h.name }}</span></sc-for>
+          </div>
+
+          <!-- capability gate -->
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            <span style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;">Capacidades solicitadas</span>
+            <span style="font-size:10px;color:#7a7a7a;">— roda no host JS out-of-process</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:16px;">
+            <sc-for list="{{ instCaps }}" as="c" hint-placeholder-count="2">
+              <div style="{{ c.style }}">
+                <span style="font-size:13px;color:{{ c.riskColor }};flex:none;line-height:1.3;">{{ c.glyph }}</span>
+                <div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span style="font-size:12px;color:#dcdcdc;font-family:inherit;">{{ c.label }}</span><span style="font-size:9px;color:{{ c.riskColor }};border:1px solid {{ c.riskColor }}55;border-radius:4px;padding:0 6px;text-transform:uppercase;">{{ c.risk }}</span></div><div style="font-size:10.5px;color:#8a8a8a;margin-top:2px;">{{ c.desc }}</div></div>
+              </div>
+            </sc-for>
+          </div>
+
+          <sc-if value="{{ instHasHigh }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border-radius:8px;background:rgba(224,108,117,0.06);border:1px solid rgba(224,108,117,0.25);margin-bottom:16px;">
+              <span style="color:#e06c75;font-size:13px;">⚠</span>
+              <span style="font-size:10.5px;color:#e0a0a5;line-height:1.5;">Este plugin pode <span style="color:#e06c75;">executar shell</span> na sua máquina via <span style="font-family:inherit;">$</span>. Instale apenas de fontes confiáveis — o host JS roda fora do sandbox do core Rust.</span>
+            </div>
+          </sc-if>
+
+          <!-- options -->
+          <sc-if value="{{ instHasOptions }}" hint-placeholder-val="{{ false }}">
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:10px;">Options declaradas</div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px;">
+            <sc-for list="{{ instOptions }}" as="o" hint-placeholder-count="1">
+              <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #1a1a1a;border-radius:7px;background:#0e0e0e;"><span style="font-size:11.5px;color:#cfcfcf;flex:1;">{{ o.label }}</span><span style="font-size:11px;color:#9a9a9a;border:1px solid #242424;border-radius:6px;padding:3px 9px;background:#0c0c0c;">{{ o.val }}</span></div>
+            </sc-for>
+          </div>
+          </sc-if>
+
+          <!-- resulting config -->
+          <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:8px;">Resultado no config</div>
+          <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:11px 13px;font-size:11.5px;">
+            <span style="color:#5a8a4a;">"plugin"</span><span style="color:#7a7a7a;">: [ …, </span><span style="color:#fab283;">{{ instArrayEntry }}</span><span style="color:#7a7a7a;"> ]</span>
+          </div>
+        </div>
+        </sc-if>
+      </div>
+
+      <!-- footer -->
+      <div style="flex:none;display:flex;align-items:center;gap:9px;padding:14px 20px;border-top:1px solid #1a1a1a;background:#0a0a0a;">
+        <sc-if value="{{ instStepReview }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ backToSource }}" style="background:transparent;border:1px solid #2a2a2a;color:#cfcfcf;border-radius:7px;padding:8px 14px;font-size:12px;cursor:pointer;">← Voltar</button>
+        </sc-if>
+        <div style="flex:1;"></div>
+        <button onClick="{{ closeInstall }}" style="background:transparent;border:1px solid #2a2a2a;color:#9a9a9a;border-radius:7px;padding:8px 14px;font-size:12px;cursor:pointer;">Cancelar</button>
+        <sc-if value="{{ instStepSource }}" hint-placeholder-val="{{ true }}">
+          <button onClick="{{ resolveInstall }}" style="{{ resolveBtnStyle }}">Resolver →</button>
+        </sc-if>
+        <sc-if value="{{ instStepReview }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ confirmInstall }}" style="display:flex;align-items:center;gap:7px;background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 16px;font-weight:600;font-size:12px;cursor:pointer;">⎉ Instalar &amp; recarregar host</button>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = {
+    tab:'plugins', selected:'notify',
+    pluginEnabled:{ notify:true, lint:true, ghpr:true, sentry:false },
+    mcpEnabled:{ filesystem:true, github:true, playwright:true, postgres:false },
+    drawerOpen:false, drawerPlugin:'notify', drawerTab:'hooks',
+    opts:{ 'notify.sound':false, 'notify.idleThreshold':'30s', 'ghpr.autoComment':true, 'sentry.lookback':'1h' },
+    installOpen:false, installStep:'source', installKind:'npm', installSrc:'', installTarget:null,
+    installed:[],
+  };
+
+  // installable catalog — keyed by the config-array source string
+  catalog(){ return {
+    'opencode-linear':{ name:'opencode-linear', kind:'npm', icon:'◭', version:'3.2.0', author:'linear-community', stars:'1.2k',
+      desc:'Sincroniza issues do Linear com a sessão e fecha tickets a partir de commits.',
+      hooks:['event','chat.message','command.execute.before'], caps:['client','serverUrl'],
+      options:[{key:'apiKey',label:'apiKey',type:'secret'},{key:'teamID',label:'teamID',type:'text',val:'ENG'}] },
+    'opencode-redact':{ name:'opencode-redact', kind:'npm', icon:'⊘', version:'1.0.4', author:'opencode-labs', stars:'860',
+      desc:'Remove segredos (tokens, chaves) do prompt antes de enviar ao LLM.',
+      hooks:['chat.params','experimental.chat.system.transform'], caps:[],
+      options:[{key:'patterns',label:'patterns',type:'text',val:'sk-*, ghp_*'}] },
+    './plugins/screenshot.ts':{ name:'./plugins/screenshot.ts', kind:'local', icon:'◰', version:'local', author:'workspace',
+      desc:'Captura screenshot do app via shell após cada edit de UI.',
+      hooks:['tool.execute.after','shell.env'], caps:['$','directory'],
+      options:[] },
+    '@opencode/telemetry':{ name:'@opencode/telemetry', kind:'npm', icon:'◈', version:'0.9.1', author:'opencode', stars:'430',
+      desc:'Métricas de uso (tokens, latência) para um endpoint OpenTelemetry.',
+      hooks:['event','chat.params'], caps:['client'],
+      options:[{key:'endpoint',label:'endpoint',type:'text',val:'http://localhost:4318'}] },
+  }; }
+
+  openInstall=()=>this.setState({installOpen:true,installStep:'source',installSrc:'',installTarget:null,installKind:'npm'});
+  closeInstall=()=>this.setState({installOpen:false});
+  setInstallSrc=(e)=>this.setState({installSrc:e.target.value});
+  setInstallKind=(k)=>()=>this.setState({installKind:k});
+  pickSuggestion=(src)=>()=>{ const c=this.catalog()[src]; this.setState({installSrc:src,installKind:c?c.kind:'npm'}); };
+  resolveInstall=()=>{ const src=(this.state.installSrc||'').trim(); if(!src) return; this.setState({installStep:'resolving'}); setTimeout(()=>this.setState({installStep:'review',installTarget:src}),900); };
+  backToSource=()=>this.setState({installStep:'source'});
+  confirmInstall=()=>{ const src=this.state.installTarget; const c=this.catalog()[src]; if(c){ const id='new_'+Object.keys(this.state.catalog?this.state.catalog:{}).length+'_'+src.replace(/[^a-z]/gi,'').slice(0,6); const installed=[...this.state.installed,{id, src, ...c}]; const en={...this.state.pluginEnabled,[id]:true}; this.setState({installed, pluginEnabled:en, installOpen:false}); } else { this.setState({installOpen:false}); } };
+
+  T(){ return { primary:'#fab283', accent:'#9d7cd8', blue:'#5a9cf8', green:'#7fb069', red:'#e06c75', yellow:'#e6c07b' }; }
+
+  go=(t)=>()=>this.setState({tab:t});
+  select=(id)=>()=>this.setState({selected:this.state.selected===id?null:id});
+  togglePlugin=(id)=>(e)=>{ e.stopPropagation(); const p={...this.state.pluginEnabled}; p[id]=!p[id]; this.setState({pluginEnabled:p}); };
+  toggleMcp=(id)=>(e)=>{ e.stopPropagation(); const m={...this.state.mcpEnabled}; m[id]=!m[id]; this.setState({mcpEnabled:m}); };
+  openDrawer=(id)=>(e)=>{ e.stopPropagation(); this.setState({drawerOpen:true,drawerPlugin:id,selected:id,drawerTab:'hooks'}); };
+  closeDrawer=()=>this.setState({drawerOpen:false});
+  setDrawerTab=(t)=>()=>this.setState({drawerTab:t});
+  toggleOpt=(key)=>()=>{ const o={...this.state.opts}; o[key]=!o[key]; this.setState({opts:o}); };
+
+  // PluginInput surface + hook signatures (exact from the Hooks interface)
+  hookSig(){ return {
+    'event':{in:['event'],out:[],desc:'bus de eventos da sessão'},
+    'config':{in:['config'],out:[],desc:'inspeciona/edita config carregado'},
+    'chat.message':{in:['sessionID','agent?','model?','messageID?'],out:['message','parts'],desc:'nova mensagem recebida'},
+    'chat.params':{in:['sessionID','agent','model','provider','message'],out:['temperature','topP','topK','maxOutputTokens','options'],desc:'modifica params enviados ao LLM'},
+    'chat.headers':{in:['sessionID','agent','model','provider','message'],out:['headers'],desc:'modifica headers da request'},
+    'permission.ask':{in:['Permission'],out:['status'],desc:'decide ask | deny | allow'},
+    'command.execute.before':{in:['command','sessionID','arguments'],out:['parts'],desc:'antes de um /comando'},
+    'tool.execute.before':{in:['tool','sessionID','callID'],out:['args'],desc:'antes de executar a tool'},
+    'tool.execute.after':{in:['tool','sessionID','callID','args'],out:['title','output','metadata'],desc:'após a tool — pós-processa o output'},
+    'tool.definition':{in:['toolID'],out:['description','parameters'],desc:'modifica a definição da tool'},
+    'shell.env':{in:['cwd','sessionID?','callID?'],out:['env'],desc:'injeta env no shell'},
+    'experimental.chat.system.transform':{in:['sessionID?','model'],out:['system'],desc:'transforma o system prompt'},
+  }; }
+
+  drawerData(){ return {
+    notify:{ version:'1.4.0', spec:'["@opencode/notify", { sound: false }]', install:'node_modules/@opencode/notify',
+      options:[{key:'notify.sound',label:'sound',type:'bool'},{key:'notify.idleThreshold',label:'idleThreshold',type:'text',val:'30s'}],
+      uses:['client','serverUrl'], dispose:true,
+      log:[{t:'14:22:07',hook:'event',sess:'ses_8f2a',note:'session.idle → notificou',dur:'2ms'},{t:'14:18:51',hook:'event',sess:'ses_8f2a',note:'session.error → notificou',dur:'1ms'},{t:'13:59:03',hook:'event',sess:'ses_71bd',note:'session.idle → notificou',dur:'2ms'}] },
+    lint:{ version:'local', spec:'"./plugins/lint.ts"', install:'./plugins/lint.ts',
+      options:[], uses:['$','directory','worktree'], dispose:false,
+      log:[{t:'14:21:44',hook:'tool.execute.after',sess:'ses_8f2a',note:'edit router.ts → eslint --fix (0 erros)',dur:'318ms'},{t:'14:20:12',hook:'tool.execute.before',sess:'ses_8f2a',note:'edit auth.ts → bloqueou (lockfile)',dur:'4ms'},{t:'14:11:30',hook:'tool.execute.after',sess:'ses_71bd',note:'write health.test.ts → eslint --fix',dur:'287ms'}] },
+    ghpr:{ version:'2.1.3', spec:'["opencode-github", { repo: "danzeroum/opencode" }]', install:'node_modules/opencode-github',
+      options:[{key:'ghpr.repo',label:'repo',type:'text',val:'danzeroum/opencode'},{key:'ghpr.autoComment',label:'autoComment',type:'bool'}],
+      uses:['client','project','serverUrl'], dispose:true,
+      log:[{t:'14:05:18',hook:'chat.message',sess:'ses_8f2a',note:'detectou #142 → anexou contexto do PR',dur:'412ms'},{t:'14:05:01',hook:'event',sess:'ses_8f2a',note:'session.created → comentou no PR',dur:'366ms'},{t:'13:40:22',hook:'command.execute.before',sess:'ses_71bd',note:'/pr → resolveu issue ref',dur:'98ms'}] },
+    sentry:{ version:'0.3.0', spec:'["@acme/sentry-context", { org: "acme" }]', install:'node_modules/@acme/sentry-context',
+      options:[{key:'sentry.org',label:'org',type:'text',val:'acme'},{key:'sentry.lookback',label:'lookback',type:'text',val:'1h'}],
+      uses:['client','serverUrl'], dispose:true, disabled:true,
+      log:[{t:'—',hook:'—',sess:'—',note:'desabilitado — sem execuções recentes',dur:'—'}] },
+  }; }
+
+  pluginData(){ return [
+    {id:'notify',name:'@opencode/notify',source:'npm',icon:'🔔',desc:'Notificação desktop quando a sessão fica idle',
+      hooks:['event'], runState:'idle · escutando bus', hasOptions:true, optionsLabel:'sound: false'},
+    {id:'lint',name:'./plugins/lint.ts',source:'local',icon:'✦',desc:'Roda eslint --fix após cada edição de arquivo',
+      hooks:['tool.execute.after','tool.execute.before'], runState:'ativo', hasOptions:false},
+    {id:'ghpr',name:'opencode-github',source:'npm',icon:'◑',desc:'Comenta em PRs e abre issues a partir da sessão',
+      hooks:['event','chat.message','command.execute.before'], runState:'ativo · webhook', hasOptions:true, optionsLabel:'repo: danzeroum/opencode'},
+    {id:'sentry',name:'@acme/sentry-context',source:'npm',icon:'◆',desc:'Injeta stack traces recentes no system prompt',
+      hooks:['experimental.chat.system.transform','chat.params'], runState:'desabilitado', hasOptions:true, optionsLabel:'org: acme'},
+  ]; }
+
+  // session-turn lifecycle — exact hook names from the Hooks interface
+  pipelineData(){ return [
+    {name:'chat.message', stage:'admit', taps:['ghpr']},
+    {name:'chat.params', stage:'request', taps:['sentry']},
+    {name:'chat.headers', stage:'request', taps:[]},
+    {name:'system.transform', stage:'request', taps:['sentry']},
+    {name:'LLM stream', stage:'model', taps:[], model:true},
+    {name:'tool.definition', stage:'tools', taps:[]},
+    {name:'permission.ask', stage:'tools', taps:[]},
+    {name:'tool.execute.before', stage:'tools', taps:['lint']},
+    {name:'tool.execute.after', stage:'tools', taps:['lint']},
+    {name:'event', stage:'emit', taps:['notify','ghpr']},
+  ]; }
+
+  mcpData(){ return [
+    {id:'filesystem',name:'filesystem',transport:'stdio',command:'npx @modelcontextprotocol/server-filesystem ~/code',tools:['read_file','write_file','list_directory','search_files','move_file'],reconnecting:false},
+    {id:'github',name:'github',transport:'http',command:'https://api.githubcopilot.com/mcp/',tools:['create_issue','get_pull_request','list_commits','search_code','add_comment'],reconnecting:true,retryN:2},
+    {id:'playwright',name:'playwright',transport:'stdio',command:'npx @playwright/mcp@latest',tools:['browser_navigate','browser_click','browser_snapshot','browser_type'],reconnecting:false},
+    {id:'postgres',name:'postgres',transport:'sse',command:'http://localhost:8931/sse',tools:['query','list_tables','describe_table'],reconnecting:false},
+  ]; }
+
+  integData(){ const t=this.T(); return [
+    {id:'github',name:'GitHub',kind:'in-core adapter',iconBg:'#161616',icon:'gh',status:'conectado · danzeroum',statusColor:t.green,dot:t.green,connected:true,
+      caps:[{glyph:'✓',color:t.green,label:'PR review + comments'},{glyph:'✓',color:t.green,label:'issues ↔ sessão'},{glyph:'↻',color:t.blue,label:'sync de webhooks'}]},
+    {id:'gitlab',name:'GitLab',kind:'in-core adapter',iconBg:'#1a1410',icon:'gl',status:'sem credencial',statusColor:'#8a8a8a',dot:'#5a5a5a',connected:false,
+      caps:[{glyph:'○',color:'#6a6a6a',label:'merge requests'},{glyph:'○',color:'#6a6a6a',label:'pipelines'},{glyph:'○',color:'#6a6a6a',label:'issues'}]},
+    {id:'slack',name:'Slack',kind:'in-core adapter',iconBg:'#161018',icon:'sl',status:'conectado · #eng',statusColor:t.green,dot:t.green,connected:true,
+      caps:[{glyph:'✓',color:t.green,label:'notificações de sessão'},{glyph:'✓',color:t.green,label:'/opencode slash command'},{glyph:'⚠',color:t.yellow,label:'bot standalone fica em TS'}]},
+  ]; }
+
+  renderVals(){
+    const t=this.T(), s=this.state;
+    const tab=(active)=>`padding:6px 13px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:600;background:${active?'#262626':'transparent'};color:${active?'#fab283':'#8a8a8a'};`;
+
+    const hookColor=(h)=>{ if(h.startsWith('tool'))return t.primary; if(h.startsWith('chat')||h.startsWith('experimental'))return t.accent; if(h==='event')return t.green; if(h.startsWith('command'))return t.yellow; if(h.startsWith('permission'))return t.red; return '#9a9a9a'; };
+    const pluginIconColor=(id)=>({notify:t.green,lint:t.primary,ghpr:t.accent,sentry:t.red}[id]||t.accent);
+    const installedCards=s.installed.map(x=>({ id:x.id, name:x.name, source:x.kind, icon:x.icon, desc:x.desc, hooks:x.hooks, runState:'recém-instalado · host recarregado', hasOptions:(x.options||[]).length>0, optionsLabel:(x.options||[]).map(o=>o.label).join(', ') }));
+    const pdata=[...this.pluginData(),...installedCards];
+
+    const plugins=pdata.map(p=>{ const on=s.pluginEnabled[p.id]; const sel=s.selected===p.id; const ic=pluginIconColor(p.id);
+      return {
+        name:p.name, source:p.source, icon:p.icon, desc:p.desc,
+        onClick:this.select(p.id), onToggle:this.togglePlugin(p.id), onDetails:this.openDrawer(p.id),
+        iconBg:`${ic}14`, iconBd:`${ic}40`,
+        cardStyle:`border:1px solid ${sel?'rgba(157,124,216,0.45)':'#1c1c1c'};border-radius:12px;background:${sel?'rgba(157,124,216,0.04)':'#0b0b0b'};padding:15px 16px;cursor:pointer;transition:all 0.15s;${on?'':'opacity:0.62;'}`,
+        sourceStyle:`font-size:8.5px;letter-spacing:0.5px;text-transform:uppercase;color:${p.source==='npm'?t.accent:t.primary};border:1px solid ${p.source==='npm'?'rgba(157,124,216,0.4)':'rgba(250,178,131,0.4)'};border-radius:4px;padding:1px 5px;flex:none;`,
+        toggleStyle:`width:36px;height:21px;border-radius:11px;position:relative;cursor:pointer;flex:none;background:${on?t.green:'#262626'};transition:background 0.15s;`,
+        knobStyle:`position:absolute;top:3px;${on?'right:3px':'left:3px'};width:15px;height:15px;border-radius:50%;background:${on?'#0a0a0a':'#888'};`,
+        hooks:p.hooks.map(h=>({name:h,style:`font-size:10px;color:${hookColor(h)};border:1px solid ${hookColor(h)}40;background:${hookColor(h)}12;border-radius:5px;padding:2px 7px;`})),
+        runColor:on?(p.id==='sentry'?'#5a5a5a':t.green):'#5a5a5a', runState:on?p.runState:'desabilitado',
+        hasOptions:p.hasOptions, optionsLabel:p.optionsLabel, hookCount:p.hooks.length,
+      };
+    });
+    const selPlugin=pdata.find(p=>p.id===s.selected);
+
+    // pipeline
+    const stageColor={admit:t.yellow,request:t.accent,model:t.primary,tools:t.primary,emit:t.green};
+    const pipeData=this.pipelineData();
+    const pipeline=pipeData.map((h,i)=>{
+      const taps=h.taps.map(pid=>{ const on=s.pluginEnabled[pid]; const c=pluginIconColor(pid); const hot=s.selected===pid;
+        return { plugin:pdata.find(x=>x.id===pid).name,
+          style:`width:${hot?'12px':'8px'};height:8px;border-radius:${hot?'3px':'50%'};background:${on?c:'#333'};${hot?'box-shadow:0 0 8px '+c+';':''}${on?'':'opacity:0.4;'}transition:all 0.15s;`,
+        };
+      });
+      const dim=s.selected&&!h.taps.includes(s.selected);
+      const sc=stageColor[h.stage];
+      return {
+        name:h.name, showArrow:i<pipeData.length-1,
+        stageLabel:h.stage, stageColor:sc,
+        nodeStyle:`width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;border:1px solid ${h.model?'rgba(250,178,131,0.5)':sc+'40'};background:${h.model?'rgba(250,178,131,0.08)':'#0e0e0e'};opacity:${dim?0.32:1};transition:opacity 0.15s;${h.model?'box-shadow:0 0 0 3px rgba(250,178,131,0.06);':''}`,
+        nameColor:dim?'#5a5a5a':(h.model?t.primary:'#b8b8b8'), nameWeight:h.model?'600':'400',
+        taps,
+      };
+    });
+
+    // mcp
+    const mdata=this.mcpData();
+    const mcpServers=mdata.map(m=>{ const on=s.mcpEnabled[m.id]; const reconnecting=on&&m.reconnecting;
+      const dot=!on?'#5a5a5a':reconnecting?t.yellow:t.green;
+      const status=!on?'desativado':reconnecting?'reconectando':'conectado';
+      const tColor={stdio:t.primary,http:t.blue,sse:t.accent}[m.transport];
+      return { name:m.name, transport:m.transport, command:m.command, tools:m.tools, toolCount:m.tools.length+' tools',
+        dot, dotAnim:reconnecting?'animation:pi-pulse 1.4s ease-in-out infinite;':'',
+        status, statusColor:dot, expanded:on, reconnecting, retryN:m.retryN,
+        onToggle:this.toggleMcp(m.id),
+        transportStyle:`font-size:9px;letter-spacing:0.5px;text-transform:uppercase;color:${tColor};border:1px solid ${tColor}40;border-radius:4px;padding:1px 6px;flex:none;`,
+        toggleStyle:`width:36px;height:21px;border-radius:11px;position:relative;cursor:pointer;flex:none;background:${on?t.green:'#262626'};`,
+        knobStyle:`position:absolute;top:3px;${on?'right:3px':'left:3px'};width:15px;height:15px;border-radius:50%;background:${on?'#0a0a0a':'#888'};`,
+      };
+    });
+
+    // integrations
+    const integrations=this.integData().map(g=>({
+      name:g.name, kind:g.kind, iconBg:g.iconBg,
+      iconEl:g.icon, status:g.status, statusColor:g.statusColor, dot:g.dot, caps:g.caps,
+      cardStyle:`border:1px solid #1c1c1c;border-radius:12px;background:#0b0b0b;padding:15px 16px;`,
+      btnLabel:g.connected?'Gerenciar':'Conectar',
+      btnStyle:`margin-top:13px;width:100%;background:${g.connected?'transparent':'#fab283'};border:1px solid ${g.connected?'#2a2a2a':'transparent'};color:${g.connected?'#cfcfcf':'#1a1206'};border-radius:7px;padding:7px;font-weight:600;font-size:11.5px;cursor:pointer;`,
+    }));
+
+    // ===== DRAWER =====
+    const dp=pdata.find(x=>x.id===s.drawerPlugin)||pdata[0];
+    const inst=s.installed.find(x=>x.id===dp.id);
+    const dd=this.drawerData()[dp.id]||(inst?{ version:inst.version, spec:inst.kind==='local'?('"'+inst.src+'"'):('"'+inst.src+'"'), install:inst.kind==='local'?inst.src:('node_modules/'+inst.src), options:(inst.options||[]).map(o=>({key:dp.id+'.'+o.key,label:o.label,type:o.type==='secret'?'text':o.type,val:o.type==='secret'?'••••':o.val})), uses:inst.caps||[], dispose:true, log:[{t:'agora',hook:'—',sess:'—',note:'instalado — aguardando primeira execução',dur:'—'}] }:{ version:'—', spec:'—', install:'—', options:[], uses:[], dispose:false, log:[] });
+    const sigs=this.hookSig();
+    const dOn=s.pluginEnabled[dp.id];
+    const dHooks=dp.hooks.map(h=>{ const sig=sigs[h]||{in:[],out:[],desc:''}; const c=hookColor(h);
+      return { name:h, desc:sig.desc, color:c,
+        inputs:sig.in, outputs:sig.out, hasOut:sig.out.length>0,
+        chipStyle:`font-size:11px;font-weight:600;color:${c};border:1px solid ${c}55;background:${c}12;border-radius:6px;padding:3px 9px;`,
+      };
+    });
+    const dOptions=(dd.options||[]).map(o=>{ const val=o.type==='bool'?s.opts[o.key]:(s.opts[o.key]!==undefined?s.opts[o.key]:o.val);
+      return { label:o.label, type:o.type, val, isBool:o.type==='bool', isText:o.type!=='bool', boolOn:!!val, onToggle:this.toggleOpt(o.key),
+        toggleStyle:`width:34px;height:20px;border-radius:11px;position:relative;cursor:pointer;flex:none;background:${val?t.green:'#262626'};`,
+        knobStyle:`position:absolute;top:3px;${val?'right:3px':'left:3px'};width:14px;height:14px;border-radius:50%;background:${val?'#0a0a0a':'#888'};`,
+      };
+    });
+    const inputSurface=[
+      {k:'client',d:'createOpencodeClient — API HTTP'},
+      {k:'$',d:'BunShell — exec de shell'},
+      {k:'project',d:'Project ativo'},
+      {k:'directory',d:'cwd da sessão'},
+      {k:'worktree',d:'raiz do git worktree'},
+      {k:'serverUrl',d:'URL do servidor local'},
+    ].map(x=>{ const g=dd.uses.includes(x.k); return {...x, granted:g?'✓':'·', grantColor:g?'#9ec98a':'#5a5a5a', kColor:g?'#cfcfcf':'#6a6a6a',
+      style:`display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:6px;border:1px solid ${g?'rgba(127,176,105,0.25)':'#1a1a1a'};background:${g?'rgba(127,176,105,0.05)':'#0c0c0c'};`,
+    }; });
+
+    return {
+      isPlugins:s.tab==='plugins', isMcp:s.tab==='mcp', isInteg:s.tab==='integrations',
+      goPlugins:this.go('plugins'), goMcp:this.go('mcp'), goIntegrations:this.go('integrations'),
+      tabPluginsStyle:tab(s.tab==='plugins'), tabMcpStyle:tab(s.tab==='mcp'), tabIntegStyle:tab(s.tab==='integrations'),
+      pluginCount:pdata.length, mcpCount:mdata.length, integCount:3,
+      plugins, pipeline, mcpServers, integrations,
+      selectedName:selPlugin?selPlugin.name:null,
+      // drawer
+      drawerOpen:s.drawerOpen, closeDrawer:this.closeDrawer,
+      dName:dp.name, dIcon:dp.icon, dSource:dp.source, dDesc:dp.desc,
+      dVersion:dd.version, dSpec:dd.spec, dInstall:dd.install, dDispose:dd.dispose, dDisabled:!dOn,
+      dIconBg:`${pluginIconColor(dp.id)}14`, dIconBd:`${pluginIconColor(dp.id)}40`,
+      dSourceStyle:`font-size:8.5px;letter-spacing:0.5px;text-transform:uppercase;color:${dp.source==='npm'?t.accent:t.primary};border:1px solid ${dp.source==='npm'?'rgba(157,124,216,0.4)':'rgba(250,178,131,0.4)'};border-radius:4px;padding:1px 5px;`,
+      dStatusColor:dOn?t.green:'#7a7a7a', dStatusText:dOn?'ativo · host carregou':'desabilitado',
+      dHooks, dOptions, dHasOptions:dOptions.length>0,
+      dLog:dd.log, inputSurface,
+      dTabHooks:s.drawerTab==='hooks', dTabLog:s.drawerTab==='log',
+      dthStyle:tab(s.drawerTab==='hooks'), dtlStyle:tab(s.drawerTab==='log'),
+      setHooksTab:this.setDrawerTab('hooks'), setLogTab:this.setDrawerTab('log'),
+      // install
+      openInstall:this.openInstall, closeInstall:this.closeInstall,
+      installOpen:s.installOpen, instStepSource:s.installStep==='source', instStepResolving:s.installStep==='resolving', instStepReview:s.installStep==='review',
+      installSrc:s.installSrc, setInstallSrc:this.setInstallSrc, resolveInstall:this.resolveInstall, backToSource:this.backToSource, confirmInstall:this.confirmInstall,
+      canResolve:(s.installSrc||'').trim().length>0,
+      resolveBtnStyle:`background:${(s.installSrc||'').trim()?'#fab283':'#2a2218'};color:${(s.installSrc||'').trim()?'#1a1206':'#7a6a4a'};border:none;border-radius:7px;padding:8px 16px;font-weight:600;font-size:12px;cursor:${(s.installSrc||'').trim()?'pointer':'not-allowed'};`,
+      kindNpmStyle:`flex:1;padding:7px;border-radius:6px;border:none;cursor:pointer;font-size:11px;font-weight:600;background:${s.installKind==='npm'?'#262626':'transparent'};color:${s.installKind==='npm'?'#fab283':'#8a8a8a'};`,
+      kindLocalStyle:`flex:1;padding:7px;border-radius:6px;border:none;cursor:pointer;font-size:11px;font-weight:600;background:${s.installKind==='local'?'#262626':'transparent'};color:${s.installKind==='local'?'#fab283':'#8a8a8a'};`,
+      setKindNpm:this.setInstallKind('npm'), setKindLocal:this.setInstallKind('local'),
+      ...this.installReviewVals(t,hookColor,sigs),
+      stepDots:[{on:true,label:'Origem'},{on:s.installStep!=='source',label:'Revisão'},{on:false,label:'Confirmar'}].map((d,i)=>({...d, n:i+1,
+        numStyle:`width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex:none;border:1px solid ${d.on?'#fab283':'#2a2a2a'};background:${d.on?'rgba(250,178,131,0.1)':'transparent'};color:${d.on?'#fab283':'#6a6a6a'};`,
+        labelColor:d.on?'#cfcfcf':'#6a6a6a', showBar:i<2, barColor:d.on?'#fab283':'#2a2a2a' })),
+      suggestions:Object.keys(this.catalog()).map(k=>{ const c=this.catalog()[k]; return { src:k, name:c.name, kind:c.kind, icon:c.icon, desc:c.desc, onPick:this.pickSuggestion(k),
+        kindColor:c.kind==='npm'?t.accent:t.primary }; }),
+    };
+  }
+
+  installReviewVals(t,hookColor,sigs){
+    const s=this.state; const src=s.installTarget; const c=src?this.catalog()[src]:null;
+    if(!c) return { instName:'', instReady:false };
+    const capMeta={ '$':{label:'$ · BunShell',risk:'alto',riskColor:t.red,desc:'executa comandos de shell na sua máquina'},
+      'client':{label:'client · API',risk:'médio',riskColor:t.yellow,desc:'lê/escreve dados da sessão via HTTP'},
+      'directory':{label:'directory · fs',risk:'médio',riskColor:t.yellow,desc:'lê arquivos do diretório de trabalho'},
+      'worktree':{label:'worktree · fs',risk:'médio',riskColor:t.yellow,desc:'acessa a raiz do git worktree'},
+      'serverUrl':{label:'serverUrl',risk:'baixo',riskColor:t.green,desc:'conhece a URL do servidor local'} };
+    const caps=(c.caps.length?c.caps:['(nenhuma)']).map(k=>{ const m=capMeta[k]; if(!m) return { label:'sem capacidades sensíveis', risk:'seguro', riskColor:t.green, desc:'plugin de transformação puro — sem shell, rede ou fs', glyph:'✓',
+        style:`display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid rgba(127,176,105,0.25);background:rgba(127,176,105,0.05);` };
+      return { label:m.label, risk:m.risk, riskColor:m.riskColor, desc:m.desc, glyph:m.risk==='alto'?'⚠':'●',
+        style:`display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid ${m.riskColor}33;background:${m.riskColor}0d;` };
+    });
+    const hooks=c.hooks.map(h=>{ const cc=hookColor(h); return { name:h, desc:(sigs[h]||{}).desc||'',
+      style:`font-size:11px;font-weight:600;color:${cc};border:1px solid ${cc}55;background:${cc}12;border-radius:6px;padding:3px 9px;` }; });
+    const options=(c.options||[]).map(o=>({ label:o.label, type:o.type, val:o.type==='secret'?'(será solicitado)':o.val }));
+    const hasHigh=c.caps.includes('$');
+    const arrayEntry=(c.options&&c.options.length)?`["${c.name}", { … }]`:`"${c.name}"`;
+    return { instName:c.name, instReady:true, instIcon:c.icon, instVersion:c.version, instAuthor:c.author, instStars:c.stars||null, instKind:c.kind, instDesc:c.desc,
+      instKindColor:c.kind==='npm'?t.accent:t.primary,
+      instHooks:hooks, instCaps:caps, instOptions:options, instHasOptions:(c.options||[]).length>0,
+      instHasHigh:hasHigh, instArrayEntry:arrayEntry };
+  }
+}
+</script>
+</body>
+</html>
