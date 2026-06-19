@@ -1644,6 +1644,29 @@ async fn v2_provider_list(
     }))
 }
 
+/// `GET /api/location` — resolve the request location (group `location`). Matches the golden
+/// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
+/// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
+#[utoipa::path(
+    get,
+    path = "/api/location",
+    operation_id = "v2.location.get",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Resolved location", body = opencode_proto::LocationInfo),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "location"
+)]
+async fn v2_location_get(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::LocationInfo>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(location))
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
@@ -1663,7 +1686,8 @@ async fn v2_provider_list(
         v2_event_subscribe,
         session_abort,
         v2_model_list,
-        v2_provider_list
+        v2_provider_list,
+        v2_location_get
     ),
     components(schemas(
         opencode_proto::Health,
@@ -1734,7 +1758,8 @@ async fn v2_provider_list(
         (name = "project", description = "Project routes"),
         (name = "events", description = "Event stream routes"),
         (name = "model", description = "Model catalog routes"),
-        (name = "provider", description = "Provider catalog routes")
+        (name = "provider", description = "Provider catalog routes"),
+        (name = "location", description = "Location routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -1822,6 +1847,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("provider") {
         router = router.route("/api/provider", get(v2_provider_list));
+    }
+    if state.routes.handles("location") {
+        router = router.route("/api/location", get(v2_location_get));
     }
     // Internal Phase-4 proving route (not a contract path): build the runner and drive one turn.
     if state.routes.handles("session-exec") {
@@ -2926,6 +2954,64 @@ mod tests {
             .oneshot(
                 axum::extract::Request::builder()
                     .uri("/api/model")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[tokio::test]
+    async fn v2_location_get_resolves_from_project() {
+        use tower::ServiceExt;
+        // No catalog needed — location resolves the seeded project by worktree ("/repo").
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("location"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/location?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // 200 body is the bare LocationInfo (no `{ location, data }` wrapper).
+        assert_eq!(v["directory"], "/repo");
+        assert_eq!(v["project"]["id"], "prj_1");
+        assert_eq!(v["project"]["directory"], "/repo");
+    }
+
+    #[tokio::test]
+    async fn v2_location_get_proxies_when_group_disabled() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse(""), // `location` not enabled → proxy fallback
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/location")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

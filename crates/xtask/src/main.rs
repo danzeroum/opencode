@@ -27,6 +27,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/project/current",
     "/api/model",
     "/api/provider",
+    "/api/location",
 ];
 
 #[derive(Parser)]
