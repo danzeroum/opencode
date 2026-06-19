@@ -7,8 +7,7 @@
 //! transforms and credential projection are not part of this slice).
 //!
 //! Field mapping mirrors the TS `refresh()` exactly, starting from the schema's `empty()` defaults:
-//! - `provider.enabled` stays `false` here — the credential/integration layer is what flips it on, so
-//!   the raw projection always reports a provider as disabled.
+//! - `provider.enabled` is derived from stored credentials (precedence) then env (see below).
 //! - `provider.api` / `model.api` pick `aisdk` when an npm package is advertised, else `native`; the
 //!   model API uses the model's *own* `provider` hint (not the provider-level npm) and carries the
 //!   model id.
@@ -19,9 +18,10 @@
 //! - `status` defaults to `active`; `limit` integers are coerced from the catalog's numbers.
 //!
 //! Experimental-mode `variants` are projected from `model.experimental.modes` ([`variants`]), mirroring
-//! the TS `variants()` / `ModelRequest.normalizeAiSdkOptions` (per-package option profiles). The
-//! stored-credential enabling path (`enabled = { via: "credential" }`) still needs the credential store
-//! and is a documented follow-up.
+//! the TS `variants()` / `ModelRequest.normalizeAiSdkOptions` (per-package option profiles).
+//!
+//! Provider `enabled` is derived (with credential precedence over env, mirroring the TS catalog) from a
+//! `providerID → credentialID` map plus an env predicate, both injected so the projection stays pure.
 
 use std::collections::BTreeMap;
 
@@ -32,11 +32,21 @@ use opencode_proto::{
     ProviderApi, ProviderEnabled, ProviderRequest, ProviderV2Info,
 };
 
-/// A provider's env-derived `enabled`: the first of its `env` vars that `env` reports set
-/// (`{ via: "env", name }`), else disabled. Mirrors `packages/core/src/plugin/env.ts`. The
-/// stored-credential path (`{ via: "credential" }`) needs the credential store — a documented
-/// follow-up — so a provider with no matching env var reports disabled here.
-fn enabled_from_env(provider: &Provider, env: &impl Fn(&str) -> bool) -> ProviderEnabled {
+/// A provider's `enabled`, with **credential precedence over env** (mirroring the TS catalog, where the
+/// credential `project()` overrides the env plugin): a stored credential for the provider yields
+/// `{ via: "credential", credentialID }`; else the first set `env` var yields `{ via: "env", name }`
+/// (`plugin/env.ts`); else disabled. `credentials` maps `providerID → credentialID`.
+fn provider_enabled(
+    provider: &Provider,
+    env: &impl Fn(&str) -> bool,
+    credentials: &BTreeMap<String, String>,
+) -> ProviderEnabled {
+    if let Some(credential_id) = credentials.get(&provider.id) {
+        return ProviderEnabled::Credential {
+            via: "credential".to_string(),
+            credential_id: credential_id.clone(),
+        };
+    }
     provider
         .env
         .iter()
@@ -63,13 +73,17 @@ fn released_ms(model: &ModelV2Info) -> f64 {
     }
 }
 
-/// Project a single catalog [`Provider`] into its V2 wire form, deriving `enabled` from `env`
-/// (an "is this variable set?" predicate — kept injected so the projection stays pure + testable).
-pub fn provider_info(provider: &Provider, env: &impl Fn(&str) -> bool) -> ProviderV2Info {
+/// Project a single catalog [`Provider`] into its V2 wire form, deriving `enabled` from stored
+/// `credentials` (precedence) then the `env` predicate — both injected so the projection stays pure.
+pub fn provider_info(
+    provider: &Provider,
+    env: &impl Fn(&str) -> bool,
+    credentials: &BTreeMap<String, String>,
+) -> ProviderV2Info {
     ProviderV2Info {
         id: provider.id.clone(),
         name: provider.name.clone(),
-        enabled: enabled_from_env(provider, env),
+        enabled: provider_enabled(provider, env, credentials),
         env: provider.env.clone(),
         api: match provider.npm.as_ref() {
             Some(npm) => ProviderApi::Aisdk {
@@ -306,9 +320,16 @@ fn as_string_array(value: &serde_json::Value) -> Option<Vec<String>> {
 }
 
 /// Project every provider in a [`Catalog`] (ordered by id via the catalog's `BTreeMap`), deriving
-/// each `enabled` from `env`.
-pub fn providers(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ProviderV2Info> {
-    catalog.values().map(|p| provider_info(p, env)).collect()
+/// each `enabled` from stored `credentials` then `env`.
+pub fn providers(
+    catalog: &Catalog,
+    env: &impl Fn(&str) -> bool,
+    credentials: &BTreeMap<String, String>,
+) -> Vec<ProviderV2Info> {
+    catalog
+        .values()
+        .map(|p| provider_info(p, env, credentials))
+        .collect()
 }
 
 /// Project every model across every provider in a [`Catalog`].
@@ -326,20 +347,28 @@ pub fn models(catalog: &Catalog) -> Vec<ModelV2Info> {
 }
 
 /// The `available()` provider list (TS `catalog.provider.available()`): every provider whose
-/// env-derived `enabled` isn't `false`.
-pub fn available_providers(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ProviderV2Info> {
-    providers(catalog, env)
+/// `enabled` (credential, then env) isn't `false`.
+pub fn available_providers(
+    catalog: &Catalog,
+    env: &impl Fn(&str) -> bool,
+    credentials: &BTreeMap<String, String>,
+) -> Vec<ProviderV2Info> {
+    providers(catalog, env, credentials)
         .into_iter()
         .filter(|p| is_available(&p.enabled))
         .collect()
 }
 
 /// The `available()` model list (TS `catalog.model.available()`): every enabled model of an
-/// env-enabled provider, ordered by release date (newest first).
-pub fn available_models(catalog: &Catalog, env: &impl Fn(&str) -> bool) -> Vec<ModelV2Info> {
+/// enabled provider (credential, then env), ordered by release date (newest first).
+pub fn available_models(
+    catalog: &Catalog,
+    env: &impl Fn(&str) -> bool,
+    credentials: &BTreeMap<String, String>,
+) -> Vec<ModelV2Info> {
     let mut out: Vec<ModelV2Info> = catalog
         .values()
-        .filter(|provider| is_available(&enabled_from_env(provider, env)))
+        .filter(|provider| is_available(&provider_enabled(provider, env, credentials)))
         .flat_map(|provider| {
             let npm = provider.npm.as_deref();
             provider
@@ -471,7 +500,7 @@ mod tests {
     #[test]
     fn provider_aisdk_when_npm_present() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let p = provider_info(&cat["anthropic"], &|_| false);
+        let p = provider_info(&cat["anthropic"], &|_| false, &BTreeMap::new());
         assert_eq!(p.id, "anthropic");
         assert_eq!(p.name, "Anthropic");
         assert_eq!(p.env, vec!["ANTHROPIC_API_KEY".to_string()]);
@@ -492,7 +521,7 @@ mod tests {
     #[test]
     fn provider_native_when_npm_absent() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let p = provider_info(&cat["local"], &|_| false);
+        let p = provider_info(&cat["local"], &|_| false, &BTreeMap::new());
         assert_eq!(
             p.api,
             ProviderApi::Native {
@@ -629,7 +658,7 @@ mod tests {
     #[test]
     fn whole_catalog_projection_counts() {
         let cat = parse_catalog(SAMPLE).unwrap();
-        let providers = providers(&cat, &|_| false);
+        let providers = providers(&cat, &|_| false, &BTreeMap::new());
         let models = models(&cat);
         assert_eq!(providers.len(), 2);
         assert_eq!(models.len(), 2);
@@ -639,20 +668,21 @@ mod tests {
     }
 
     #[test]
-    fn enabled_from_env_picks_first_present_var() {
+    fn provider_enabled_picks_first_present_env_var() {
         let cat = parse_catalog(
             r#"{ "p": { "id": "p", "name": "P", "env": ["FIRST_KEY", "SECOND_KEY"], "models": {} } }"#,
         )
         .unwrap();
         let provider = &cat["p"];
+        let no_creds = BTreeMap::new();
         // None set → disabled.
         assert_eq!(
-            enabled_from_env(provider, &|_| false),
+            provider_enabled(provider, &|_| false, &no_creds),
             ProviderEnabled::Disabled(false)
         );
         // Only the second set → that one wins.
         assert_eq!(
-            enabled_from_env(provider, &|n| n == "SECOND_KEY"),
+            provider_enabled(provider, &|n| n == "SECOND_KEY", &no_creds),
             ProviderEnabled::Env {
                 via: "env".to_string(),
                 name: "SECOND_KEY".to_string(),
@@ -660,7 +690,7 @@ mod tests {
         );
         // Both set → the first in the list wins.
         assert_eq!(
-            enabled_from_env(provider, &|_| true),
+            provider_enabled(provider, &|_| true, &no_creds),
             ProviderEnabled::Env {
                 via: "env".to_string(),
                 name: "FIRST_KEY".to_string(),
@@ -669,12 +699,39 @@ mod tests {
     }
 
     #[test]
+    fn provider_enabled_prefers_credential_over_env() {
+        let cat =
+            parse_catalog(r#"{ "p": { "id": "p", "name": "P", "env": ["KEY"], "models": {} } }"#)
+                .unwrap();
+        let provider = &cat["p"];
+        let creds = BTreeMap::from([("p".to_string(), "cred_1".to_string())]);
+        // A stored credential wins even when the env var is also set.
+        assert_eq!(
+            provider_enabled(provider, &|_| true, &creds),
+            ProviderEnabled::Credential {
+                via: "credential".to_string(),
+                credential_id: "cred_1".to_string(),
+            }
+        );
+        // A credential for a *different* provider doesn't apply → falls back to env.
+        let other = BTreeMap::from([("q".to_string(), "cred_2".to_string())]);
+        assert_eq!(
+            provider_enabled(provider, &|_| true, &other),
+            ProviderEnabled::Env {
+                via: "env".to_string(),
+                name: "KEY".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn available_filters_to_env_enabled_providers_and_models() {
         let cat = parse_catalog(SAMPLE).unwrap(); // anthropic (env ANTHROPIC_API_KEY) + local (env [])
         let has_anthropic_key = |n: &str| n == "ANTHROPIC_API_KEY";
+        let no_creds = BTreeMap::new();
 
         // Provider list: only anthropic is env-enabled; local (no env) is filtered out.
-        let providers = available_providers(&cat, &has_anthropic_key);
+        let providers = available_providers(&cat, &has_anthropic_key, &no_creds);
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "anthropic");
         assert_eq!(
@@ -686,13 +743,34 @@ mod tests {
         );
 
         // Model list: only anthropic's model (local's "tiny" excluded — provider disabled).
-        let models = available_models(&cat, &has_anthropic_key);
+        let models = available_models(&cat, &has_anthropic_key, &no_creds);
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "claude-sonnet-4-6");
 
         // Nothing enabled → both lists empty.
-        assert!(available_providers(&cat, &|_| false).is_empty());
-        assert!(available_models(&cat, &|_| false).is_empty());
+        assert!(available_providers(&cat, &|_| false, &no_creds).is_empty());
+        assert!(available_models(&cat, &|_| false, &no_creds).is_empty());
+    }
+
+    #[test]
+    fn available_includes_credential_enabled_providers_without_env() {
+        // anthropic (env ANTHROPIC_API_KEY) + local (env []); a stored credential for anthropic
+        // enables it even with no env var set.
+        let cat = parse_catalog(SAMPLE).unwrap();
+        let creds = BTreeMap::from([("anthropic".to_string(), "cred_1".to_string())]);
+        let providers = available_providers(&cat, &|_| false, &creds);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "anthropic");
+        assert_eq!(
+            providers[0].enabled,
+            ProviderEnabled::Credential {
+                via: "credential".to_string(),
+                credential_id: "cred_1".to_string(),
+            }
+        );
+        let models = available_models(&cat, &|_| false, &creds);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-sonnet-4-6");
     }
 
     #[test]
@@ -706,7 +784,7 @@ mod tests {
             } } }"#,
         )
         .unwrap();
-        let models = available_models(&cat, &|_| true);
+        let models = available_models(&cat, &|_| true, &BTreeMap::new());
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "new"); // newest first
         assert_eq!(models[1].id, "old");

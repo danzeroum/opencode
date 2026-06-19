@@ -1588,11 +1588,28 @@ fn env_present(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
 
+/// Build the `providerID → credentialID` map the catalog enabling consults (credential precedence over
+/// env). Best-effort: a credential-store read failure degrades to env-only gating (logged), so the
+/// catalog routes keep serving. Newest credential per integration wins (rows are oldest-first, so later
+/// entries overwrite — matching the TS `active` map).
+async fn credential_map(state: &ServerState) -> std::collections::BTreeMap<String, String> {
+    match state.ctx.credentials().all().await {
+        Ok(creds) => creds
+            .into_iter()
+            .map(|c| (c.integration_id, c.id))
+            .collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "credential read failed; falling back to env-only gating");
+            std::collections::BTreeMap::new()
+        }
+    }
+}
+
 /// `GET /api/model` — list models (group `model`). Matches the golden `v2.model.list`: 200
 /// `{ location, data }` + 400/401/503. Returns the `available()` models from the in-memory models.dev
 /// catalog ([`opencode_effect::AppContext::catalog`]) via [`opencode_core::catalog_v2`] — models of
-/// env-enabled providers (an `env` key set), ordered by release date (newest first, mirroring the TS).
-/// Stored-credential enabling (beyond env) is a documented follow-up.
+/// enabled providers (a stored credential, or an `env` key set), ordered by release date (newest first,
+/// mirroring the TS).
 #[utoipa::path(
     get,
     path = "/api/model",
@@ -1611,15 +1628,16 @@ async fn v2_model_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::ModelListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
+    let credentials = credential_map(&state).await;
     let catalog = state.ctx.catalog();
-    let data = opencode_core::catalog_v2::available_models(&catalog, &env_present);
+    let data = opencode_core::catalog_v2::available_models(&catalog, &env_present, &credentials);
     Ok(Json(opencode_proto::ModelListResponse { location, data }))
 }
 
 /// `GET /api/provider` — list providers (group `provider`). Matches the golden `v2.provider.list`: 200
 /// `{ location, data }` + 400/401/503. Returns the `available()` providers from the in-memory catalog
-/// via [`opencode_core::catalog_v2`] — those with an `env` key set, `enabled` as `{ via: "env", name }`.
-/// Stored-credential enabling is a documented follow-up.
+/// via [`opencode_core::catalog_v2`] — those enabled by a stored credential (`{ via: "credential" }`,
+/// precedence) or a set `env` key (`{ via: "env", name }`).
 #[utoipa::path(
     get,
     path = "/api/provider",
@@ -1638,8 +1656,9 @@ async fn v2_provider_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::ProviderListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
+    let credentials = credential_map(&state).await;
     let catalog = state.ctx.catalog();
-    let data = opencode_core::catalog_v2::available_providers(&catalog, &env_present);
+    let data = opencode_core::catalog_v2::available_providers(&catalog, &env_present, &credentials);
     Ok(Json(opencode_proto::ProviderListResponse {
         location,
         data,
@@ -1747,11 +1766,12 @@ async fn v2_provider_get(
             opencode_effect::AppError::BadRequest(m) => ProviderGetError::BadRequest(m),
             other => ProviderGetError::Internal(other.to_string()),
         })?;
+    let credentials = credential_map(&state).await;
     let catalog = state.ctx.catalog();
     let provider = catalog
         .get(&provider_id)
         .ok_or_else(|| ProviderGetError::NotFound(provider_id.clone()))?;
-    let data = opencode_core::catalog_v2::provider_info(provider, &env_present);
+    let data = opencode_core::catalog_v2::provider_info(provider, &env_present, &credentials);
     Ok(Json(opencode_proto::ProviderGetResponse { location, data }))
 }
 
@@ -3178,6 +3198,51 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["_tag"], "ProviderNotFoundError");
         assert_eq!(v["providerID"], "ghost");
+    }
+
+    #[tokio::test]
+    async fn v2_provider_list_includes_credential_enabled_providers() {
+        use tower::ServiceExt;
+        // A stored credential enables `anthropic` via the credential store — no env var involved.
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1"));
+        let credentials = Arc::new(opencode_db::MemoryCredentialStore::new());
+        credentials.insert(opencode_db::CredentialRecord {
+            id: "cred_1".to_string(),
+            integration_id: "anthropic".to_string(),
+            label: "default".to_string(),
+            value: serde_json::json!({ "type": "key", "key": "sk-x" }),
+        });
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                catalog: opencode_effect::catalog_handle(sample_catalog()),
+                projects,
+                credentials,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("provider"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/provider?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Credential precedence: enabled is `{ via: "credential", credentialID }` regardless of env.
+        assert_eq!(v["data"][0]["id"], "anthropic");
+        assert_eq!(v["data"][0]["enabled"]["via"], "credential");
+        assert_eq!(v["data"][0]["enabled"]["credentialID"], "cred_1");
     }
 
     // ---- Phase 4: the internal session-execute proving route (engine factory injected) ----
