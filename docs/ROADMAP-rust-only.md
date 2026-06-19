@@ -2,7 +2,9 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-19 · **Foco atual:** fatias enxutas esgotadas; restam **épicos** (ver "Estado & próximos épicos" no fim).
+> **Última atualização:** 2026-06-19 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente); restam **épicos** (ver "Estado & próximos épicos").
+>
+> **Rotas nativas contrato-enforçadas: 23** · PRs desta rodada autônoma: #69–#78.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -77,7 +79,7 @@
 
 ## Estado & próximos épicos (para a próxima sessão)
 
-**Feito nesta rodada autônoma (mergeado):** #69 tipos, #70 store, #71 rota `messages`, #72 docs, #73 `session.todo`, #74 `dispose`. As **fatias enxutas** (read store + rota sobre tabela existente) estão **esgotadas**.
+**Feito nesta rodada autônoma (mergeado):** #69 tipos, #70 store, #71 rota `messages`, #72 docs, #73 `session.todo`, #74 `dispose`, #76 `file.list`, #77 `permission.list`+`question.list`, #78 `vcs.get`. As **fatias enxutas** (read sobre dado existente) estão **cobertas**. Restantes precisam de: type-modeling grande (Config/agents), escrita+coexistência (auth), subsistema greenfield (mcp/lsp), ou a engine de execução (mutações/status/diff).
 
 O que resta são **épicos** — cada um é multi-fatia e merece uma sessão focada com contexto cheio. Sequência recomendada (maior valor primeiro):
 
