@@ -2120,6 +2120,8 @@ async fn v2_provider_get(
         v2_session_messages,
         v2_session_prompt,
         session_todo,
+        global_dispose,
+        instance_dispose,
         project_list,
         project_current,
         v2_event_subscribe,
@@ -2263,6 +2265,41 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
+/// `POST /global/dispose` — dispose the global runtime (group `global`). Matches the golden
+/// `global.dispose`: 200 `boolean`, 400 `BadRequestError`. The Rust server holds no per-call global
+/// state to tear down (DB pool + buses are process-scoped), so this acknowledges the lifecycle hook
+/// with `true`.
+#[utoipa::path(
+    post,
+    path = "/global/dispose",
+    operation_id = "global.dispose",
+    responses(
+        (status = 200, description = "Global disposed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "global"
+)]
+async fn global_dispose() -> Json<bool> {
+    Json(true)
+}
+
+/// `POST /instance/dispose` — dispose the instance (group `instance`). Matches the golden
+/// `instance.dispose`: 200 `boolean`, 400 `BadRequestError`. As with `global.dispose`, the Rust server
+/// has no per-call instance to dispose, so it acknowledges with `true`.
+#[utoipa::path(
+    post,
+    path = "/instance/dispose",
+    operation_id = "instance.dispose",
+    responses(
+        (status = 200, description = "Instance disposed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn instance_dispose() -> Json<bool> {
+    Json(true)
+}
+
 /// Build the axum router: always-native liveness + cut-over contract routes + proxy fallback.
 pub fn build_router(state: ServerState) -> Router {
     let mut router = Router::new()
@@ -2277,10 +2314,12 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
+        router = router.route("/global/dispose", post(global_dispose));
     }
     if state.routes.handles("instance") {
         router = router.route("/path", get(path_get));
         router = router.route("/session/{sessionID}/abort", post(session_abort));
+        router = router.route("/instance/dispose", post(instance_dispose));
     }
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
@@ -3066,6 +3105,39 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["name"], "NotFoundError");
         assert_eq!(v["data"]["message"], "Session not found: ses_missing");
+    }
+
+    #[tokio::test]
+    async fn dispose_routes_acknowledge_with_true() {
+        use tower::ServiceExt;
+        for (group, uri) in [
+            ("global", "/global/dispose"),
+            ("instance", "/instance/dispose"),
+        ] {
+            let state = ServerState {
+                ctx: AppContext::in_memory(),
+                routes: RouteTable::parse(group),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v, serde_json::json!(true), "{uri}");
+        }
     }
 
     #[tokio::test]
