@@ -175,6 +175,7 @@ async fn build_app_context(db_path: &Path, catalog: CatalogHandle) -> anyhow::Re
         event_store: db.event_store(),
         sessions: db.session_store(),
         projects: db.project_store(),
+        credentials: db.credential_store(),
         catalog,
         ..Default::default()
     }))
