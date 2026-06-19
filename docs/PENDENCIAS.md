@@ -30,5 +30,13 @@ A web dispara LLM real via `session.prompt`. Há 5 protocolos nativos (anthropic
 - **Decisão necessária:** quais providers você realmente vai usar? Isso define o quanto precisamos portar/cobrir nativamente antes do cutover.
 - **Status:** sigo com o write-path usando os protocolos nativos existentes; cobertura ampla fica para a Fase 4.
 
+### #6 — Write-path do runner (épico — o linchpin do chat real)
+A rota `v2.session.messages` lê `session_message`, mas **nada grava ali ainda**: o runner Phase 4 é spike puro (sem persistência). Para o chat funcionar de verdade, falta o caminho de escrita:
+1. Runner executa o turno e **emite eventos de sessão** no event store (existe).
+2. **Projector** (porta `packages/core/src/session/projector.ts`, ~451 linhas) faz o fold dos eventos → linhas em `session_message` (+ `message`/`part`).
+- **Tamanho:** grande, multi-fatia. É efetivamente o coração da engine de execução.
+- **Plano:** vou portar incrementalmente (começando por user + assistant message events, que é o que o chat precisa) quando as leituras tratáveis estiverem cobertas. Não bloqueia as demais rotas.
+- **Status:** épico aberto; priorizando leituras/rotas independentes primeiro para maximizar progresso mergeado.
+
 ## Resolvidas
 (nenhuma ainda)

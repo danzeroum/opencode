@@ -12,7 +12,9 @@ pub mod metrics;
 use std::sync::{Arc, RwLock};
 
 use opencode_config::catalog::Catalog;
-use opencode_db::{CredentialStore, EventStore, ProjectStore, SessionMessageStore, SessionStore};
+use opencode_db::{
+    CredentialStore, EventStore, ProjectStore, SessionMessageStore, SessionStore, TodoStore,
+};
 
 pub use bus::{BusEvent, EventBus};
 pub use metrics::{AppMetrics, MetricsSnapshot};
@@ -85,6 +87,8 @@ pub struct AppServices {
     pub credentials: Arc<dyn CredentialStore>,
     /// `session_message` timeline read store.
     pub session_messages: Arc<dyn SessionMessageStore>,
+    /// `todo` read store (per-session todo lists).
+    pub todos: Arc<dyn TodoStore>,
     /// In-process event bus (global stream + per-aggregate watch).
     pub event_bus: Arc<EventBus>,
     /// In-process runner metrics (counters + turn-latency percentiles).
@@ -102,6 +106,7 @@ impl Default for AppServices {
             projects: Arc::new(opencode_db::MemoryProjectStore::new()),
             credentials: Arc::new(opencode_db::MemoryCredentialStore::new()),
             session_messages: Arc::new(opencode_db::MemorySessionMessageStore::new()),
+            todos: Arc::new(opencode_db::MemoryTodoStore::new()),
             event_bus: Arc::new(EventBus::new()),
             metrics: Arc::new(AppMetrics::default()),
             catalog: catalog_handle(Catalog::default()),
@@ -151,6 +156,11 @@ impl AppContext {
     /// The wired `session_message` timeline read store.
     pub fn session_messages(&self) -> &Arc<dyn SessionMessageStore> {
         &self.inner.session_messages
+    }
+
+    /// The wired `todo` read store.
+    pub fn todos(&self) -> &Arc<dyn TodoStore> {
+        &self.inner.todos
     }
 
     /// The in-process event bus.

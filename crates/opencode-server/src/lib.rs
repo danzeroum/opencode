@@ -1664,6 +1664,86 @@ async fn v2_session_messages(
     }))
 }
 
+/// Error responder for `session.todo`: 404 `NotFoundError` (no such session) or a generic 500 (a store
+/// failure; not a declared response, but axum needs a body). The declared 400 union is never produced
+/// at runtime (the route takes no body/params), matching how the golden declares but rarely returns it.
+pub enum TodoFailure {
+    /// No such session (404 `NotFoundError`).
+    NotFound(String),
+    /// Store read failed (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for TodoFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            TodoFailure::NotFound(session_id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::NotFoundError {
+                    name: "NotFoundError".to_string(),
+                    data: opencode_proto::NotFoundData {
+                        message: format!("Session not found: {session_id}"),
+                    },
+                }),
+            )
+                .into_response(),
+            TodoFailure::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /session/{sessionID}/todo` — a session's todo list (group `session`). Matches the golden
+/// `session.todo`: 200 `[Todo]`, 400 union, 404 `NotFoundError`. Reads the `todo` table ordered by
+/// position; 404s an unknown session.
+#[utoipa::path(
+    get,
+    path = "/session/{sessionID}/todo",
+    operation_id = "session.todo",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Todo list", body = Vec<opencode_proto::Todo>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_todo(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<opencode_proto::Todo>>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    let todos = state
+        .ctx
+        .todos()
+        .list(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .into_iter()
+        .map(|t| opencode_proto::Todo {
+            content: t.content,
+            status: t.status,
+            priority: t.priority,
+        })
+        .collect();
+    Ok(Json(todos))
+}
+
 /// Map a `project` projection row to the `Project` wire shape (the `icon_*` columns fold into one
 /// `icon` object; `commands`/`sandboxes` come from JSON columns).
 fn project_record_to_info(r: opencode_db::ProjectRecord) -> opencode_proto::Project {
@@ -2039,6 +2119,7 @@ async fn v2_provider_get(
         v2_session_list,
         v2_session_messages,
         v2_session_prompt,
+        session_todo,
         project_list,
         project_current,
         v2_event_subscribe,
@@ -2122,7 +2203,10 @@ async fn v2_provider_get(
         opencode_proto::MessageTime,
         opencode_proto::MessageTimeCompleted,
         opencode_proto::ToolTime,
-        opencode_proto::UnknownError
+        opencode_proto::UnknownError,
+        opencode_proto::Todo,
+        opencode_proto::NotFoundError,
+        opencode_proto::NotFoundData
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -2210,6 +2294,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
         router = router.route("/api/session/{sessionID}/message", get(v2_session_messages));
         router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
+        router = router.route("/session/{sessionID}/todo", get(session_todo));
     }
     if state.routes.handles("event") {
         router = router.route("/api/event", get(v2_event_subscribe));
@@ -2899,6 +2984,88 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["_tag"], "InvalidCursorError");
+    }
+
+    #[tokio::test]
+    async fn session_todo_returns_ordered_list() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let todos = Arc::new(opencode_db::MemoryTodoStore::new());
+        todos.insert(
+            "ses_1",
+            opencode_db::TodoRecord {
+                content: "second".into(),
+                status: "pending".into(),
+                priority: "low".into(),
+                position: 1,
+            },
+        );
+        todos.insert(
+            "ses_1",
+            opencode_db::TodoRecord {
+                content: "first".into(),
+                status: "completed".into(),
+                priority: "high".into(),
+                position: 0,
+            },
+        );
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                todos,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/session/ses_1/todo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v[0]["content"], "first");
+        assert_eq!(v[0]["status"], "completed");
+        assert_eq!(v[1]["content"], "second");
+    }
+
+    #[tokio::test]
+    async fn session_todo_missing_session_is_404_not_found() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/session/ses_missing/todo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["name"], "NotFoundError");
+        assert_eq!(v["data"]["message"], "Session not found: ses_missing");
     }
 
     #[tokio::test]

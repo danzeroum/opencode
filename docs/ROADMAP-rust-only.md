@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-19 · **Foco atual:** Fase 1 — write-path do runner (persistência de `session_message`).
+> **Última atualização:** 2026-06-19 · **Foco atual:** Fase 1 — leituras tratáveis (todo ✅); write-path do runner é épico (ver PENDENCIAS #6).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -35,7 +35,7 @@
 - ⏳ 1i — `session.diff`
 - ⏳ 1j — `session.status`
 - ⏳ 1k — `session.summarize`
-- ⏳ 1l — `session.todo`
+- ✅ 1l — `session.todo` (read store `todo` + rota `GET /session/{id}/todo`) — **#73**
 - ⏳ 1m — `permission.list` / `permission.respond`
 - ⏳ 1n — `question.list` / `question.reply` / `question.reject`
 
