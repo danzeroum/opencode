@@ -206,6 +206,91 @@ pub struct FileNode {
     pub ignored: bool,
 }
 
+/// The tool call a [`PermissionRequest`] is gating (`{ messageID, callID }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionRequestTool {
+    /// Message id of the call.
+    #[serde(rename = "messageID")]
+    pub message_id: String,
+    /// Tool call id.
+    #[serde(rename = "callID")]
+    pub call_id: String,
+}
+
+/// A pending permission request (`permission.list`) — a tool call awaiting allow/deny.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionRequest {
+    /// Request id (`per_…`).
+    pub id: String,
+    /// Owning session (`ses_…`).
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// The permission being requested (e.g. `bash`).
+    pub permission: String,
+    /// Resource patterns the decision applies to.
+    pub patterns: Vec<String>,
+    /// Free-form metadata.
+    #[schema(value_type = Object)]
+    pub metadata: serde_json::Value,
+    /// Patterns the user can choose to always-allow.
+    pub always: Vec<String>,
+    /// The gated tool call, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<PermissionRequestTool>,
+}
+
+/// One choice for a [`QuestionInfo`] (`{ label, description }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionOption {
+    /// Display text (1–5 words).
+    pub label: String,
+    /// Explanation of the choice.
+    pub description: String,
+}
+
+/// A single question in a [`QuestionRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionInfo {
+    /// The complete question.
+    pub question: String,
+    /// A very short label (≤ 30 chars).
+    pub header: String,
+    /// Available choices.
+    pub options: Vec<QuestionOption>,
+    /// Whether multiple options may be selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
+    /// Whether a custom (free-text) answer is allowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom: Option<bool>,
+}
+
+/// The tool call a [`QuestionRequest`] originates from (`{ messageID, callID }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionTool {
+    /// Message id (`msg_…`).
+    #[serde(rename = "messageID")]
+    pub message_id: String,
+    /// Tool call id.
+    #[serde(rename = "callID")]
+    pub call_id: String,
+}
+
+/// A pending question request (`question.list`) — a tool asking the user to choose.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionRequest {
+    /// Request id (`que_…`).
+    pub id: String,
+    /// Owning session (`ses_…`).
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// The questions to ask.
+    pub questions: Vec<QuestionInfo>,
+    /// The originating tool call, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<QuestionTool>,
+}
+
 // ---------------------------------------------------------------------------
 // V2 session read contract (`v2.session.get` — GET /api/session/{sessionID}).
 // SessionV2Info mirrors `packages/core/src/session/schema.ts`; the projection mapping it comes from

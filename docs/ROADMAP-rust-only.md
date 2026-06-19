@@ -40,8 +40,8 @@
 - ✅ 1r — `file.list` (`GET /file`, listagem de diretório com flag gitignore) — **#76**
 - ⏳ 1p — `session.status` / `session.diff` — **dependem da engine de execução** (estado live / snapshots), não enxutas
 - ⏳ 1q — `session.update` / `revert` / `share` / `command` / `summarize` — **dependem do write-path** (PENDENCIAS #6)
-- ⏳ 1m — `permission.list` / `permission.respond`
-- ⏳ 1n — `question.list` / `question.reply` / `question.reject`
+- 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `permission.respond` ⏳ (precisa engine)
+- 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)
 
 ## Fase 2 — Admin
 - ⏳ 2a — `config.get` / `config.update`
