@@ -2122,6 +2122,7 @@ async fn v2_provider_get(
         session_todo,
         global_dispose,
         instance_dispose,
+        file_list,
         project_list,
         project_current,
         v2_event_subscribe,
@@ -2208,7 +2209,8 @@ async fn v2_provider_get(
         opencode_proto::UnknownError,
         opencode_proto::Todo,
         opencode_proto::NotFoundError,
-        opencode_proto::NotFoundData
+        opencode_proto::NotFoundData,
+        opencode_proto::FileNode
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -2263,6 +2265,65 @@ impl axum::response::IntoResponse for ApiError {
             .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(body)).into_response()
     }
+}
+
+/// `GET /file` — list a directory's immediate entries (group `file`). Matches the golden `file.list`:
+/// 200 `[FileNode]`, 400 `BadRequestError`. Lists `directory`/`path` via `opencode_tools`, flagging
+/// gitignored entries; `path` defaults to the directory root, `directory` to the server cwd.
+#[utoipa::path(
+    get,
+    path = "/file",
+    operation_id = "file.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Base directory (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id"),
+        ("path" = Option<String>, Query, description = "Subpath within the directory to list")
+    ),
+    responses(
+        (status = 200, description = "Files and directories", body = Vec<opencode_proto::FileNode>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "file"
+)]
+async fn file_list(
+    State(_state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<opencode_proto::FileNode>>, ApiBadRequest> {
+    let base = params
+        .get("directory")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        });
+    let base = std::path::PathBuf::from(base);
+    let sub = params.get("path").filter(|s| !s.is_empty()).cloned();
+    let target = match &sub {
+        Some(p) => base.join(p),
+        None => base.clone(),
+    };
+    let nodes = opencode_tools::files::list_dir_nodes(&target)
+        .map_err(|e| bad_request(format!("cannot list directory: {e}"), "Path"))?;
+    let data = nodes
+        .into_iter()
+        .map(|n| {
+            let rel = match &sub {
+                Some(p) => format!("{}/{}", p.trim_end_matches('/'), n.name),
+                None => n.name.clone(),
+            };
+            let absolute = target.join(&n.name).display().to_string();
+            opencode_proto::FileNode {
+                name: n.name,
+                path: rel,
+                absolute,
+                kind: if n.is_dir { "directory" } else { "file" }.to_string(),
+                ignored: n.ignored,
+            }
+        })
+        .collect();
+    Ok(Json(data))
 }
 
 /// `POST /global/dispose` — dispose the global runtime (group `global`). Matches the golden
@@ -2324,6 +2385,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
         router = router.route("/find", get(find_text));
+        router = router.route("/file", get(file_list));
     }
     if state.routes.handles("control") {
         router = router.route("/log", post(app_log));
@@ -3105,6 +3167,53 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["name"], "NotFoundError");
         assert_eq!(v["data"]["message"], "Session not found: ses_missing");
+    }
+
+    #[tokio::test]
+    async fn file_list_returns_directory_entries() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("file"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let uri = format!("/file?directory={}", dir.path().display());
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let names: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"a.txt"));
+        assert!(names.contains(&"sub"));
+        // The directory entry is typed accordingly.
+        let sub = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "sub")
+            .unwrap();
+        assert_eq!(sub["type"], "directory");
+        assert_eq!(sub["ignored"], false);
     }
 
     #[tokio::test]
