@@ -11,6 +11,7 @@ pub mod credential;
 pub mod migration;
 pub mod project;
 pub mod session;
+pub mod session_message;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -33,6 +34,10 @@ pub use session::{
     ListAnchor, ListDirection, MemorySessionStore, SessionContextEpoch, SessionContextEpochRepo,
     SessionInput, SessionInputRepo, SessionListQuery, SessionRecord, SessionStore,
     SqlxSessionStore, SESSION_CONTEXT_EPOCH_DDL, SESSION_INPUT_DDL,
+};
+pub use session_message::{
+    MemorySessionMessageStore, MessageOrder, SessionMessageRow, SessionMessageStore,
+    SqlxSessionMessageStore, SESSION_MESSAGE_DDL,
 };
 
 /// Database / event-store errors.
@@ -246,6 +251,11 @@ impl Database {
     /// A [`CredentialStore`] (read model over the `credential` table), backed by the shared pool.
     pub fn credential_store(&self) -> Arc<dyn CredentialStore> {
         Arc::new(SqlxCredentialStore::new(self.pool.clone()))
+    }
+
+    /// A [`SessionMessageStore`] (read model over the `session_message` timeline), backed by the pool.
+    pub fn session_message_store(&self) -> Arc<dyn SessionMessageStore> {
+        Arc::new(SqlxSessionMessageStore::new(self.pool.clone()))
     }
 
     /// The `session_input` repository, backed by the shared pool.
