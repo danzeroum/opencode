@@ -38,6 +38,8 @@
 - ✅ 1l — `session.todo` (read store `todo` + rota `GET /session/{id}/todo`) — **#73**
 - ✅ 1o — `global.dispose` + `instance.dispose` (lifecycle ack, 200 `true`) — **#74**
 - ✅ 1r — `file.list` (`GET /file`, listagem de diretório com flag gitignore) — **#76**
+- ✅ 1s — `permission.list` + `question.list` (vazios até a engine) — **#77**
+- ✅ 1t — `vcs.get` (`GET /vcs`, branch/default_branch via git best-effort) — **#78**
 - ⏳ 1p — `session.status` / `session.diff` — **dependem da engine de execução** (estado live / snapshots), não enxutas
 - ⏳ 1q — `session.update` / `revert` / `share` / `command` / `summarize` — **dependem do write-path** (PENDENCIAS #6)
 - 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `permission.respond` ⏳ (precisa engine)

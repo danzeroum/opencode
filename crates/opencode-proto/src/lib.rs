@@ -206,6 +206,17 @@ pub struct FileNode {
     pub ignored: bool,
 }
 
+/// Version-control info for a directory (`vcs.get`): `{ branch?, default_branch? }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VcsInfo {
+    /// Current branch (omitted when detached or not a repo).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The repository's default branch, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+}
+
 /// The tool call a [`PermissionRequest`] is gating (`{ messageID, callID }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PermissionRequestTool {
