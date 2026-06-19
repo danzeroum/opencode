@@ -2123,6 +2123,8 @@ async fn v2_provider_get(
         global_dispose,
         instance_dispose,
         file_list,
+        permission_list,
+        question_list,
         project_list,
         project_current,
         v2_event_subscribe,
@@ -2210,7 +2212,13 @@ async fn v2_provider_get(
         opencode_proto::Todo,
         opencode_proto::NotFoundError,
         opencode_proto::NotFoundData,
-        opencode_proto::FileNode
+        opencode_proto::FileNode,
+        opencode_proto::PermissionRequest,
+        opencode_proto::PermissionRequestTool,
+        opencode_proto::QuestionRequest,
+        opencode_proto::QuestionInfo,
+        opencode_proto::QuestionOption,
+        opencode_proto::QuestionTool
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -2326,6 +2334,52 @@ async fn file_list(
     Ok(Json(data))
 }
 
+/// `GET /permission` — pending permission requests (group `permission`). Matches the golden
+/// `permission.list`: 200 `[PermissionRequest]`, 400 `BadRequestError`. Pending requests are ephemeral
+/// execution state; until the native runner produces them this is empty (no in-flight approvals).
+#[utoipa::path(
+    get,
+    path = "/permission",
+    operation_id = "permission.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "List of pending permissions", body = Vec<opencode_proto::PermissionRequest>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "permission"
+)]
+async fn permission_list(
+    State(_state): State<ServerState>,
+) -> Json<Vec<opencode_proto::PermissionRequest>> {
+    Json(Vec::new())
+}
+
+/// `GET /question` — pending question requests (group `question`). Matches the golden `question.list`:
+/// 200 `[QuestionRequest]`, 400 `BadRequestError`. Like permissions, pending questions are ephemeral
+/// execution state; empty until the native runner produces them.
+#[utoipa::path(
+    get,
+    path = "/question",
+    operation_id = "question.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "List of pending questions", body = Vec<opencode_proto::QuestionRequest>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "question"
+)]
+async fn question_list(
+    State(_state): State<ServerState>,
+) -> Json<Vec<opencode_proto::QuestionRequest>> {
+    Json(Vec::new())
+}
+
 /// `POST /global/dispose` — dispose the global runtime (group `global`). Matches the golden
 /// `global.dispose`: 200 `boolean`, 400 `BadRequestError`. The Rust server holds no per-call global
 /// state to tear down (DB pool + buses are process-scoped), so this acknowledges the lifecycle hook
@@ -2389,6 +2443,12 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("control") {
         router = router.route("/log", post(app_log));
+    }
+    if state.routes.handles("permission") {
+        router = router.route("/permission", get(permission_list));
+    }
+    if state.routes.handles("question") {
+        router = router.route("/question", get(question_list));
     }
     if state.routes.handles("session") {
         router = router.route("/api/session", get(v2_session_list));
@@ -3167,6 +3227,35 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["name"], "NotFoundError");
         assert_eq!(v["data"]["message"], "Session not found: ses_missing");
+    }
+
+    #[tokio::test]
+    async fn permission_and_question_lists_are_empty_when_idle() {
+        use tower::ServiceExt;
+        for (group, uri) in [("permission", "/permission"), ("question", "/question")] {
+            let state = ServerState {
+                ctx: AppContext::in_memory(),
+                routes: RouteTable::parse(group),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v, serde_json::json!([]), "{uri}");
+        }
     }
 
     #[tokio::test]
