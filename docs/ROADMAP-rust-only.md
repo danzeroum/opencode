@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-19 · **Foco atual:** Fase 1 — leituras tratáveis (todo ✅); write-path do runner é épico (ver PENDENCIAS #6).
+> **Última atualização:** 2026-06-19 · **Foco atual:** fatias enxutas esgotadas; restam **épicos** (ver "Estado & próximos épicos" no fim).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -69,3 +69,25 @@
 
 ## Frontend (parallel track — não é "backend Rust")
 - ⏳ Recriar o design handoff (`docs/design_handoff_opencode_web`) em SolidJS. Track separado; ver PENDENCIAS #3.
+
+---
+
+## Estado & próximos épicos (para a próxima sessão)
+
+**Feito nesta rodada autônoma (mergeado):** #69 tipos, #70 store, #71 rota `messages`, #72 docs, #73 `session.todo`, #74 `dispose`. As **fatias enxutas** (read store + rota sobre tabela existente) estão **esgotadas**.
+
+O que resta são **épicos** — cada um é multi-fatia e merece uma sessão focada com contexto cheio. Sequência recomendada (maior valor primeiro):
+
+1. **Write-path / projector** (PENDENCIAS #6) — *linchpin do chat real*. Plano de fatias:
+   - 1a. Portar `projector.ts` como **função pura** em `opencode-core` (eventos → linhas `session_message`), com testes — **contrato-neutro, mergeável sozinho**. Começar pelo subconjunto user+assistant message.
+   - 1b. Runner emite eventos de sessão no event store durante a execução do turno.
+   - 1c. Ligar projector ao stream de eventos → grava `session_message` (+ `message`/`part`).
+   - Resultado: `messages` passa a retornar dados reais → **chat funciona**.
+2. **Config** (Fase 2a/2b) — modelar o tipo `Config` (35 props de topo, ~19 tipos no closure) + `config.get`/`update`. Grande, mas tratável (sem engine). Proveniência (cascata) depende de PENDENCIAS #1.
+3. **agents/commands** — `app.agents`/`command.list` (parse de `.opencode/*.md` + defaults) e escrita (PENDENCIAS #2).
+4. **Mutações de sessão** (`update/revert/share/command/summarize`) — dependem do write-path (épico 1).
+5. **`session.status`/`diff`** — dependem do estado de execução / snapshots.
+6. **Extensões** (Fase 3) — plugin host + MCP `rmcp` + integrações (greenfield, grande).
+7. **Cutover** (Fase 4) — schema-apply (PENDENCIAS #4), cobertura de providers (#5), remover proxy, deletar TS.
+
+**Nota de integridade:** não meio-implemento épicos para "parecer pronto" — um projector que compila mas não bate o comportamento do TS seria pior que não-feito. Cada épico será portado fielmente e testado.
