@@ -86,6 +86,25 @@ pub trait SessionMessageStore: Send + Sync {
         order: MessageOrder,
         limit: Option<i64>,
     ) -> Result<Vec<SessionMessageRow>, DbError>;
+
+    /// Append a timeline row, assigning the next per-session `seq` (max + 1). Returns the assigned seq.
+    /// `kind` is the `SessionMessage` `type`; `data` is the encoding minus `id` + `type`. The native
+    /// write path (the runner projecting a finished turn) uses this; TS still owns its own projector.
+    async fn append(
+        &self,
+        session_id: &str,
+        id: &str,
+        kind: &str,
+        data: Value,
+    ) -> Result<i64, DbError>;
+}
+
+/// Wall-clock milliseconds since the epoch (the `time_created`/`time_updated` columns).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// SQLite-backed [`SessionMessageStore`] over the shared pool.
@@ -151,6 +170,40 @@ impl SessionMessageStore for SqlxSessionMessageStore {
         let rows = query.fetch_all(&self.pool).await?;
         rows.iter().map(record_from_row).collect()
     }
+
+    async fn append(
+        &self,
+        session_id: &str,
+        id: &str,
+        kind: &str,
+        data: Value,
+    ) -> Result<i64, DbError> {
+        // One drain task writes a session at a time, but use a transaction so the seq read + insert is
+        // atomic against any concurrent writer (the unique `(session_id, seq)` index is the backstop).
+        let mut tx = self.pool.begin().await?;
+        let next: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_message WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(session_id)
+        .bind(kind)
+        .bind(next)
+        .bind(now)
+        .bind(now)
+        .bind(data.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(next)
+    }
 }
 
 /// In-memory [`SessionMessageStore`] — test double / the backing for `AppServices::default()`.
@@ -212,6 +265,34 @@ impl SessionMessageStore for MemorySessionMessageStore {
             rows.truncate(l.max(0) as usize);
         }
         Ok(rows)
+    }
+
+    async fn append(
+        &self,
+        session_id: &str,
+        id: &str,
+        kind: &str,
+        data: Value,
+    ) -> Result<i64, DbError> {
+        let mut rows = self
+            .rows
+            .lock()
+            .expect("session_message store mutex poisoned");
+        let next = rows
+            .iter()
+            .filter(|r| r.session_id == session_id)
+            .map(|r| r.seq)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        rows.push(SessionMessageRow {
+            id: id.to_string(),
+            session_id: session_id.to_string(),
+            kind: kind.to_string(),
+            seq: next,
+            data,
+        });
+        Ok(next)
     }
 }
 
@@ -340,5 +421,72 @@ mod tests {
             ["msg_b", "msg_c"]
         );
         assert_eq!(store.seq_of("ses_1", "msg_b").await.unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn sqlx_append_assigns_monotonic_seq_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("append.db"))
+            .await
+            .unwrap();
+        sqlx::query(SESSION_MESSAGE_DDL)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let store = SqlxSessionMessageStore::new(db.pool().clone());
+        let s1 = store
+            .append("ses_1", "msg_1", "user", json!({ "text": "hi" }))
+            .await
+            .unwrap();
+        let s2 = store
+            .append("ses_1", "msg_2", "assistant", json!({ "agent": "build" }))
+            .await
+            .unwrap();
+        assert_eq!((s1, s2), (1, 2));
+        // A different session starts its own sequence at 1.
+        assert_eq!(
+            store
+                .append("ses_2", "msg_3", "user", json!({}))
+                .await
+                .unwrap(),
+            1
+        );
+        // The appended rows read back in order, reconstructable by the server.
+        let rows = store
+            .list("ses_1", None, None, MessageOrder::Asc, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["msg_1", "msg_2"]
+        );
+        assert_eq!(rows[0].kind, "user");
+        assert_eq!(rows[0].data["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn memory_append_matches_sqlx_seq_behavior() {
+        let store = MemorySessionMessageStore::new();
+        assert_eq!(
+            store
+                .append("ses_1", "m1", "user", json!({}))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .append("ses_1", "m2", "assistant", json!({}))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .append("ses_2", "m3", "user", json!({}))
+                .await
+                .unwrap(),
+            1
+        );
     }
 }
