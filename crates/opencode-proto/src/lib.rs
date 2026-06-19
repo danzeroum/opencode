@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+mod session_message;
+pub use session_message::*;
+
 /// Response of `GET /health` — the first contract route cut over to Rust (Phase 1).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct Health {
