@@ -9,13 +9,23 @@
 pub mod bus;
 pub mod metrics;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use opencode_config::catalog::Catalog;
 use opencode_db::{EventStore, ProjectStore, SessionStore};
 
 pub use bus::{BusEvent, EventBus};
 pub use metrics::{AppMetrics, MetricsSnapshot};
+
+/// A hot-swappable handle to the models.dev catalog: an `Arc<RwLock<Arc<Catalog>>>` shared between the
+/// server (which reads snapshots) and the background refresh task (which swaps in a fresh catalog).
+/// Reads take a brief read lock and clone the inner `Arc` (cheap); the refresh swaps under a write lock.
+pub type CatalogHandle = Arc<RwLock<Arc<Catalog>>>;
+
+/// Wrap a catalog in a fresh [`CatalogHandle`].
+pub fn catalog_handle(catalog: Catalog) -> CatalogHandle {
+    Arc::new(RwLock::new(Arc::new(catalog)))
+}
 
 /// Binary-edge error taxonomy. Libraries return their own `thiserror` enums; these are mapped to
 /// HTTP responses (and to the `opencode_proto::ErrorEnvelope` `_tag` shape) at the server edge.
@@ -75,9 +85,9 @@ pub struct AppServices {
     pub event_bus: Arc<EventBus>,
     /// In-process runner metrics (counters + turn-latency percentiles).
     pub metrics: Arc<AppMetrics>,
-    /// The models.dev catalog (`providerID → Provider`). Read-only reference data the model/provider
-    /// routes project into the V2 wire contract; defaults to empty (populated at the composition root).
-    pub catalog: Arc<Catalog>,
+    /// The models.dev catalog (`providerID → Provider`), hot-swappable for background refresh. Read-only
+    /// reference data the model/provider routes project into the V2 wire contract; defaults to empty.
+    pub catalog: CatalogHandle,
 }
 
 impl Default for AppServices {
@@ -88,7 +98,7 @@ impl Default for AppServices {
             projects: Arc::new(opencode_db::MemoryProjectStore::new()),
             event_bus: Arc::new(EventBus::new()),
             metrics: Arc::new(AppMetrics::default()),
-            catalog: Arc::new(Catalog::default()),
+            catalog: catalog_handle(Catalog::default()),
         }
     }
 }
@@ -137,9 +147,15 @@ impl AppContext {
         &self.inner.metrics
     }
 
-    /// The models.dev catalog (read-only reference data; empty unless wired at the composition root).
-    pub fn catalog(&self) -> &Arc<Catalog> {
-        &self.inner.catalog
+    /// A snapshot of the models.dev catalog (read-only reference data; empty unless wired at the
+    /// composition root). Cheap: a brief read lock plus an `Arc` clone — callers get a stable snapshot
+    /// even if a background refresh swaps the catalog concurrently.
+    pub fn catalog(&self) -> Arc<Catalog> {
+        self.inner
+            .catalog
+            .read()
+            .expect("catalog lock poisoned")
+            .clone()
     }
 }
 
@@ -177,10 +193,39 @@ mod context_tests {
             },
         );
         let ctx = AppContext::new(AppServices {
-            catalog: Arc::new(catalog),
+            catalog: catalog_handle(catalog),
             ..Default::default()
         });
         assert_eq!(ctx.catalog().len(), 1);
         assert!(ctx.catalog().contains_key("anthropic"));
+    }
+
+    #[test]
+    fn catalog_hot_swap_is_visible_through_the_accessor() {
+        // Proves the path the background refresh task uses: storing a fresh catalog under the shared
+        // handle's write lock is observed by `AppContext::catalog()` snapshots.
+        let handle = catalog_handle(Catalog::new());
+        let ctx = AppContext::new(AppServices {
+            catalog: handle.clone(),
+            ..Default::default()
+        });
+        assert!(ctx.catalog().is_empty());
+
+        let mut fresh = Catalog::new();
+        fresh.insert(
+            "p".to_string(),
+            Provider {
+                id: "p".to_string(),
+                name: "P".to_string(),
+                env: vec![],
+                api: None,
+                npm: None,
+                models: Default::default(),
+            },
+        );
+        *handle.write().unwrap() = Arc::new(fresh);
+
+        assert_eq!(ctx.catalog().len(), 1);
+        assert!(ctx.catalog().contains_key("p"));
     }
 }

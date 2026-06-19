@@ -1611,7 +1611,8 @@ async fn v2_model_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::ModelListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    let data = opencode_core::catalog_v2::available_models(state.ctx.catalog(), &env_present);
+    let catalog = state.ctx.catalog();
+    let data = opencode_core::catalog_v2::available_models(&catalog, &env_present);
     Ok(Json(opencode_proto::ModelListResponse { location, data }))
 }
 
@@ -1637,7 +1638,8 @@ async fn v2_provider_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::ProviderListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    let data = opencode_core::catalog_v2::available_providers(state.ctx.catalog(), &env_present);
+    let catalog = state.ctx.catalog();
+    let data = opencode_core::catalog_v2::available_providers(&catalog, &env_present);
     Ok(Json(opencode_proto::ProviderListResponse {
         location,
         data,
@@ -2922,7 +2924,7 @@ mod tests {
         projects.insert(test_project_record("prj_1")); // worktree "/repo"
         ServerState {
             ctx: AppContext::new(AppServices {
-                catalog: Arc::new(sample_catalog()),
+                catalog: opencode_effect::catalog_handle(sample_catalog()),
                 projects,
                 ..Default::default()
             }),
@@ -3003,7 +3005,7 @@ mod tests {
         .unwrap();
         let state = ServerState {
             ctx: AppContext::new(AppServices {
-                catalog: Arc::new(catalog),
+                catalog: opencode_effect::catalog_handle(catalog),
                 projects,
                 ..Default::default()
             }),
@@ -3122,7 +3124,7 @@ mod tests {
         .unwrap();
         ServerState {
             ctx: AppContext::new(AppServices {
-                catalog: Arc::new(catalog),
+                catalog: opencode_effect::catalog_handle(catalog),
                 projects,
                 ..Default::default()
             }),
