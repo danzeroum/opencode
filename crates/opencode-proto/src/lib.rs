@@ -162,6 +162,34 @@ pub enum RequestError {
     Invalid(InvalidRequestError),
 }
 
+/// Payload of a [`NotFoundError`] (`{ message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NotFoundData {
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// `{ name: "NotFoundError", data: { message } }` — the Effect TaggedError wire format (name + nested
+/// data), used as the generic 404 body by the v1 session subroutes.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NotFoundError {
+    /// Always `"NotFoundError"`.
+    pub name: String,
+    /// Error payload.
+    pub data: NotFoundData,
+}
+
+/// A session todo item (`{ content, status, priority }`) — `packages/core/src/session/todo`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Todo {
+    /// Brief description of the task.
+    pub content: String,
+    /// Current status: `pending` | `in_progress` | `completed` | `cancelled`.
+    pub status: String,
+    /// Priority level: `high` | `medium` | `low`.
+    pub priority: String,
+}
+
 // ---------------------------------------------------------------------------
 // V2 session read contract (`v2.session.get` — GET /api/session/{sessionID}).
 // SessionV2Info mirrors `packages/core/src/session/schema.ts`; the projection mapping it comes from

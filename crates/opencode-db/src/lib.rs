@@ -12,6 +12,7 @@ pub mod migration;
 pub mod project;
 pub mod session;
 pub mod session_message;
+pub mod todo;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ pub use session_message::{
     MemorySessionMessageStore, MessageOrder, SessionMessageRow, SessionMessageStore,
     SqlxSessionMessageStore, SESSION_MESSAGE_DDL,
 };
+pub use todo::{MemoryTodoStore, SqlxTodoStore, TodoRecord, TodoStore, TODO_DDL};
 
 /// Database / event-store errors.
 #[derive(Debug, thiserror::Error)]
@@ -256,6 +258,11 @@ impl Database {
     /// A [`SessionMessageStore`] (read model over the `session_message` timeline), backed by the pool.
     pub fn session_message_store(&self) -> Arc<dyn SessionMessageStore> {
         Arc::new(SqlxSessionMessageStore::new(self.pool.clone()))
+    }
+
+    /// A [`TodoStore`] (read model over the `todo` table), backed by the shared pool.
+    pub fn todo_store(&self) -> Arc<dyn TodoStore> {
+        Arc::new(SqlxTodoStore::new(self.pool.clone()))
     }
 
     /// The `session_input` repository, backed by the shared pool.
