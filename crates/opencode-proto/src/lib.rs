@@ -298,6 +298,20 @@ pub struct InvalidCursorError {
     pub message: String,
 }
 
+/// A generic server-error envelope (the golden `UnknownError1`): the 500 body for routes that can fail
+/// opaquely, with an optional log-reference id for correlating with server logs.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct UnknownError {
+    /// Always `"UnknownError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Optional log-reference id (`err_…`) to correlate with the server logs.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
 /// Keyset pagination cursor for `v2.session.list` (`{ previous?, next? }`); always present (possibly
 /// empty) in the response.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

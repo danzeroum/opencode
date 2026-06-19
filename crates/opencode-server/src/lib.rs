@@ -1415,6 +1415,255 @@ async fn v2_session_list(
     Ok(Json(opencode_proto::SessionsResponse { data, cursor }))
 }
 
+/// Default page size when `limit` is omitted (mirrors TS `DefaultMessagesLimit`).
+const DEFAULT_MESSAGES_LIMIT: i64 = 50;
+
+/// Decoded payload of the opaque `v2.session.messages` cursor: `base64url(JSON)` of `{ id, order,
+/// direction }` (mirrors the TS `Cursor` in `handlers/message.ts`). Rust-native bytes (not
+/// byte-interchangeable with TS cursors mid-pagination — a documented rollback caveat); the paging
+/// *behavior* matches TS (`session.ts` seq window).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MessageCursorPayload {
+    id: String,
+    order: String,
+    direction: String,
+}
+
+fn encode_message_cursor(id: &str, order: &str, direction: &str) -> String {
+    use base64::Engine;
+    let json = serde_json::to_vec(&MessageCursorPayload {
+        id: id.to_string(),
+        order: order.to_string(),
+        direction: direction.to_string(),
+    })
+    .unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+fn decode_message_cursor(raw: &str) -> Result<MessageCursorPayload, MessagesFailure> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| MessagesFailure::InvalidCursor("Invalid cursor".to_string()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| MessagesFailure::InvalidCursor("Invalid cursor".to_string()))
+}
+
+/// Reconstruct a typed `SessionMessage` from a stored row by merging its discriminator + id back into
+/// the JSON `data` (`{ ...data, id, type }`) — the inverse of how the projector stores it.
+fn row_to_session_message(
+    row: opencode_db::SessionMessageRow,
+) -> Result<opencode_proto::SessionMessage, serde_json::Error> {
+    let mut obj = match row.data {
+        serde_json::Value::Object(m) => m,
+        other => {
+            let mut m = serde_json::Map::new();
+            // A non-object `data` can't carry the variant fields; surface it under a key so the decode
+            // fails loudly rather than silently dropping content.
+            m.insert("data".to_string(), other);
+            m
+        }
+    };
+    obj.insert("id".to_string(), serde_json::Value::String(row.id));
+    obj.insert("type".to_string(), serde_json::Value::String(row.kind));
+    serde_json::from_value(serde_json::Value::Object(obj))
+}
+
+/// Error responder for `v2.session.messages`: the golden 400 union (`InvalidCursorError` /
+/// `InvalidRequestError`), 404 `SessionNotFoundError`, or 500 `UnknownError`.
+pub enum MessagesFailure {
+    /// Invalid query parameter (400 `InvalidRequestError`).
+    BadRequest(String),
+    /// Bad/incompatible cursor (400 `InvalidCursorError`).
+    InvalidCursor(String),
+    /// No such session (404 `SessionNotFoundError`).
+    NotFound(String),
+    /// Store read / decode failed (500 `UnknownError`).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for MessagesFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            MessagesFailure::BadRequest(message) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message,
+                    kind: None,
+                    field: None,
+                }),
+            )
+                .into_response(),
+            MessagesFailure::InvalidCursor(message) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidCursorError {
+                    tag: "InvalidCursorError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+            MessagesFailure::NotFound(session_id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::SessionNotFoundError {
+                    tag: "SessionNotFoundError".to_string(),
+                    session_id: session_id.clone(),
+                    message: format!("Session not found: {session_id}"),
+                }),
+            )
+                .into_response(),
+            MessagesFailure::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::UnknownError {
+                    tag: "UnknownError".to_string(),
+                    message,
+                    reference: None,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /api/session/{sessionID}/message` — the projected message timeline (group `session`). Matches
+/// the golden `v2.session.messages`: 200 `SessionMessagesResponse`, 400 union, 401, 404, 500. Reads the
+/// `session_message` projection with the same seq-windowed cursor paging as TS `V2Session.messages`
+/// (`packages/core/src/session.ts`) and reconstructs each typed `SessionMessage` from its row.
+#[utoipa::path(
+    get,
+    path = "/api/session/{sessionID}/message",
+    operation_id = "v2.session.messages",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("limit" = Option<i64>, Query, description = "Max results (default 50)"),
+        ("order" = Option<String>, Query, description = "asc | desc (default desc); not with cursor"),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor")
+    ),
+    responses(
+        (status = 200, description = "Messages", body = opencode_proto::SessionMessagesResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::SessionListError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError),
+        (status = 500, description = "Server error", body = opencode_proto::UnknownError)
+    ),
+    tag = "session"
+)]
+async fn v2_session_messages(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::SessionMessagesResponse>, MessagesFailure> {
+    let pick = |key: &str| params.get(key).filter(|s| !s.is_empty()).cloned();
+    let limit = match params.get("limit").filter(|s| !s.is_empty()) {
+        None => DEFAULT_MESSAGES_LIMIT,
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| MessagesFailure::BadRequest(format!("limit must be an integer: {s}")))?,
+    };
+    let order_q = pick("order");
+    let cursor_raw = pick("cursor");
+    // A cursor pins the order it was created with, so the two can't be combined (mirrors TS).
+    if cursor_raw.is_some() && order_q.is_some() {
+        return Err(MessagesFailure::InvalidCursor(
+            "Cursor cannot be combined with order".to_string(),
+        ));
+    }
+    if let Some(o) = &order_q {
+        if o != "asc" && o != "desc" {
+            return Err(MessagesFailure::BadRequest(format!(
+                "order must be 'asc' or 'desc': {o}"
+            )));
+        }
+    }
+    let decoded = match &cursor_raw {
+        Some(raw) => Some(decode_message_cursor(raw)?),
+        None => None,
+    };
+    // Resolved order: cursor's order, else the query's, else newest-first.
+    let order = decoded
+        .as_ref()
+        .map(|d| d.order.clone())
+        .or(order_q)
+        .unwrap_or_else(|| "desc".to_string());
+
+    // The session must exist (TS `result.get` → NotFound) before we read its timeline.
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| MessagesFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(MessagesFailure::NotFound(session_id));
+    }
+
+    // Seq window: paging "previous" flips the scan order, then the page is reversed back to `order`.
+    let direction = decoded
+        .as_ref()
+        .map(|d| d.direction.clone())
+        .unwrap_or_else(|| "next".to_string());
+    let effective_order = match (direction.as_str(), order.as_str()) {
+        ("previous", "asc") => opencode_db::MessageOrder::Desc,
+        ("previous", _) => opencode_db::MessageOrder::Asc,
+        (_, "asc") => opencode_db::MessageOrder::Asc,
+        _ => opencode_db::MessageOrder::Desc,
+    };
+    let store = state.ctx.session_messages();
+    // Resolve the cursor anchor → an exclusive seq bound (a cursor with no matching row ⇒ empty page).
+    let (after_seq, before_seq, empty) = match &decoded {
+        Some(d) => match store
+            .seq_of(&session_id, &d.id)
+            .await
+            .map_err(|e| MessagesFailure::Internal(e.to_string()))?
+        {
+            None => (None, None, true),
+            Some(seq) => match effective_order {
+                opencode_db::MessageOrder::Asc => (Some(seq), None, false),
+                opencode_db::MessageOrder::Desc => (None, Some(seq), false),
+            },
+        },
+        None => (None, None, false),
+    };
+    let rows = if empty {
+        Vec::new()
+    } else {
+        store
+            .list(
+                &session_id,
+                after_seq,
+                before_seq,
+                effective_order,
+                Some(limit),
+            )
+            .await
+            .map_err(|e| MessagesFailure::Internal(e.to_string()))?
+    };
+    let rows: Vec<opencode_db::SessionMessageRow> = if direction == "previous" {
+        rows.into_iter().rev().collect()
+    } else {
+        rows
+    };
+
+    // Adjacent-page cursors are the first/last ids in the *resolved* order (captured before decode).
+    let first_id = rows.first().map(|r| r.id.clone());
+    let last_id = rows.last().map(|r| r.id.clone());
+    let mut data = Vec::with_capacity(rows.len());
+    for row in rows {
+        data.push(
+            row_to_session_message(row).map_err(|e| MessagesFailure::Internal(e.to_string()))?,
+        );
+    }
+    let cursor = opencode_proto::MessageCursor {
+        previous: first_id.map(|id| encode_message_cursor(&id, &order, "previous")),
+        next: last_id.map(|id| encode_message_cursor(&id, &order, "next")),
+    };
+    Ok(Json(opencode_proto::SessionMessagesResponse {
+        data,
+        cursor,
+    }))
+}
+
 /// Map a `project` projection row to the `Project` wire shape (the `icon_*` columns fold into one
 /// `icon` object; `commands`/`sandboxes` come from JSON columns).
 fn project_record_to_info(r: opencode_db::ProjectRecord) -> opencode_proto::Project {
@@ -1788,6 +2037,7 @@ async fn v2_provider_get(
         app_log,
         v2_session_get,
         v2_session_list,
+        v2_session_messages,
         v2_session_prompt,
         project_list,
         project_current,
@@ -1858,7 +2108,21 @@ async fn v2_provider_get(
         opencode_proto::ProviderEnabled,
         opencode_proto::ProviderRequest,
         opencode_proto::LocationInfo,
-        opencode_proto::LocationProject
+        opencode_proto::LocationProject,
+        opencode_proto::SessionMessagesResponse,
+        opencode_proto::MessageCursor,
+        opencode_proto::SessionMessage,
+        opencode_proto::SessionMessageAssistantContent,
+        opencode_proto::SessionMessageToolState,
+        opencode_proto::ToolContent,
+        opencode_proto::AssistantToolProvider,
+        opencode_proto::AssistantSnapshot,
+        opencode_proto::AssistantTokens,
+        opencode_proto::SessionErrorUnknown,
+        opencode_proto::MessageTime,
+        opencode_proto::MessageTimeCompleted,
+        opencode_proto::ToolTime,
+        opencode_proto::UnknownError
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -1944,6 +2208,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("session") {
         router = router.route("/api/session", get(v2_session_list));
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
+        router = router.route("/api/session/{sessionID}/message", get(v2_session_messages));
         router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
     }
     if state.routes.handles("event") {
@@ -2499,6 +2764,141 @@ mod tests {
         assert_eq!(v["data"]["location"]["directory"], "/repo");
         // Optional/absent fields are omitted (workspaceID, parentID, subpath).
         assert!(v["data"]["location"].get("workspaceID").is_none());
+    }
+
+    fn messages_state() -> ServerState {
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let messages = Arc::new(opencode_db::MemorySessionMessageStore::new());
+        // A user message then an assistant reply (data = SessionMessage minus id + type).
+        messages.insert(opencode_db::SessionMessageRow {
+            id: "msg_1".into(),
+            session_id: "ses_1".into(),
+            kind: "user".into(),
+            seq: 1,
+            data: serde_json::json!({ "time": { "created": 100 }, "text": "hi" }),
+        });
+        messages.insert(opencode_db::SessionMessageRow {
+            id: "msg_2".into(),
+            session_id: "ses_1".into(),
+            kind: "assistant".into(),
+            seq: 2,
+            data: serde_json::json!({
+                "time": { "created": 110 },
+                "agent": "build",
+                "model": { "id": "claude", "providerID": "anthropic" },
+                "content": [{ "type": "text", "id": "c1", "text": "hello" }]
+            }),
+        });
+        ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                session_messages: messages,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_session_messages_returns_reconstructed_timeline() {
+        use tower::ServiceExt;
+        // Default order is desc (newest first): msg_2 then msg_1.
+        let resp = build_router(messages_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_1/message")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"][0]["id"], "msg_2");
+        assert_eq!(v["data"][0]["type"], "assistant");
+        assert_eq!(v["data"][0]["content"][0]["text"], "hello");
+        assert_eq!(v["data"][1]["id"], "msg_1");
+        assert_eq!(v["data"][1]["type"], "user");
+        assert_eq!(v["data"][1]["text"], "hi");
+        // Cursors are present (opaque tokens) when there's a page.
+        assert!(v["cursor"]["previous"].is_string());
+        assert!(v["cursor"]["next"].is_string());
+    }
+
+    #[tokio::test]
+    async fn v2_session_messages_orders_ascending_and_limits() {
+        use tower::ServiceExt;
+        let resp = build_router(messages_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_1/message?order=asc&limit=1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // asc + limit 1 → just the oldest (msg_1).
+        assert_eq!(v["data"].as_array().unwrap().len(), 1);
+        assert_eq!(v["data"][0]["id"], "msg_1");
+    }
+
+    #[tokio::test]
+    async fn v2_session_messages_missing_session_is_404() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_missing/message")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "SessionNotFoundError");
+    }
+
+    #[tokio::test]
+    async fn v2_session_messages_rejects_cursor_with_order() {
+        use tower::ServiceExt;
+        let resp = build_router(messages_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_1/message?cursor=abc&order=asc")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "InvalidCursorError");
     }
 
     #[tokio::test]

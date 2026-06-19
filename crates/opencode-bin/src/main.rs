@@ -176,6 +176,7 @@ async fn build_app_context(db_path: &Path, catalog: CatalogHandle) -> anyhow::Re
         sessions: db.session_store(),
         projects: db.project_store(),
         credentials: db.credential_store(),
+        session_messages: db.session_message_store(),
         catalog,
         ..Default::default()
     }))

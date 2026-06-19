@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+// Reuse the shared contract leaves already defined in the crate root (same golden schemas the prompt /
+// session-info types use) rather than redefining them — avoids duplicate `ToSchema` components.
+use crate::{ModelRef, PromptAgentAttachment, PromptFileAttachment, TokenCache};
+
 // ===================================================================================================
 // Shared leaves
 // ===================================================================================================
@@ -49,58 +53,6 @@ pub struct ToolTime {
     /// When the call's output was pruned from context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned: Option<f64>,
-}
-
-/// `{ id, providerID, variant? }` — a model reference (used by model-switched + assistant entries).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct SessionModelRef {
-    /// Model id.
-    pub id: String,
-    /// Provider id.
-    #[serde(rename = "providerID")]
-    pub provider_id: String,
-    /// Experimental-mode variant id, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
-}
-
-/// `{ start, end, text }` — the source span a prompt attachment was parsed from.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct PromptSource {
-    /// Start offset in the prompt.
-    pub start: f64,
-    /// End offset in the prompt.
-    pub end: f64,
-    /// The matched text.
-    pub text: String,
-}
-
-/// A file attached to a user prompt (`{ uri, mime, name?, description?, source? }`).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct PromptFileAttachment {
-    /// File URI.
-    pub uri: String,
-    /// MIME type.
-    pub mime: String,
-    /// Display name, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Description, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Where in the prompt this attachment was referenced.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<PromptSource>,
-}
-
-/// An agent mentioned in a user prompt (`{ name, source? }`).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct PromptAgentAttachment {
-    /// Agent name.
-    pub name: String,
-    /// Where in the prompt this `@agent` was referenced.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<PromptSource>,
 }
 
 /// `{ type: "unknown", message }` — the catch-all session error attached to assistant/tool entries.
@@ -268,15 +220,6 @@ pub struct AssistantSnapshot {
     pub end: Option<String>,
 }
 
-/// `{ read, write }` — prompt-cache token counts.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct TokenCache {
-    /// Cache-read tokens.
-    pub read: f64,
-    /// Cache-write tokens.
-    pub write: f64,
-}
-
 /// `{ input, output, reasoning, cache }` — an assistant turn's token usage.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct AssistantTokens {
@@ -326,7 +269,7 @@ pub enum SessionMessage {
         /// Timestamp.
         time: MessageTime,
         /// The model switched to.
-        model: SessionModelRef,
+        model: ModelRef,
     },
     /// A user prompt.
     User {
@@ -407,7 +350,7 @@ pub enum SessionMessage {
         /// The agent that produced the turn.
         agent: String,
         /// The model used.
-        model: SessionModelRef,
+        model: ModelRef,
         /// The turn's content blocks (text / reasoning / tool).
         content: Vec<SessionMessageAssistantContent>,
         /// Snapshot span, if taken.
@@ -516,7 +459,7 @@ mod tests {
                 completed: Some(2.0),
             },
             agent: "build".into(),
-            model: SessionModelRef {
+            model: ModelRef {
                 id: "claude".into(),
                 provider_id: "anthropic".into(),
                 variant: None,
