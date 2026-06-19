@@ -7,6 +7,7 @@
 //! migration journal on boot rather than applying migrations (see [`migration`]). Full
 //! migration-apply is deferred to Phase 6.
 
+pub mod credential;
 pub mod migration;
 pub mod project;
 pub mod session;
@@ -23,6 +24,9 @@ use sqlx::SqlitePool;
 // downstream callers need them without taking a direct `opencode-events` dependency.
 pub use opencode_events::{EventInput, StoredEvent};
 
+pub use credential::{
+    CredentialRecord, CredentialStore, MemoryCredentialStore, SqlxCredentialStore, CREDENTIAL_DDL,
+};
 pub use migration::{MigrationReport, EXPECTED_MIGRATIONS};
 pub use project::{MemoryProjectStore, ProjectRecord, ProjectStore, SqlxProjectStore, PROJECT_DDL};
 pub use session::{
@@ -237,6 +241,11 @@ impl Database {
     /// A [`ProjectStore`] (read model over the `project` projection table), backed by the shared pool.
     pub fn project_store(&self) -> Arc<dyn ProjectStore> {
         Arc::new(SqlxProjectStore::new(self.pool.clone()))
+    }
+
+    /// A [`CredentialStore`] (read model over the `credential` table), backed by the shared pool.
+    pub fn credential_store(&self) -> Arc<dyn CredentialStore> {
+        Arc::new(SqlxCredentialStore::new(self.pool.clone()))
     }
 
     /// The `session_input` repository, backed by the shared pool.
