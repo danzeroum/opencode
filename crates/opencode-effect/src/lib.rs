@@ -12,7 +12,7 @@ pub mod metrics;
 use std::sync::{Arc, RwLock};
 
 use opencode_config::catalog::Catalog;
-use opencode_db::{EventStore, ProjectStore, SessionStore};
+use opencode_db::{CredentialStore, EventStore, ProjectStore, SessionStore};
 
 pub use bus::{BusEvent, EventBus};
 pub use metrics::{AppMetrics, MetricsSnapshot};
@@ -81,6 +81,8 @@ pub struct AppServices {
     pub sessions: Arc<dyn SessionStore>,
     /// `project` projection read store.
     pub projects: Arc<dyn ProjectStore>,
+    /// `credential` read store (stored provider credentials).
+    pub credentials: Arc<dyn CredentialStore>,
     /// In-process event bus (global stream + per-aggregate watch).
     pub event_bus: Arc<EventBus>,
     /// In-process runner metrics (counters + turn-latency percentiles).
@@ -96,6 +98,7 @@ impl Default for AppServices {
             event_store: Arc::new(opencode_db::MemoryEventStore::new()),
             sessions: Arc::new(opencode_db::MemorySessionStore::new()),
             projects: Arc::new(opencode_db::MemoryProjectStore::new()),
+            credentials: Arc::new(opencode_db::MemoryCredentialStore::new()),
             event_bus: Arc::new(EventBus::new()),
             metrics: Arc::new(AppMetrics::default()),
             catalog: catalog_handle(Catalog::default()),
@@ -135,6 +138,11 @@ impl AppContext {
     /// The wired project (projection) store.
     pub fn projects(&self) -> &Arc<dyn ProjectStore> {
         &self.inner.projects
+    }
+
+    /// The wired credential read store.
+    pub fn credentials(&self) -> &Arc<dyn CredentialStore> {
+        &self.inner.credentials
     }
 
     /// The in-process event bus.
@@ -227,5 +235,23 @@ mod context_tests {
 
         assert_eq!(ctx.catalog().len(), 1);
         assert!(ctx.catalog().contains_key("p"));
+    }
+
+    #[tokio::test]
+    async fn wired_credential_store_is_accessible() {
+        let store = Arc::new(opencode_db::MemoryCredentialStore::new());
+        store.insert(opencode_db::CredentialRecord {
+            id: "cred_1".to_string(),
+            integration_id: "anthropic".to_string(),
+            label: "default".to_string(),
+            value: serde_json::json!({ "type": "key", "key": "sk-x" }),
+        });
+        let ctx = AppContext::new(AppServices {
+            credentials: store,
+            ..Default::default()
+        });
+        let creds = ctx.credentials().all().await.unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].integration_id, "anthropic");
     }
 }
