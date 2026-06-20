@@ -409,6 +409,31 @@ pub struct PermissionRequest {
     pub tool: Option<PermissionRequestTool>,
 }
 
+/// `PermissionNotFoundError` — `{ _tag, requestID, message }`, one of the 404 arms of
+/// `permission.respond` when the permission request id is unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionNotFoundError {
+    /// Always `"PermissionNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The permission request id that was not found.
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// The 404 union of `permission.respond`: `NotFoundError` (unknown session) | `PermissionNotFoundError`
+/// (unknown permission request). Untagged so it serializes as whichever arm the handler returns.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PermissionRespondNotFound {
+    /// The session wasn't found.
+    Session(NotFoundError),
+    /// The permission request wasn't found.
+    Permission(PermissionNotFoundError),
+}
+
 /// One choice for a [`QuestionInfo`] (`{ label, description }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct QuestionOption {

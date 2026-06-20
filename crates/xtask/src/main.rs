@@ -46,6 +46,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/session/{sessionID}",
     "/session/{sessionID}/revert",
     "/session/{sessionID}/unrevert",
+    "/session/{sessionID}/permissions/{permissionID}",
     "/api/session/{sessionID}/message",
     "/api/session/{sessionID}/prompt",
     "/api/session/{sessionID}/context",

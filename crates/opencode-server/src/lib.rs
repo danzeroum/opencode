@@ -25,8 +25,8 @@ use opencode_core::provider::{
 };
 use opencode_core::runner::SessionOutcome;
 use opencode_core::session::{
-    run_gated, AllowAll, BusSink, EventStoreSink, FanOutSink, LlmEngine, PermissionGate, Session,
-    SessionRun, ToolBox,
+    run_gated, AllowAll, BusSink, Decision, EventStoreSink, FanOutSink, LlmEngine, PermissionGate,
+    Session, SessionRun, ToolBox,
 };
 use opencode_effect::AppContext;
 use opencode_llm::{ContentPart, Generation, Message, Role};
@@ -123,11 +123,15 @@ pub struct RunnerServices {
     pub(crate) gate: Arc<dyn PermissionGate>,
     /// Working directory the native tools resolve relative paths against.
     pub(crate) root: std::path::PathBuf,
+    /// Pending permission requests awaiting a user decision (read by the permission list routes,
+    /// resolved by `permission.respond`). The asking gate that populates it lands in a follow-up.
+    pub(crate) pending: Arc<PendingPermissions>,
 }
 
 impl RunnerServices {
     /// Production wiring: a real HTTPS provider registry with environment credentials, an allow-all
-    /// gate (a DB-backed gate is a later increment), and `root` as the native tools' working directory.
+    /// gate (the asking gate that uses `pending` is a later increment), and `root` as the native tools'
+    /// working directory.
     pub fn from_env(root: impl Into<std::path::PathBuf>) -> Result<Self, EngineError> {
         Ok(Self {
             engines: Arc::new(EnvEngineFactory {
@@ -136,6 +140,7 @@ impl RunnerServices {
             }),
             gate: Arc::new(AllowAll),
             root: root.into(),
+            pending: Arc::new(PendingPermissions::default()),
         })
     }
 }
@@ -149,6 +154,7 @@ impl Default for RunnerServices {
             }),
             gate: Arc::new(AllowAll),
             root: std::path::PathBuf::from("."),
+            pending: Arc::new(PendingPermissions::default()),
         }
     }
 }
@@ -293,6 +299,110 @@ impl SessionCoordinator {
             }
             None => false,
         }
+    }
+}
+
+/// Metadata for a pending permission request, surfaced by the permission list routes.
+#[derive(Debug, Clone)]
+pub struct PendingMeta {
+    /// Request id (`per_…`).
+    pub id: String,
+    /// The session whose run is parked on this request.
+    pub session_id: String,
+    /// The tool/action being gated.
+    pub tool: String,
+    /// The tool's input.
+    pub input: serde_json::Value,
+}
+
+/// A registered pending request: its metadata + the resolver the parked run awaits.
+struct PendingEntry {
+    meta: PendingMeta,
+    resolver: tokio::sync::oneshot::Sender<Decision>,
+}
+
+/// In-process store of permission requests awaiting a user decision. The permission gate
+/// [`register`](Self::register)s a request (parking the run on the returned receiver); the permission
+/// list routes read the metadata; `permission.respond` [`resolve`](Self::resolve)s it, waking the run.
+#[derive(Default)]
+pub struct PendingPermissions {
+    entries: Mutex<HashMap<String, PendingEntry>>,
+}
+
+impl PendingPermissions {
+    /// Register a pending request; returns its id + the receiver the gate awaits for the decision.
+    pub fn register(
+        &self,
+        session_id: impl Into<String>,
+        tool: impl Into<String>,
+        input: serde_json::Value,
+    ) -> (String, tokio::sync::oneshot::Receiver<Decision>) {
+        let id = format!("per_{}", ulid::Ulid::new());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let meta = PendingMeta {
+            id: id.clone(),
+            session_id: session_id.into(),
+            tool: tool.into(),
+            input,
+        };
+        self.entries
+            .lock()
+            .expect("pending permissions mutex poisoned")
+            .insert(id.clone(), PendingEntry { meta, resolver: tx });
+        (id, rx)
+    }
+
+    /// The pending requests, optionally filtered to one session.
+    pub fn list(&self, session_id: Option<&str>) -> Vec<PendingMeta> {
+        self.entries
+            .lock()
+            .expect("pending permissions mutex poisoned")
+            .values()
+            .filter(|e| session_id.is_none_or(|s| e.meta.session_id == s))
+            .map(|e| e.meta.clone())
+            .collect()
+    }
+
+    /// Resolve a pending request by id, sending `decision` to the parked run. Returns whether found.
+    pub fn resolve(&self, id: &str, decision: Decision) -> bool {
+        match self
+            .entries
+            .lock()
+            .expect("pending permissions mutex poisoned")
+            .remove(id)
+        {
+            Some(entry) => {
+                let _ = entry.resolver.send(decision);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Map a pending request to the V1 `PermissionRequest` wire shape (`permission.list`).
+fn pending_to_v1(m: PendingMeta) -> opencode_proto::PermissionRequest {
+    opencode_proto::PermissionRequest {
+        id: m.id,
+        session_id: m.session_id,
+        permission: m.tool,
+        patterns: Vec::new(),
+        metadata: m.input,
+        always: Vec::new(),
+        tool: None,
+    }
+}
+
+/// Map a pending request to the V2 `PermissionV2Request` wire shape (`v2.permission.*.list`).
+fn pending_to_v2(m: PendingMeta) -> opencode_proto::PermissionV2Request {
+    opencode_proto::PermissionV2Request {
+        id: m.id,
+        session_id: m.session_id,
+        action: m.tool,
+        resources: Vec::new(),
+        save: None,
+        metadata: Some(m.input),
+        source: None,
     }
 }
 
@@ -2837,9 +2947,16 @@ async fn v2_permission_request_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::PermissionRequestListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
+    let data = state
+        .runner
+        .pending
+        .list(None)
+        .into_iter()
+        .map(pending_to_v2)
+        .collect();
     Ok(Json(opencode_proto::PermissionRequestListResponse {
         location,
-        data: Vec::new(),
+        data,
     }))
 }
 
@@ -2894,9 +3011,100 @@ async fn v2_session_permission_list(
     {
         return Err(SessionGetError::NotFound(session_id));
     }
-    Ok(Json(opencode_proto::SessionPermissionListResponse {
-        data: Vec::new(),
-    }))
+    let data = state
+        .runner
+        .pending
+        .list(Some(&session_id))
+        .into_iter()
+        .map(pending_to_v2)
+        .collect();
+    Ok(Json(opencode_proto::SessionPermissionListResponse { data }))
+}
+
+/// Request body for `permission.respond`: `{ response: once | always | reject }`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct PermissionRespondBody {
+    /// The user's decision.
+    response: String,
+}
+
+/// Error responder for `permission.respond`: 400 `InvalidRequestError` (bad `response`) or 404
+/// `PermissionNotFoundError` (unknown request id).
+enum PermissionRespondFailure {
+    /// The `response` value wasn't `once`/`always`/`reject`.
+    BadRequest(String),
+    /// No pending request with that id.
+    NotFound(String),
+}
+
+impl axum::response::IntoResponse for PermissionRespondFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            PermissionRespondFailure::BadRequest(message) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message,
+                    kind: None,
+                    field: None,
+                }),
+            )
+                .into_response(),
+            PermissionRespondFailure::NotFound(request_id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::PermissionNotFoundError {
+                    tag: "PermissionNotFoundError".to_string(),
+                    message: format!("Permission request not found: {request_id}"),
+                    request_id,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `POST /session/{sessionID}/permissions/{permissionID}` — respond to a pending permission request
+/// (group `session`). Matches the golden `permission.respond`: 200 `true`, 400 union, 404
+/// `NotFoundError | PermissionNotFoundError`. `once`/`always` allow the gated call (the "save" semantics
+/// of `always` is a follow-up); `reject` denies it. Resolving wakes the parked run via the pending store.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/permissions/{permissionID}",
+    operation_id = "permission.respond",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("permissionID" = String, Path, description = "Permission request id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    request_body = PermissionRespondBody,
+    responses(
+        (status = 200, description = "Permission processed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::PermissionRespondNotFound)
+    ),
+    tag = "session"
+)]
+async fn permission_respond(
+    State(state): State<ServerState>,
+    axum::extract::Path((_session_id, permission_id)): axum::extract::Path<(String, String)>,
+    body: Option<Json<PermissionRespondBody>>,
+) -> Result<Json<bool>, PermissionRespondFailure> {
+    let response = body.map(|Json(b)| b.response).unwrap_or_default();
+    let decision = match response.as_str() {
+        "once" | "always" => Decision::Allow,
+        "reject" => Decision::Deny("rejected by user".to_string()),
+        other => {
+            return Err(PermissionRespondFailure::BadRequest(format!(
+                "invalid response: {other} (expected once|always|reject)"
+            )))
+        }
+    };
+    if state.runner.pending.resolve(&permission_id, decision) {
+        Ok(Json(true))
+    } else {
+        Err(PermissionRespondFailure::NotFound(permission_id))
+    }
 }
 
 /// `GET /api/question/request` — pending question requests (group `question`). Matches the golden
@@ -3192,6 +3400,7 @@ async fn v2_provider_get(
         v2_permission_request_list,
         v2_permission_saved_list,
         v2_session_permission_list,
+        permission_respond,
         v2_question_request_list,
         v2_session_question_list,
         v2_session_context,
@@ -3361,6 +3570,9 @@ async fn v2_provider_get(
         opencode_proto::PermissionRequestListResponse,
         opencode_proto::PermissionSavedListResponse,
         opencode_proto::SessionPermissionListResponse,
+        opencode_proto::PermissionNotFoundError,
+        opencode_proto::PermissionRespondNotFound,
+        PermissionRespondBody,
         opencode_proto::QuestionV2Tool,
         opencode_proto::QuestionV2Option,
         opencode_proto::QuestionV2Info,
@@ -4586,9 +4798,17 @@ async fn global_config_update(
     tag = "permission"
 )]
 async fn permission_list(
-    State(_state): State<ServerState>,
+    State(state): State<ServerState>,
 ) -> Json<Vec<opencode_proto::PermissionRequest>> {
-    Json(Vec::new())
+    Json(
+        state
+            .runner
+            .pending
+            .list(None)
+            .into_iter()
+            .map(pending_to_v1)
+            .collect(),
+    )
 }
 
 /// `GET /question` — pending question requests (group `question`). Matches the golden `question.list`:
@@ -4782,6 +5002,10 @@ pub fn build_router(state: ServerState) -> Router {
         );
         router = router.route("/session/{sessionID}/revert", post(session_revert));
         router = router.route("/session/{sessionID}/unrevert", post(session_unrevert));
+        router = router.route(
+            "/session/{sessionID}/permissions/{permissionID}",
+            post(permission_respond),
+        );
     }
     if state.routes.handles("event") {
         router = router.route("/api/event", get(v2_event_subscribe));
@@ -5091,6 +5315,7 @@ mod tests {
                 engines: Arc::new(TestEngines { url }),
                 gate: Arc::new(AllowAll),
                 root,
+                pending: Arc::new(PendingPermissions::default()),
             },
             coordinator: SessionCoordinator::default(),
         }
@@ -5882,6 +6107,103 @@ mod tests {
                 "{uri} should contain {want_name}: {v}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn permission_respond_lists_and_resolves_pending() {
+        use tower::ServiceExt;
+        let pending = Arc::new(PendingPermissions::default());
+        let (req_id, rx) =
+            pending.register("ses_1", "bash", serde_json::json!({ "command": "ls" }));
+        let state = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("permission,session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices {
+                pending: pending.clone(),
+                ..RunnerServices::default()
+            },
+            coordinator: SessionCoordinator::default(),
+        };
+
+        // The pending request is listed (V1 /permission).
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/permission")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v[0]["id"], req_id);
+        assert_eq!(v[0]["permission"], "bash");
+        assert_eq!(v[0]["sessionID"], "ses_1");
+
+        // Respond `once` → 200 true, and the parked run receives `Allow`.
+        let uri = format!("/session/ses_1/permissions/{req_id}");
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"response":"once"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"true");
+        assert_eq!(rx.await.unwrap(), Decision::Allow);
+
+        // Resolved → list empty + responding again is 404.
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/permission")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!([])
+        );
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"response":"once"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn permission_pending_store_resolve_maps_decisions() {
+        let pending = Arc::new(PendingPermissions::default());
+        let (id, rx) = pending.register("ses_1", "write", serde_json::json!({}));
+        assert!(pending.resolve(&id, Decision::Deny("rejected by user".into())));
+        assert_eq!(rx.await.unwrap(), Decision::Deny("rejected by user".into()));
+        // Unknown id → not resolved.
+        assert!(!pending.resolve("per_missing", Decision::Allow));
     }
 
     #[tokio::test]
@@ -8037,6 +8359,7 @@ mod tests {
                 engines: Arc::new(TestEngines { url }),
                 gate: Arc::new(AllowAll),
                 root,
+                pending: Arc::new(PendingPermissions::default()),
             },
             coordinator: SessionCoordinator::default(),
         }
