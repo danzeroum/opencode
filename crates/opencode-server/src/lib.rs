@@ -2375,6 +2375,33 @@ async fn v2_command_list(
     }))
 }
 
+/// `GET /api/reference` — list references (group `reference`). Matches the golden `v2.reference.list`:
+/// 200 `{ location, data }` + 400/401. References are loaded from `config.references` + local discovery
+/// (a loading epic, see PENDENCIAS #2); until that lands the list is empty (same wired-empty stance as
+/// the other catalog lists).
+#[utoipa::path(
+    get,
+    path = "/api/reference",
+    operation_id = "v2.reference.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "References", body = opencode_proto::ReferenceListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "reference"
+)]
+async fn v2_reference_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::ReferenceListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(opencode_proto::ReferenceListResponse {
+        location,
+        data: Vec::new(),
+    }))
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2526,6 +2553,7 @@ async fn v2_provider_get(
         v2_provider_list,
         v2_skill_list,
         v2_command_list,
+        v2_reference_list,
         v2_location_get,
         v2_provider_get
     ),
@@ -2669,6 +2697,9 @@ async fn v2_provider_get(
         opencode_proto::SkillListResponse,
         opencode_proto::CommandV2Info,
         opencode_proto::CommandListResponse,
+        opencode_proto::ReferenceSource,
+        opencode_proto::ReferenceInfo,
+        opencode_proto::ReferenceListResponse,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2687,7 +2718,8 @@ async fn v2_provider_get(
         (name = "mcp", description = "MCP server routes"),
         (name = "lsp", description = "LSP server routes"),
         (name = "skills", description = "Skill catalog routes"),
-        (name = "commands", description = "Command catalog routes")
+        (name = "commands", description = "Command catalog routes"),
+        (name = "reference", description = "Reference catalog routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3282,6 +3314,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("command") {
         router = router.route("/api/command", get(v2_command_list));
+    }
+    if state.routes.handles("reference") {
+        router = router.route("/api/reference", get(v2_reference_list));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -4377,11 +4412,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_skill_and_command_lists_are_empty_until_loading_lands() {
+    async fn v2_catalog_lists_are_empty_until_loading_lands() {
         use tower::ServiceExt;
         for (group, uri) in [
             ("skill", "/api/skill?directory=/repo"),
             ("command", "/api/command?directory=/repo"),
+            ("reference", "/api/reference?directory=/repo"),
         ] {
             // Seed a project whose worktree matches the requested directory so location resolves.
             let projects = Arc::new(opencode_db::MemoryProjectStore::new());
@@ -4442,6 +4478,30 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // No LSP host yet → an empty JSON array.
         assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[test]
+    fn reference_source_serializes_with_type_tag() {
+        use opencode_proto::ReferenceSource;
+        assert_eq!(
+            serde_json::to_value(ReferenceSource::Local {
+                path: "/a".into(),
+                description: None,
+                hidden: None,
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "local", "path": "/a" })
+        );
+        assert_eq!(
+            serde_json::to_value(ReferenceSource::Git {
+                repository: "git@x".into(),
+                branch: Some("main".into()),
+                description: None,
+                hidden: Some(true),
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "git", "repository": "git@x", "branch": "main", "hidden": true })
+        );
     }
 
     #[test]
