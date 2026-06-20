@@ -408,6 +408,10 @@ pub trait SessionStore: Send + Sync {
     /// that return the whole session.
     async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError>;
 
+    /// Insert a new session row (all `Session` columns). Errors on a duplicate id or a project-FK
+    /// violation. Backs `session.create`.
+    async fn create(&self, record: &SessionV1Record) -> Result<(), DbError>;
+
     /// Apply a partial update to a session's mutable fields (any of `title`/`metadata`/`permission`;
     /// `None` leaves a field unchanged) and bump `time_updated`. Returns whether the session existed.
     async fn update(
@@ -656,6 +660,49 @@ impl SessionStore for SqlxSessionStore {
         v1_record_from_row(&row).map(Some)
     }
 
+    async fn create(&self, r: &SessionV1Record) -> Result<(), DbError> {
+        let (sa, sd, sf) = match r.summary {
+            Some((a, d, f)) => (Some(a), Some(d), Some(f)),
+            None => (None, None, None),
+        };
+        let placeholders = ["?"; 29].join(", ");
+        sqlx::query(&format!(
+            "INSERT INTO session ({SESSION_V1_COLS}) VALUES ({placeholders})"
+        ))
+        .bind(r.id.as_str())
+        .bind(r.slug.as_str())
+        .bind(r.project_id.as_str())
+        .bind(r.workspace_id.as_deref())
+        .bind(r.directory.as_str())
+        .bind(r.path.as_deref())
+        .bind(r.parent_id.as_deref())
+        .bind(sa)
+        .bind(sd)
+        .bind(sf)
+        .bind(r.summary_diffs.as_ref().map(|v| v.to_string()))
+        .bind(r.cost)
+        .bind(r.tokens.0)
+        .bind(r.tokens.1)
+        .bind(r.tokens.2)
+        .bind(r.tokens.3)
+        .bind(r.tokens.4)
+        .bind(r.share_url.as_deref())
+        .bind(r.title.as_str())
+        .bind(r.agent.as_deref())
+        .bind(r.model.as_ref().map(|v| v.to_string()))
+        .bind(r.version.as_str())
+        .bind(r.metadata.as_ref().map(|v| v.to_string()))
+        .bind(r.time_created)
+        .bind(r.time_updated)
+        .bind(r.time_compacting)
+        .bind(r.time_archived)
+        .bind(r.permission.as_ref().map(|v| v.to_string()))
+        .bind(r.revert.as_ref().map(|v| v.to_string()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn update(
         &self,
         id: &str,
@@ -718,6 +765,34 @@ pub struct MemorySessionStore {
     /// Revert pointers set via [`SessionStore::set_revert`] (the V2 `SessionRecord` doesn't hold one),
     /// so the double can round-trip `revert`/`unrevert` through `get_full`.
     reverts: Mutex<HashMap<String, Value>>,
+    /// Full V1 rows written via [`SessionStore::create`], so the double round-trips every `Session`
+    /// column through `get_full` (the V2 `SessionRecord` in `rows` drops slug/version/metadata/…).
+    full_rows: Mutex<HashMap<String, SessionV1Record>>,
+}
+
+/// Project a full V1 record down to the V2 [`SessionRecord`] kept in the memory double's `rows`
+/// (so `get`/`list` see a created session).
+fn v2_from_v1_record(r: &SessionV1Record) -> SessionRecord {
+    SessionRecord {
+        id: r.id.clone(),
+        project_id: r.project_id.clone(),
+        parent_id: r.parent_id.clone(),
+        agent: r.agent.clone(),
+        model: r.model.clone(),
+        cost: r.cost,
+        tokens_input: r.tokens.0,
+        tokens_output: r.tokens.1,
+        tokens_reasoning: r.tokens.2,
+        tokens_cache_read: r.tokens.3,
+        tokens_cache_write: r.tokens.4,
+        title: r.title.clone(),
+        directory: r.directory.clone(),
+        workspace_id: r.workspace_id.clone(),
+        path: r.path.clone(),
+        time_created: r.time_created,
+        time_updated: r.time_updated,
+        time_archived: r.time_archived,
+    }
 }
 
 impl MemorySessionStore {
@@ -792,7 +867,29 @@ impl SessionStore for MemorySessionStore {
         Ok(rows)
     }
 
+    async fn create(&self, record: &SessionV1Record) -> Result<(), DbError> {
+        self.full_rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .insert(record.id.clone(), record.clone());
+        self.rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .insert(record.id.clone(), v2_from_v1_record(record));
+        Ok(())
+    }
+
     async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError> {
+        // A `create`d session round-trips fully; otherwise reconstruct from the V2 row + revert map.
+        if let Some(record) = self
+            .full_rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .get(id)
+            .cloned()
+        {
+            return Ok(Some(record));
+        }
         let Some(mut record) = self
             .rows
             .lock()
@@ -1068,6 +1165,96 @@ mod tests {
         // A missing session: update reports false, get_full is None.
         assert!(!store.update("ses_x", Some("x"), None, None).await.unwrap());
         assert!(store.get_full("ses_x").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlx_session_store_create_inserts_full_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("create.db"))
+            .await
+            .unwrap();
+        sqlx::query(SESSION_V1_DDL)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let store = SqlxSessionStore::new(db.pool().clone());
+        let record = SessionV1Record {
+            id: "ses_new".into(),
+            slug: "fresh-chat".into(),
+            project_id: "prj_1".into(),
+            workspace_id: Some("wrk_1".into()),
+            directory: "/repo".into(),
+            path: None,
+            parent_id: None,
+            summary: None,
+            summary_diffs: None,
+            cost: 0.0,
+            tokens: (0, 0, 0, 0, 0),
+            share_url: None,
+            title: "Fresh".into(),
+            agent: Some("build".into()),
+            model: Some(json!({ "id": "claude-x", "providerID": "anthropic" })),
+            version: "9.9.9".into(),
+            metadata: Some(json!({ "k": "v" })),
+            time_created: 1000,
+            time_updated: 1000,
+            time_compacting: None,
+            time_archived: None,
+            permission: Some(json!([{ "permission": "bash", "pattern": "*", "action": "ask" }])),
+            revert: None,
+        };
+        store.create(&record).await.unwrap();
+        let back = store.get_full("ses_new").await.unwrap().unwrap();
+        assert_eq!(back.slug, "fresh-chat");
+        assert_eq!(back.title, "Fresh");
+        assert_eq!(back.version, "9.9.9");
+        assert_eq!(back.workspace_id.as_deref(), Some("wrk_1"));
+        assert_eq!(back.agent.as_deref(), Some("build"));
+        assert_eq!(back.model.unwrap()["providerID"], "anthropic");
+        assert_eq!(back.metadata.unwrap()["k"], "v");
+        assert_eq!(back.permission.unwrap()[0]["action"], "ask");
+        // The V2 read path sees it too.
+        assert!(store.get("ses_new").await.unwrap().is_some());
+        // A duplicate id is an error.
+        assert!(store.create(&record).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_session_store_create_roundtrips() {
+        let store = MemorySessionStore::new();
+        let record = SessionV1Record {
+            id: "ses_mem".into(),
+            slug: "mem-chat".into(),
+            project_id: "prj_1".into(),
+            workspace_id: None,
+            directory: "/repo".into(),
+            path: None,
+            parent_id: None,
+            summary: None,
+            summary_diffs: None,
+            cost: 0.0,
+            tokens: (0, 0, 0, 0, 0),
+            share_url: None,
+            title: "Mem".into(),
+            agent: None,
+            model: None,
+            version: "1.0.0".into(),
+            metadata: Some(json!({ "x": 1 })),
+            time_created: 5,
+            time_updated: 5,
+            time_compacting: None,
+            time_archived: None,
+            permission: None,
+            revert: None,
+        };
+        store.create(&record).await.unwrap();
+        // get_full round-trips the V1-only fields (slug/version/metadata) the V2 row would drop.
+        let back = store.get_full("ses_mem").await.unwrap().unwrap();
+        assert_eq!(back.slug, "mem-chat");
+        assert_eq!(back.version, "1.0.0");
+        assert_eq!(back.metadata.unwrap()["x"], 1);
+        // get/list see it via the projected V2 row.
+        assert!(store.get("ses_mem").await.unwrap().is_some());
     }
 
     #[tokio::test]
