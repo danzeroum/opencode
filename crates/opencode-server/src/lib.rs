@@ -2750,6 +2750,7 @@ async fn v2_provider_get(
         v2_question_request_list,
         v2_session_question_list,
         v2_fs_list,
+        v2_fs_find,
         v2_location_get,
         v2_provider_get
     ),
@@ -3127,6 +3128,60 @@ async fn v2_fs_list(
                 path: rel,
                 kind: if n.is_dir { "directory" } else { "file" }.to_string(),
                 mime: mime_for(&n.name, n.is_dir).to_string(),
+            }
+        })
+        .collect();
+    Ok(Json(opencode_proto::FsListResponse { location, data }))
+}
+
+/// `GET /api/fs/find` — search the location for files/directories matching `query` (group `fs`).
+/// Matches the golden `v2.fs.find`: 200 `{ location, data }` + 400/401. Substring search over the
+/// resolved location (gitignore-aware) via `opencode_tools::find_entries`, optionally filtered by
+/// `type` (`file`|`directory`) and capped by `limit` (default 100). `query` is required (400 if empty).
+#[utoipa::path(
+    get,
+    path = "/api/fs/find",
+    operation_id = "v2.fs.find",
+    params(
+        ("location" = Option<String>, Query, description = "Location context (deepObject)"),
+        ("query" = String, Query, description = "Substring to match against entry paths"),
+        ("type" = Option<String>, Query, description = "Filter by type (file|directory)"),
+        ("limit" = Option<String>, Query, description = "Max results (default 100)")
+    ),
+    responses(
+        (status = 200, description = "Filesystem entries", body = opencode_proto::FsListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "fs"
+)]
+async fn v2_fs_find(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::FsListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    let query = params
+        .get("query")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ApiError(opencode_effect::AppError::BadRequest(
+                "missing required query parameter: query".to_string(),
+            ))
+        })?;
+    let kind = params.get("type").map(String::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100);
+    let base = std::path::PathBuf::from(&location.directory);
+    let data = opencode_tools::find_entries(&base, query, kind, limit)
+        .into_iter()
+        .map(|(rel, is_dir)| {
+            let name = rel.rsplit('/').next().unwrap_or(&rel);
+            opencode_proto::FileSystemEntry {
+                kind: if is_dir { "directory" } else { "file" }.to_string(),
+                mime: mime_for(name, is_dir).to_string(),
+                path: rel,
             }
         })
         .collect();
@@ -3645,6 +3700,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));
+        router = router.route("/api/fs/find", get(v2_fs_find));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -5070,6 +5126,68 @@ mod tests {
         let sub = entries.iter().find(|e| e["path"] == "sub").unwrap();
         assert_eq!(sub["type"], "directory");
         assert_eq!(sub["mime"], "inode/directory");
+    }
+
+    #[tokio::test]
+    async fn v2_fs_find_matches_query_and_requires_it() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("beta.txt"), "x").unwrap();
+        let build_state = || {
+            let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+            let mut rec = test_project_record("prj_1");
+            rec.worktree = dir.path().display().to_string();
+            projects.insert(rec);
+            ServerState {
+                ctx: AppContext::new(AppServices {
+                    projects,
+                    ..Default::default()
+                }),
+                routes: RouteTable::parse("fs"),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            }
+        };
+        // A matching query returns only the matching entry.
+        let uri = format!(
+            "/api/fs/find?directory={}&query=alpha",
+            dir.path().display()
+        );
+        let resp = build_router(build_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let paths: Vec<&str> = v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["alpha.rs"]);
+        // A missing query is a 400.
+        let uri = format!("/api/fs/find?directory={}", dir.path().display());
+        let resp = build_router(build_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
     }
 
     #[tokio::test]
