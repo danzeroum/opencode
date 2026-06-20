@@ -106,7 +106,7 @@
 
 O que resta são **épicos** — cada um multi-fatia, e vários **bloqueados em decisões** (ver PENDENCIAS). Sequência recomendada (maior valor primeiro):
 
-1. **Mutações/ações de sessão que dependem da engine** — `session.create` (insere registro + emite evento), `session.command`/`summarize`/`compact`/`init`/`fork`/`shell`/`prompt_async`, `message`/`part` mutations. Dependem do runner de execução (write-path já existe para o turno básico).
+1. **Engine de execução (runner loop)** — épico central. O **CRUD de sessão já está nativo** (`create`/`list`/`get`/`update`/`delete`/`revert`, #125–#127, persistindo no DB via `SessionStore::create`/`delete`/`list_full`). Faltam as **ações que rodam o turno**: `session.command`/`summarize`/`compact`/`init`/`fork` (cópia)/`shell`/`prompt_async`, e as `message`/`part` mutations — todas dependem do loop de execução (tool-calling + permissão + emissão de eventos + projeção). É o "Fase 4 / 2XL" do plano; merece uma sessão focada (não fatiável sem meio-implementar).
 2. **Permissions/questions engine** — `permission.respond`/`reply`, `question.reply`/`reject` + produzir os requests pendentes (hoje as listas são vazias). Depende do gate do runner.
 3. **Auth/credenciais (Fase 4b)** — `auth.set`/`remove`, `provider.auth` (GET, tipo `ProviderAuthMethod`), `provider.oauth.*`. PENDENCIAS: local de storage de credencial + coexistência.
 4. **MCP/LSP runtime (Fase 3b/3d)** — `rmcp` (mcp.connect/add/disconnect/auth) + LSP host; hoje `mcp.status`/`lsp.status`/`find.symbols` retornam vazio.
