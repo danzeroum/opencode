@@ -2791,6 +2791,7 @@ async fn v2_provider_get(
         global_dispose,
         instance_dispose,
         file_list,
+        file_read,
         permission_list,
         question_list,
         mcp_status,
@@ -2984,6 +2985,9 @@ async fn v2_provider_get(
         opencode_proto::SessionQuestionListResponse,
         opencode_proto::FileSystemEntry,
         opencode_proto::FsListResponse,
+        opencode_proto::FileContent,
+        opencode_proto::FilePatch,
+        opencode_proto::FilePatchHunk,
         opencode_proto::SessionContextResponse,
         opencode_proto::TaggedUnknownError,
         opencode_proto::IntegrationWhen,
@@ -3117,6 +3121,76 @@ async fn file_list(
         })
         .collect();
     Ok(Json(data))
+}
+
+/// `GET /file/content` — read a file's content (group `file`). Matches the golden `file.read`: 200
+/// `FileContent`, 400 `BadRequestError`. Reads the file under `directory` (default cwd); UTF-8 content
+/// is returned as `{ type: "text", content }`, otherwise base64 as `{ type: "binary", content,
+/// encoding: "base64" }`. Guards against path traversal (canonical target must stay under the root).
+#[utoipa::path(
+    get,
+    path = "/file/content",
+    operation_id = "file.read",
+    params(
+        ("directory" = Option<String>, Query, description = "Base directory (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id"),
+        ("path" = String, Query, description = "File path within the directory")
+    ),
+    responses(
+        (status = 200, description = "File content", body = opencode_proto::FileContent),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "file"
+)]
+async fn file_read(
+    State(_state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::FileContent>, ApiBadRequest> {
+    use base64::Engine;
+    let rel = params
+        .get("path")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad_request("missing required query parameter: path", "Path"))?;
+    let base = params.get("directory").cloned().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let base = std::path::PathBuf::from(base);
+    // Containment guard against path traversal.
+    let canon_base = base
+        .canonicalize()
+        .map_err(|_| bad_request("cannot resolve directory", "Path"))?;
+    let target = canon_base.join(rel);
+    let canon_target = target
+        .canonicalize()
+        .map_err(|_| bad_request("file not found", "Path"))?;
+    if !canon_target.starts_with(&canon_base) {
+        return Err(bad_request("path escapes the directory root", "Path"));
+    }
+    let bytes = tokio::fs::read(&canon_target)
+        .await
+        .map_err(|e| bad_request(format!("cannot read file: {e}"), "Path"))?;
+    let mime_type = Some(mime_for(rel, false).to_string());
+    let content = match String::from_utf8(bytes) {
+        Ok(text) => opencode_proto::FileContent {
+            kind: "text".to_string(),
+            content: text,
+            diff: None,
+            patch: None,
+            encoding: None,
+            mime_type,
+        },
+        Err(e) => opencode_proto::FileContent {
+            kind: "binary".to_string(),
+            content: base64::engine::general_purpose::STANDARD.encode(e.as_bytes()),
+            diff: None,
+            patch: None,
+            encoding: Some("base64".to_string()),
+            mime_type,
+        },
+    };
+    Ok(Json(content))
 }
 
 /// Best-effort MIME type for a filesystem entry — a small extension map (no external dependency),
@@ -3764,6 +3838,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/find/file", get(find_files));
         router = router.route("/find", get(find_text));
         router = router.route("/file", get(file_list));
+        router = router.route("/file/content", get(file_read));
     }
     if state.routes.handles("control") {
         router = router.route("/log", post(app_log));
@@ -5398,6 +5473,52 @@ mod tests {
         // A missing query is a 400.
         let uri = format!("/api/fs/find?directory={}", dir.path().display());
         let resp = build_router(build_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn file_read_returns_text_content_and_requires_path() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn main() {}").unwrap();
+        let state = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("file"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        // Reads UTF-8 content as { type: "text", content, mimeType }.
+        let uri = format!("/file/content?directory={}&path=a.rs", dir.path().display());
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "text");
+        assert_eq!(v["content"], "fn main() {}");
+        assert_eq!(v["mimeType"], "text/rust");
+        assert!(v.get("encoding").is_none());
+        // A missing path is a 400.
+        let uri = format!("/file/content?directory={}", dir.path().display());
+        let resp = build_router(state())
             .oneshot(
                 axum::extract::Request::builder()
                     .uri(&uri)
