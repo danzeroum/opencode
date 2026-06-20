@@ -2203,12 +2203,117 @@ async fn session_children(
     Ok(Json(Vec::new()))
 }
 
+/// The id of a V1 [`opencode_proto::Message`] (user or assistant), for `before`-anchor / single lookup.
+fn v1_message_id(message: &opencode_proto::Message) -> &str {
+    match message {
+        opencode_proto::Message::User(u) => &u.id,
+        opencode_proto::Message::Assistant(a) => &a.id,
+    }
+}
+
+/// Load a session's V1 conversation (`[{ info, parts }]`) by projecting its stored V2 `session_message`
+/// timeline (see [`opencode_core::session_timeline_v1::timeline_to_v1`]). 404s an unknown session;
+/// back-fills the agent/model/directory the timeline doesn't carry from the session record.
+async fn load_v1_messages(
+    state: &ServerState,
+    session_id: &str,
+) -> Result<Vec<opencode_proto::MessageWithParts>, TodoFailure> {
+    let session = state
+        .ctx
+        .sessions()
+        .get_full(session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .ok_or_else(|| TodoFailure::NotFound(session_id.to_string()))?;
+    let fallback_model = session
+        .model
+        .as_ref()
+        .and_then(|v| serde_json::from_value::<opencode_proto::ModelRef>(v.clone()).ok())
+        .map(|m| opencode_proto::MessageModelRef {
+            provider_id: m.provider_id,
+            model_id: m.id,
+            variant: m.variant,
+        })
+        .unwrap_or(opencode_proto::MessageModelRef {
+            provider_id: String::new(),
+            model_id: String::new(),
+            variant: None,
+        });
+    let agent = session.agent.clone().unwrap_or_else(|| "build".to_string());
+    let rows = state
+        .ctx
+        .session_messages()
+        .list(session_id, None, None, opencode_db::MessageOrder::Asc, None)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?;
+    let mut timeline = Vec::with_capacity(rows.len());
+    for row in rows {
+        timeline
+            .push(row_to_session_message(row).map_err(|e| TodoFailure::Internal(e.to_string()))?);
+    }
+    Ok(opencode_core::session_timeline_v1::timeline_to_v1(
+        &timeline,
+        session_id,
+        &agent,
+        &fallback_model,
+        &session.directory,
+    ))
+}
+
+/// `GET /session/{sessionID}/message` — a session's V1 conversation (group `session`). Matches the
+/// golden `session.messages`: 200 `[{ info: Message, parts: [Part] }]`, 400 union, 404 `NotFoundError`.
+/// This is the endpoint the web GUI's chat history uses. Projects the stored V2 `session_message`
+/// timeline into the V1 shape; `before` (a message id) pages older history and `limit` caps to the most
+/// recent N (the visible tail), both returned oldest→newest.
+#[utoipa::path(
+    get,
+    path = "/session/{sessionID}/message",
+    operation_id = "session.messages",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id"),
+        ("limit" = Option<i64>, Query, description = "Max results (most recent)"),
+        ("before" = Option<String>, Query, description = "Return messages before this message id")
+    ),
+    responses(
+        (status = 200, description = "Messages", body = Vec<opencode_proto::MessageWithParts>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_messages(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<opencode_proto::MessageWithParts>>, TodoFailure> {
+    let mut msgs = load_v1_messages(&state, &session_id).await?;
+    // `before` = a message id: keep only messages strictly before it (older-history paging). An unknown
+    // anchor is lenient (returns the whole list), mirroring a fresh client that hasn't seen the tail.
+    if let Some(before) = params.get("before").filter(|s| !s.is_empty()) {
+        if let Some(idx) = msgs
+            .iter()
+            .position(|m| v1_message_id(&m.info) == before.as_str())
+        {
+            msgs.truncate(idx);
+        }
+    }
+    // `limit`: keep the most recent N (the visible tail), still oldest→newest.
+    if let Some(limit) = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| msgs.len() > *n)
+    {
+        msgs.drain(0..msgs.len() - limit);
+    }
+    Ok(Json(msgs))
+}
+
 /// `GET /session/{sessionID}/message/{messageID}` — a single V1 message with its parts (group
 /// `session`). Matches the golden `session.message`: 200 `{ info: Message, parts: [Part] }`, 400 union,
-/// 404 `NotFoundError`. This wires the V1 `Message`/`Part` contract; the runner currently projects the
-/// conversation into the V2 `session_message` timeline, so until a V1 message projection lands a known
-/// session 404s the message (an unknown session 404s the session). Reuses [`TodoFailure`] for the
-/// shared NotFoundError/500 responder.
+/// 404 `NotFoundError`. Projects the stored V2 timeline (see [`load_v1_messages`]) and returns the entry
+/// whose id matches; 404s an unknown session or message.
 #[utoipa::path(
     get,
     path = "/session/{sessionID}/message/{messageID}",
@@ -2230,17 +2335,12 @@ async fn session_message(
     State(state): State<ServerState>,
     axum::extract::Path((session_id, message_id)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<opencode_proto::MessageWithParts>, TodoFailure> {
-    if state
-        .ctx
-        .sessions()
-        .get(&session_id)
-        .await
-        .map_err(|e| TodoFailure::Internal(e.to_string()))?
-        .is_none()
-    {
-        return Err(TodoFailure::NotFound(session_id));
-    }
-    Err(TodoFailure::NotFound(message_id))
+    load_v1_messages(&state, &session_id)
+        .await?
+        .into_iter()
+        .find(|m| v1_message_id(&m.info) == message_id)
+        .map(Json)
+        .ok_or(TodoFailure::NotFound(message_id))
 }
 
 /// `GET /session/status` — live status of all sessions (group `session`). Matches the golden
@@ -4035,6 +4135,7 @@ async fn v2_provider_get(
         v2_session_prompt,
         session_todo,
         session_children,
+        session_messages,
         session_message,
         session_status,
         session_create,
@@ -5702,6 +5803,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
+        router = router.route("/session/{sessionID}/message", get(session_messages));
         router = router.route(
             "/session/{sessionID}/message/{messageID}",
             get(session_message),
@@ -6048,6 +6150,77 @@ mod tests {
                 serde_json::json!({ "prompt": { "text": text } }).to_string(),
             ))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_messages_v1_projects_timeline_and_404s_unknown() {
+        use tower::ServiceExt;
+        let get = |uri: &str| {
+            axum::extract::Request::builder()
+                .uri(uri.to_string())
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = contract_state(
+            "http://127.0.0.1:1".to_string(),
+            dir.path().to_path_buf(),
+            "ses_msg",
+        );
+        // Append a user entry to the V2 timeline the V1 endpoints project from.
+        let entry = opencode_proto::SessionMessage::User {
+            id: "msg_u1".into(),
+            metadata: None,
+            time: opencode_proto::MessageTime { created: 1.0 },
+            text: "hello world".into(),
+            files: None,
+            agents: None,
+        };
+        let (id, kind, data) = split_session_message(&entry).unwrap();
+        state
+            .ctx
+            .session_messages()
+            .append("ses_msg", &id, &kind, data)
+            .await
+            .unwrap();
+
+        // List → 200 with the projected V1 message (agent/model back-filled from the session record).
+        let resp = build_router(state.clone())
+            .oneshot(get("/session/ses_msg/message"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v[0]["info"]["id"], "msg_u1");
+        assert_eq!(v[0]["info"]["role"], "user");
+        assert_eq!(v[0]["info"]["agent"], "build");
+        assert_eq!(v[0]["info"]["model"]["providerID"], "anthropic");
+        assert_eq!(v[0]["parts"][0]["type"], "text");
+        assert_eq!(v[0]["parts"][0]["text"], "hello world");
+
+        // Single → 200 for the known id.
+        let resp = build_router(state.clone())
+            .oneshot(get("/session/ses_msg/message/msg_u1"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Unknown message → 404.
+        let resp = build_router(state.clone())
+            .oneshot(get("/session/ses_msg/message/msg_nope"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // Unknown session → 404.
+        let resp = build_router(state)
+            .oneshot(get("/session/ses_unknown/message"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
     }
 
     #[tokio::test]
