@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 65 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#136. **Engine**: runner loop completo + permission gating (#129–#131) + question flow fim-a-fim (#133–#134) + `session.prompt_async` (#135) + HITL resolve V1 `permission.reply`/`question.reply`/`reject` (#136). CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
+> **Rotas nativas contrato-enforçadas: 66 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#137. **Engine**: runner loop + permission gating (#129–#131) + question flow fim-a-fim (#133–#134) + `prompt_async` (#135) + HITL V1 (#136) + `session.init` (#137). CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -31,6 +31,7 @@
 - ✅ 1E — `session.list` (V1, `GET /session`, `[Session]`): novo `SessionStore::list_full` (método default = `list`+`get_full`, sem duplicar sqlx); filtros directory/workspace/project/search/limit — **#126** (`/session` agora GET+POST nativos; `scope`/`roots`/`path`/`start` são refino)
 - ✅ 1F — `session.get` (V1, `GET /session/{id}`, `Session`) + `session.delete` (`DELETE /session/{id}`, `true`, novo `SessionStore::delete` com `ON DELETE CASCADE`) — **#127** (`/session/{id}` agora GET+PATCH+DELETE nativos)
 - ✅ 1G — `session.prompt_async` (`POST /session/{id}/prompt_async`, 204): admite o prompt no coordinator (mesmo caminho do V2 prompt → roda em background, eventos via SSE); resolve o model do body ou do registro da sessão; 404 sessão inexistente — **#135**
+- ✅ 1H — `session.init` (`POST /session/{id}/init`, 200 `true`): admite o turno de setup do `AGENTS.md` (mesmo caminho do prompt_async, prompt nativo equivalente ao `init` built-in) — **#137**
 - ✅ 1u — `v2.health.get` (`GET /api/health`, `{ healthy: true }`, #103) — liveness V2 do GUI
 - ✅ 1a — proto `SessionMessage` (união 8 variantes + content + tool-state) — **#69**
 - ✅ 1b — read-store `session_message` (seq-window + cursor) — **#70**
