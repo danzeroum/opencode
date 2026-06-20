@@ -442,6 +442,29 @@ pub struct SessionGetResponse {
     pub data: SessionV2Info,
 }
 
+/// 200 body of `v2.session.context` (GET /api/session/{sessionID}/context): `{ data }` — the session's
+/// prepared context as a list of [`SessionMessage`] timeline entries.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionContextResponse {
+    /// The context timeline entries.
+    pub data: Vec<SessionMessage>,
+}
+
+/// `UnknownError1` (golden) — the `_tag`-discriminated unknown-error envelope some V2 routes declare for
+/// their 500 response: `{ _tag: "UnknownError", message, ref? }`. Distinct from [`UnknownError`]
+/// (`{ name, data }`) and [`ErrorEnvelope`] (no `ref`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct TaggedUnknownError {
+    /// Always `"UnknownError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Optional opaque error reference.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
 /// `SessionNotFoundError` — 404 for `v2.session.get` (`{ _tag, sessionID, message }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct SessionNotFoundError {
