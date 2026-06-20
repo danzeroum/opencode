@@ -350,10 +350,95 @@ async fn drive_one_turn(
             if matches!(run.outcome, SessionOutcome::Cancelled { .. }) {
                 ctx.metrics().record_cancellation();
             }
+            // Project the finished turn into the `session_message` timeline so `v2.session.messages`
+            // returns real data (the native write path; see `persist_timeline`).
+            persist_timeline(
+                ctx,
+                session_id,
+                provider.as_str(),
+                model_id,
+                &run.messages,
+                &run.usage,
+            )
+            .await;
         }
         Err(_) => ctx.metrics().record_error(),
     }
     result.map_err(|e| e.to_string())
+}
+
+/// Split a typed [`opencode_proto::SessionMessage`] back into the `session_message` row columns
+/// `(id, type, data)` — the inverse of [`row_to_session_message`] — so the store can persist it.
+fn split_session_message(
+    msg: &opencode_proto::SessionMessage,
+) -> Result<(String, String, serde_json::Value), serde_json::Error> {
+    let mut value = serde_json::to_value(msg)?;
+    let obj = value
+        .as_object_mut()
+        .expect("a SessionMessage always serializes to a JSON object");
+    let id = obj
+        .remove("id")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    let kind = obj
+        .remove("type")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    Ok((id, kind, serde_json::Value::Object(std::mem::take(obj))))
+}
+
+/// Project a finished turn's conversation into the `session_message` timeline and append each entry.
+///
+/// Native write path: the Rust runner owns the turn it just executed, so it writes the timeline rows
+/// directly (via [`opencode_core::session_timeline::project_turn`] + `append`) rather than relying on
+/// the TS event-fold projector. Coexistence caveat: if a TypeScript server is *also* projecting the
+/// same event stream, both would write — run only one projector when both servers are live (a Rust-only
+/// deployment is the target). Append failures are logged, not fatal: the turn already succeeded.
+async fn persist_timeline(
+    ctx: &AppContext,
+    session_id: &str,
+    provider: &str,
+    model_id: &str,
+    messages: &[opencode_llm::Message],
+    usage: &opencode_llm::Usage,
+) {
+    let agent = ctx
+        .sessions()
+        .get(session_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.agent)
+        .unwrap_or_else(|| "build".to_string());
+    let model = opencode_proto::ModelRef {
+        id: model_id.to_string(),
+        provider_id: provider.to_string(),
+        variant: None,
+    };
+    let entries = opencode_core::session_timeline::project_turn(
+        &agent,
+        &model,
+        messages,
+        usage,
+        now_ms(),
+        || format!("msg_{}", ulid::Ulid::new()),
+    );
+    for entry in entries {
+        match split_session_message(&entry) {
+            Ok((id, kind, data)) => {
+                if let Err(error) = ctx
+                    .session_messages()
+                    .append(session_id, &id, &kind, data)
+                    .await
+                {
+                    tracing::warn!(session = session_id, %error, "failed to persist timeline entry");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(session = session_id, %error, "failed to encode timeline entry")
+            }
+        }
+    }
 }
 
 /// Always-native internal liveness/readiness route (not part of the public OpenAPI contract).
@@ -4396,6 +4481,23 @@ mod tests {
             .iter()
             .any(|k| k.as_str() == "session.next.step.started"));
         assert!(seen.iter().any(|k| k.as_str() == "session.next.step.ended"));
+
+        // Native projector (write path): the finished turn is now in the `session_message` timeline,
+        // so `v2.session.messages` would return it.
+        let timeline = state
+            .ctx
+            .session_messages()
+            .list("ses_exec", None, None, opencode_db::MessageOrder::Asc, None)
+            .await
+            .unwrap();
+        assert_eq!(timeline.len(), 2, "user + assistant entries");
+        assert_eq!(timeline[0].kind, "user");
+        assert_eq!(timeline[0].data["text"], "weather in Paris?");
+        assert_eq!(timeline[1].kind, "assistant");
+        let content = timeline[1].data["content"].as_array().unwrap();
+        assert!(content
+            .iter()
+            .any(|c| c["type"] == "text" && c["text"].as_str().unwrap_or("").contains("sunny")));
     }
 
     #[tokio::test]

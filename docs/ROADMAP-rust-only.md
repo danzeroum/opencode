@@ -29,7 +29,7 @@
 - ✅ 1a — proto `SessionMessage` (união 8 variantes + content + tool-state) — **#69**
 - ✅ 1b — read-store `session_message` (seq-window + cursor) — **#70**
 - ✅ 1c — rota `GET /api/session/{id}/message` (cursor, 404, reconstrução) — **#71**
-- 🔄 1d — **write-path**: runner persiste `session_message` na execução do turno (projector) — *linchpin p/ dados reais*
+- ✅ 1d — **write-path**: runner projeta o turno → `session_message` (dados reais no chat!) — **#80 append, #81 projector, #82 wiring**
 - ⏳ 1e — `session.update` (metadata: title, etc.)
 - ⏳ 1f — `session.revert` / `session.unrevert`
 - ⏳ 1g — `session.share` / `session.unshare`
