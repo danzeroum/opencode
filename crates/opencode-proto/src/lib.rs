@@ -484,6 +484,163 @@ pub enum SessionListError {
 }
 
 // ---------------------------------------------------------------------------
+// V1 session contract (`Session` — returned by session.update/share/revert/…).
+// Mirrors `packages/core/src/v1/session.ts`; reuses `ModelRef` + `SessionTokens`.
+// ---------------------------------------------------------------------------
+
+/// A permission decision (`allow` | `deny` | `ask`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionAction {
+    /// Allow without asking.
+    Allow,
+    /// Deny.
+    Deny,
+    /// Ask the user.
+    Ask,
+}
+
+/// One permission rule (`{ permission, pattern, action }`). `PermissionRuleset` is `[PermissionRule]`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionRule {
+    /// The permission this rule governs (e.g. `bash`).
+    pub permission: String,
+    /// Resource glob the rule matches.
+    pub pattern: String,
+    /// The decision.
+    pub action: PermissionAction,
+}
+
+/// A per-file diff in a session/snapshot summary (`{ file?, patch?, additions, deletions, status? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SnapshotFileDiff {
+    /// File path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Unified diff patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+    /// Lines added.
+    pub additions: f64,
+    /// Lines deleted.
+    pub deletions: f64,
+    /// `added` | `deleted` | `modified`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// A session's change summary (`{ additions, deletions, files, diffs? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionSummary {
+    /// Total lines added.
+    pub additions: f64,
+    /// Total lines deleted.
+    pub deletions: f64,
+    /// Files changed.
+    pub files: f64,
+    /// Per-file diffs, if computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diffs: Option<Vec<SnapshotFileDiff>>,
+}
+
+/// A session's share link (`{ url }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionShare {
+    /// Public share URL.
+    pub url: String,
+}
+
+/// V1 session timestamps (`{ created, updated, compacting?, archived? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionV1Time {
+    /// Creation time (ms).
+    pub created: f64,
+    /// Last-updated time (ms).
+    pub updated: f64,
+    /// When a compaction is in progress, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compacting: Option<f64>,
+    /// Archival time, if archived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<f64>,
+}
+
+/// A session's revert pointer (`{ messageID, partID?, snapshot?, diff? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionRevert {
+    /// The message reverted to.
+    #[serde(rename = "messageID")]
+    pub message_id: String,
+    /// The part within the message, if finer-grained.
+    #[serde(rename = "partID", skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    /// Snapshot id captured at the revert point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// Diff from the revert point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+}
+
+/// `Session` (V1) — the full session object returned by `session.update`/`share`/`unshare`/`revert`/
+/// `unrevert`. Mirrors `packages/core/src/v1/session.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct Session {
+    /// Session id (`ses_…`).
+    pub id: String,
+    /// URL-safe slug.
+    pub slug: String,
+    /// Owning project id.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// Owning workspace id, if any.
+    #[serde(rename = "workspaceID", skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Working directory.
+    pub directory: String,
+    /// Session path, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Parent session id, if a child.
+    #[serde(rename = "parentID", skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Change summary, if computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SessionSummary>,
+    /// Accumulated cost (USD).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Accumulated token usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<SessionTokens>,
+    /// Share link, if shared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share: Option<SessionShare>,
+    /// Title.
+    pub title: String,
+    /// Active agent, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Active model, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Schema/app version that wrote the session.
+    pub version: String,
+    /// Free-form metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub metadata: Option<serde_json::Value>,
+    /// Timestamps.
+    pub time: SessionV1Time,
+    /// Permission ruleset (`[PermissionRule]`), if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Vec<PermissionRule>>,
+    /// Revert pointer, if the session is reverted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert: Option<SessionRevert>,
+}
+
+// ---------------------------------------------------------------------------
 // Project read contract (`project.list` — GET /project). `Project` mirrors
 // `packages/core/src/project/sql.ts`; the `icon_*` columns fold into `icon`.
 // ---------------------------------------------------------------------------
@@ -1636,5 +1793,69 @@ mod tests {
         assert_eq!(json["_tag"], "ProviderNotFoundError");
         assert_eq!(json["providerID"], "anthropic");
         assert_eq!(json["message"], "Provider not found: anthropic");
+    }
+
+    #[test]
+    fn v1_session_round_trips_with_camelcase_and_ruleset_array() {
+        let session = Session {
+            id: "ses_1".into(),
+            slug: "my-chat".into(),
+            project_id: "prj_1".into(),
+            workspace_id: None,
+            directory: "/repo".into(),
+            path: None,
+            parent_id: None,
+            summary: None,
+            cost: Some(0.02),
+            tokens: Some(SessionTokens {
+                input: 10.0,
+                output: 20.0,
+                reasoning: 0.0,
+                cache: TokenCache {
+                    read: 1.0,
+                    write: 2.0,
+                },
+            }),
+            share: Some(SessionShare {
+                url: "https://opencode.ai/s/x".into(),
+            }),
+            title: "My chat".into(),
+            agent: Some("build".into()),
+            model: Some(ModelRef {
+                id: "claude".into(),
+                provider_id: "anthropic".into(),
+                variant: None,
+            }),
+            version: "1.0".into(),
+            metadata: None,
+            time: SessionV1Time {
+                created: 100.0,
+                updated: 200.0,
+                compacting: None,
+                archived: None,
+            },
+            permission: Some(vec![PermissionRule {
+                permission: "bash".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Ask,
+            }]),
+            revert: Some(SessionRevert {
+                message_id: "msg_9".into(),
+                part_id: None,
+                snapshot: None,
+                diff: None,
+            }),
+        };
+        let json = serde_json::to_value(&session).unwrap();
+        assert_eq!(json["projectID"], "prj_1");
+        assert_eq!(json["model"]["providerID"], "anthropic");
+        assert_eq!(json["share"]["url"], "https://opencode.ai/s/x");
+        // PermissionRuleset is a bare array; action serializes lowercase.
+        assert_eq!(json["permission"][0]["action"], "ask");
+        assert_eq!(json["revert"]["messageID"], "msg_9");
+        // Absent optionals are omitted.
+        assert!(json.get("workspaceID").is_none());
+        let back: Session = serde_json::from_value(json).unwrap();
+        assert_eq!(back, session);
     }
 }
