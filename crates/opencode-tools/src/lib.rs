@@ -236,6 +236,48 @@ pub fn find_files(root: impl AsRef<Path>, query: &str, limit: usize) -> Vec<Stri
     out
 }
 
+/// Walk `root` (honoring the gitignore hierarchy) and return entries whose relative path contains
+/// `query` (case-insensitive) as `(relative_path, is_dir)`. `kind` filters to files (`"file"`),
+/// directories (`"directory"`), or both (any other value / `None`). Results are sorted and capped at
+/// `limit`. Backs the V2 `fs.find` route (files-and-directories search), unlike [`find_files`] which is
+/// files-only.
+pub fn find_entries(
+    root: impl AsRef<Path>,
+    query: &str,
+    kind: Option<&str>,
+    limit: usize,
+) -> Vec<(String, bool)> {
+    let root = root.as_ref();
+    let needle = query.to_lowercase();
+    let mut out = Vec::new();
+    for entry in ignore::Walk::new(root).flatten() {
+        let path = entry.path();
+        if path == root {
+            continue; // skip the root entry itself
+        }
+        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+        match kind {
+            Some("file") if is_dir => continue,
+            Some("directory") if !is_dir => continue,
+            _ => {}
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.is_empty() {
+            continue;
+        }
+        if needle.is_empty() || rel.to_lowercase().contains(&needle) {
+            out.push((rel, is_dir));
+        }
+    }
+    out.sort();
+    out.truncate(limit);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +349,25 @@ mod tests {
         assert_eq!(rs, vec!["a.rs", "sub/c.rs"]);
         let limited = find_files(dir.path(), "", 2);
         assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn find_entries_includes_dirs_and_filters_by_kind() {
+        let dir = fixture(); // a.rs, b.txt, sub/, sub/c.rs
+        let all = find_entries(dir.path(), "", None, 100);
+        // Includes the `sub` directory entry, unlike find_files.
+        assert!(all.iter().any(|(p, is_dir)| p == "sub" && *is_dir));
+        assert!(all.iter().any(|(p, is_dir)| p == "a.rs" && !*is_dir));
+        // kind="directory" keeps only directories.
+        let dirs = find_entries(dir.path(), "", Some("directory"), 100);
+        assert!(dirs.iter().all(|(_, is_dir)| *is_dir));
+        assert!(dirs.iter().any(|(p, _)| p == "sub"));
+        // kind="file" + substring query.
+        let rs = find_entries(dir.path(), ".rs", Some("file"), 100);
+        assert_eq!(
+            rs,
+            vec![("a.rs".to_string(), false), ("sub/c.rs".to_string(), false)]
+        );
     }
 
     #[test]
