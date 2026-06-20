@@ -222,6 +222,83 @@ pub enum PermissionConfig {
     Detailed(PermissionDetailedConfig),
 }
 
+/// OAuth configuration for a remote MCP server (`config.mcp[*].oauth`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpOAuthConfig {
+    /// OAuth client id.
+    #[serde(rename = "clientId", skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// OAuth client secret.
+    #[serde(rename = "clientSecret", skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Requested scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Local callback port.
+    #[serde(rename = "callbackPort", skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<i64>,
+    /// Redirect URI.
+    #[serde(rename = "redirectUri", skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+}
+
+/// A remote MCP server's `oauth` setting: a config block, or `false` to disable OAuth auto-detection
+/// (`anyOf[McpOAuthConfig, false]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum McpOAuthSetting {
+    /// Explicit OAuth config.
+    Config(McpOAuthConfig),
+    /// `false` — disable OAuth auto-detection.
+    Disabled(bool),
+}
+
+/// A local (stdio) MCP server (`config.mcp[*]`, `type: "local"`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpLocalConfig {
+    /// Always `"local"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Command + args to launch the server.
+    pub command: Vec<String>,
+    /// Working directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Environment variables (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub environment: Option<serde_json::Value>,
+    /// Whether the server is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Connection timeout (ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i64>,
+}
+
+/// A remote (HTTP/SSE) MCP server (`config.mcp[*]`, `type: "remote"`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpRemoteConfig {
+    /// Always `"remote"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Server URL.
+    pub url: String,
+    /// Whether the server is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Extra request headers (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub headers: Option<serde_json::Value>,
+    /// OAuth setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthSetting>,
+    /// Connection timeout (ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +380,36 @@ mod tests {
         let back: PermissionConfig =
             serde_json::from_value(serde_json::to_value(&detailed).unwrap()).unwrap();
         assert_eq!(back, detailed);
+    }
+
+    #[test]
+    fn mcp_local_and_remote_configs_round_trip() {
+        let local: McpLocalConfig = serde_json::from_value(serde_json::json!({
+            "type": "local",
+            "command": ["bun", "x", "server"],
+            "environment": { "TOKEN": "x" }
+        }))
+        .unwrap();
+        assert_eq!(local.kind, "local");
+        assert_eq!(local.command, ["bun", "x", "server"]);
+        assert_eq!(local.environment.as_ref().unwrap()["TOKEN"], "x");
+
+        // `oauth: false` decodes to the Disabled arm; an object decodes to Config.
+        let remote_off: McpRemoteConfig = serde_json::from_value(serde_json::json!({
+            "type": "remote", "url": "https://x", "oauth": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            remote_off.oauth,
+            Some(McpOAuthSetting::Disabled(false))
+        ));
+        let remote_oauth: McpRemoteConfig = serde_json::from_value(serde_json::json!({
+            "type": "remote", "url": "https://x", "oauth": { "clientId": "abc" }
+        }))
+        .unwrap();
+        match remote_oauth.oauth {
+            Some(McpOAuthSetting::Config(c)) => assert_eq!(c.client_id.as_deref(), Some("abc")),
+            other => panic!("expected oauth config, got {other:?}"),
+        }
     }
 }
