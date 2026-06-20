@@ -19,6 +19,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/find/file",
     "/find",
     "/file",
+    "/api/fs/list",
     "/log",
     "/permission",
     "/api/permission/request",

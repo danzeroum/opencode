@@ -2749,6 +2749,7 @@ async fn v2_provider_get(
         v2_session_permission_list,
         v2_question_request_list,
         v2_session_question_list,
+        v2_fs_list,
         v2_location_get,
         v2_provider_get
     ),
@@ -2914,6 +2915,8 @@ async fn v2_provider_get(
         opencode_proto::QuestionV2Request,
         opencode_proto::QuestionRequestListResponse,
         opencode_proto::SessionQuestionListResponse,
+        opencode_proto::FileSystemEntry,
+        opencode_proto::FsListResponse,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2934,7 +2937,8 @@ async fn v2_provider_get(
         (name = "skills", description = "Skill catalog routes"),
         (name = "commands", description = "Command catalog routes"),
         (name = "reference", description = "Reference catalog routes"),
-        (name = "agent", description = "Agent catalog routes")
+        (name = "agent", description = "Agent catalog routes"),
+        (name = "fs", description = "Filesystem routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3036,6 +3040,97 @@ async fn file_list(
         })
         .collect();
     Ok(Json(data))
+}
+
+/// Best-effort MIME type for a filesystem entry — a small extension map (no external dependency),
+/// defaulting to `application/octet-stream` for files and `inode/directory` for directories. The
+/// contract only constrains `mime` to a string; this keeps the V2 fs listing useful to the web GUI
+/// (icon/type hints) without pulling in a MIME database.
+fn mime_for(name: &str, is_dir: bool) -> &'static str {
+    if is_dir {
+        return "inode/directory";
+    }
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "txt" | "log" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "json" | "jsonc" => "application/json",
+        "js" | "mjs" | "cjs" => "text/javascript",
+        "ts" | "tsx" => "text/typescript",
+        "jsx" => "text/jsx",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "rs" => "text/rust",
+        "py" => "text/x-python",
+        "go" => "text/x-go",
+        "toml" => "application/toml",
+        "yaml" | "yml" => "application/yaml",
+        "xml" => "application/xml",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "wasm" => "application/wasm",
+        "sh" | "bash" => "application/x-sh",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `GET /api/fs/list` — list a directory's entries (group `fs`). Matches the golden `v2.fs.list`: 200
+/// `{ location, data }` + 400/401. Lists the resolved location's directory (optionally a `path` subdir)
+/// via `opencode_tools`, mapping each entry to `{ path, type, mime }`.
+#[utoipa::path(
+    get,
+    path = "/api/fs/list",
+    operation_id = "v2.fs.list",
+    params(
+        ("location" = Option<String>, Query, description = "Location context (deepObject)"),
+        ("path" = Option<String>, Query, description = "Subpath within the location to list")
+    ),
+    responses(
+        (status = 200, description = "Filesystem entries", body = opencode_proto::FsListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "fs"
+)]
+async fn v2_fs_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::FsListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    let base = std::path::PathBuf::from(&location.directory);
+    let sub = params.get("path").filter(|s| !s.is_empty()).cloned();
+    let target = match &sub {
+        Some(p) => base.join(p),
+        None => base.clone(),
+    };
+    let nodes = opencode_tools::files::list_dir_nodes(&target).map_err(|e| {
+        ApiError(opencode_effect::AppError::BadRequest(format!(
+            "cannot list directory: {e}"
+        )))
+    })?;
+    let data = nodes
+        .into_iter()
+        .map(|n| {
+            let rel = match &sub {
+                Some(p) => format!("{}/{}", p.trim_end_matches('/'), n.name),
+                None => n.name.clone(),
+            };
+            opencode_proto::FileSystemEntry {
+                path: rel,
+                kind: if n.is_dir { "directory" } else { "file" }.to_string(),
+                mime: mime_for(&n.name, n.is_dir).to_string(),
+            }
+        })
+        .collect();
+    Ok(Json(opencode_proto::FsListResponse { location, data }))
 }
 
 /// Run `git -C <dir> <args>` and return trimmed stdout, or `None` on any failure (not a repo, git
@@ -3547,6 +3642,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("agent") {
         router = router.route("/api/agent", get(v2_agent_list));
+    }
+    if state.routes.handles("fs") {
+        router = router.route("/api/fs/list", get(v2_fs_list));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -4926,6 +5024,52 @@ mod tests {
                 "status": "connected"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn v2_fs_list_returns_entries_with_mime() {
+        use tower::ServiceExt;
+        // Seed a project whose worktree is the temp dir so location resolves to it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.json"), "{}").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        let mut rec = test_project_record("prj_1");
+        rec.worktree = dir.path().display().to_string();
+        projects.insert(rec);
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("fs"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let uri = format!("/api/fs/list?directory={}", dir.path().display());
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.get("location").is_some());
+        let entries = v["data"].as_array().unwrap();
+        let json = entries.iter().find(|e| e["path"] == "a.json").unwrap();
+        assert_eq!(json["type"], "file");
+        assert_eq!(json["mime"], "application/json");
+        let sub = entries.iter().find(|e| e["path"] == "sub").unwrap();
+        assert_eq!(sub["type"], "directory");
+        assert_eq!(sub["mime"], "inode/directory");
     }
 
     #[tokio::test]
