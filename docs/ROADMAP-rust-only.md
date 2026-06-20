@@ -8,6 +8,7 @@
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
+- ⚠️ **Clippy deve ser full-workspace no toolchain do CI**: rode `rustup update stable` e `cargo clippy --all-targets -- -D warnings` (sem `-p`), porque o CI usa o **stable mais novo** (lints mais estritos, ex.: `unnecessary_sort_by` no 1.96). Clippy escopado por crate **mascara** erros de outras crates (foi o que deixou o job `rust` vermelho até #119).
 - Merge na `rust-migration` a cada fatia. Branch de dev: `claude/affectionate-davinci-05ifmg`.
 - Decisões/bloqueios que precisam do humano → `docs/PENDENCIAS.md` (não paro; sigo pra próxima fatia tratável).
 

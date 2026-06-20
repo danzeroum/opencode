@@ -259,7 +259,7 @@ impl SessionMessageStore for MemorySessionMessageStore {
             .collect();
         match order {
             MessageOrder::Asc => rows.sort_by_key(|r| r.seq),
-            MessageOrder::Desc => rows.sort_by(|a, b| b.seq.cmp(&a.seq)),
+            MessageOrder::Desc => rows.sort_by_key(|r| std::cmp::Reverse(r.seq)),
         }
         if let Some(l) = limit {
             rows.truncate(l.max(0) as usize);
