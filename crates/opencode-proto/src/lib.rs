@@ -220,6 +220,29 @@ pub struct FileNode {
     pub ignored: bool,
 }
 
+/// A filesystem entry returned by the V2 fs routes (`v2.fs.list` / `v2.fs.find`). Mirrors the golden
+/// `FileSystemEntry`: `{ path, type, mime }`, all required (`type` is `"file"` | `"directory"`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FileSystemEntry {
+    /// Path relative to the requested location/path.
+    pub path: String,
+    /// `"file"` or `"directory"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Best-effort MIME type (`inode/directory` for directories).
+    pub mime: String,
+}
+
+/// 200 body of `v2.fs.list` / `v2.fs.find`: the `Location.response` wrapper `{ location, data }` around
+/// the filesystem entries.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FsListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The filesystem entries.
+    pub data: Vec<FileSystemEntry>,
+}
+
 /// Version-control info for a directory (`vcs.get`): `{ branch?, default_branch? }`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct VcsInfo {
