@@ -128,6 +128,100 @@ pub struct ConfigV2ExperimentalPolicy {
     pub resource: String,
 }
 
+/// A permission decision in config (`ask` | `allow` | `deny`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionActionConfig {
+    /// Ask the user.
+    Ask,
+    /// Allow.
+    Allow,
+    /// Deny.
+    Deny,
+}
+
+/// A per-pattern permission map (`{ "<glob>": action }`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct PermissionObjectConfig(pub std::collections::BTreeMap<String, PermissionActionConfig>);
+
+/// A permission rule in config: a flat action, or a per-pattern map
+/// (`anyOf[PermissionActionConfig, PermissionObjectConfig]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PermissionRuleConfig {
+    /// A single action for the whole permission.
+    Action(PermissionActionConfig),
+    /// Per-pattern actions.
+    Object(PermissionObjectConfig),
+}
+
+/// Per-tool permission overrides (`config.permission` detailed form). Each field is a rule (most) or a
+/// flat action (the no-pattern tools); unknown tools fall through `additionalProperties` (dropped by the
+/// contract normalizer, so not modeled).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionDetailedConfig {
+    /// `read` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<PermissionRuleConfig>,
+    /// `edit` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit: Option<PermissionRuleConfig>,
+    /// `glob` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glob: Option<PermissionRuleConfig>,
+    /// `grep` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grep: Option<PermissionRuleConfig>,
+    /// `list` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<PermissionRuleConfig>,
+    /// `bash` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bash: Option<PermissionRuleConfig>,
+    /// `task` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<PermissionRuleConfig>,
+    /// `external_directory` access.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_directory: Option<PermissionRuleConfig>,
+    /// `todowrite` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todowrite: Option<PermissionActionConfig>,
+    /// `question` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<PermissionActionConfig>,
+    /// `webfetch` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webfetch: Option<PermissionActionConfig>,
+    /// `websearch` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websearch: Option<PermissionActionConfig>,
+    /// `lsp` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp: Option<PermissionRuleConfig>,
+    /// `doom_loop` guard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doom_loop: Option<PermissionActionConfig>,
+    /// `skill` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill: Option<PermissionRuleConfig>,
+}
+
+/// `config.permission` / `AgentConfig.permission`: a flat action applied to everything, or per-tool
+/// overrides (`anyOf[PermissionActionConfig, PermissionDetailedConfig]`).
+// The `Detailed` variant is inherently far larger than the flat `Action`; this is a short-lived wire
+// DTO, so boxing to satisfy the stack-size lint would only add indirection.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PermissionConfig {
+    /// One action for all tools.
+    Action(PermissionActionConfig),
+    /// Per-tool overrides.
+    Detailed(PermissionDetailedConfig),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +272,36 @@ mod tests {
         let v = serde_json::to_value(&policy).unwrap();
         assert_eq!(v["effect"], "allow");
         assert_eq!(v["action"], "provider.use");
+    }
+
+    #[test]
+    fn permission_config_flat_and_detailed_round_trip() {
+        // Flat form: a single action string.
+        let flat: PermissionConfig = serde_json::from_value(serde_json::json!("ask")).unwrap();
+        assert_eq!(flat, PermissionConfig::Action(PermissionActionConfig::Ask));
+        assert_eq!(serde_json::to_value(&flat).unwrap(), "ask");
+
+        // Detailed form: per-tool overrides; `bash` as a per-pattern map, `webfetch` as a flat action.
+        let detailed: PermissionConfig = serde_json::from_value(serde_json::json!({
+            "bash": { "git *": "allow", "rm *": "deny" },
+            "edit": "ask",
+            "webfetch": "deny"
+        }))
+        .unwrap();
+        match &detailed {
+            PermissionConfig::Detailed(d) => {
+                assert!(matches!(d.bash, Some(PermissionRuleConfig::Object(_))));
+                assert!(matches!(
+                    d.edit,
+                    Some(PermissionRuleConfig::Action(PermissionActionConfig::Ask))
+                ));
+                assert_eq!(d.webfetch, Some(PermissionActionConfig::Deny));
+            }
+            other => panic!("expected detailed, got {other:?}"),
+        }
+        // Round-trips back to the same JSON shape.
+        let back: PermissionConfig =
+            serde_json::from_value(serde_json::to_value(&detailed).unwrap()).unwrap();
+        assert_eq!(back, detailed);
     }
 }
