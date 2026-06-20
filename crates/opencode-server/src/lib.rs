@@ -129,18 +129,19 @@ pub struct RunnerServices {
 }
 
 impl RunnerServices {
-    /// Production wiring: a real HTTPS provider registry with environment credentials, an allow-all
-    /// gate (the asking gate that uses `pending` is a later increment), and `root` as the native tools'
-    /// working directory.
+    /// Production wiring: a real HTTPS provider registry with environment credentials, the asking
+    /// [`StorePermissionGate`] (write-class tools require `permission.respond`), and `root` as the
+    /// native tools' working directory.
     pub fn from_env(root: impl Into<std::path::PathBuf>) -> Result<Self, EngineError> {
+        let pending = Arc::new(PendingPermissions::default());
         Ok(Self {
             engines: Arc::new(EnvEngineFactory {
                 registry: Arc::new(DefaultRegistry::new()?),
                 endpoint: None,
             }),
-            gate: Arc::new(AllowAll),
+            gate: Arc::new(StorePermissionGate::new(pending.clone())),
             root: root.into(),
-            pending: Arc::new(PendingPermissions::default()),
+            pending,
         })
     }
 }
@@ -403,6 +404,37 @@ fn pending_to_v2(m: PendingMeta) -> opencode_proto::PermissionV2Request {
         save: None,
         metadata: Some(m.input),
         source: None,
+    }
+}
+
+/// A [`PermissionGate`] backed by [`PendingPermissions`]: read-class tools run immediately; write-class
+/// tools (`write`/`edit`/`patch`/`bash`) register a pending request and **park the run** until
+/// `permission.respond` resolves it. A dropped resolver denies the call. This is the asking gate the
+/// production runner uses (`RunnerServices::from_env`); tests default to [`AllowAll`].
+pub(crate) struct StorePermissionGate {
+    pending: Arc<PendingPermissions>,
+}
+
+impl StorePermissionGate {
+    pub(crate) fn new(pending: Arc<PendingPermissions>) -> Self {
+        Self { pending }
+    }
+
+    /// Whether a tool needs user approval before running (write-class). Read-class tools don't ask.
+    fn requires_ask(tool: &str) -> bool {
+        matches!(tool, "write" | "edit" | "patch" | "bash")
+    }
+}
+
+#[async_trait]
+impl PermissionGate for StorePermissionGate {
+    async fn check(&self, session_id: &str, tool: &str, input: &serde_json::Value) -> Decision {
+        if !Self::requires_ask(tool) {
+            return Decision::Allow;
+        }
+        let (_id, rx) = self.pending.register(session_id, tool, input.clone());
+        rx.await
+            .unwrap_or_else(|_| Decision::Deny("permission request dropped".to_string()))
     }
 }
 
@@ -6204,6 +6236,35 @@ mod tests {
         assert_eq!(rx.await.unwrap(), Decision::Deny("rejected by user".into()));
         // Unknown id → not resolved.
         assert!(!pending.resolve("per_missing", Decision::Allow));
+    }
+
+    #[tokio::test]
+    async fn store_gate_allows_reads_and_parks_writes_until_resolved() {
+        let pending = Arc::new(PendingPermissions::default());
+        let gate = StorePermissionGate::new(pending.clone());
+        // A read-class tool runs immediately (no pending request).
+        assert_eq!(
+            gate.check("ses_1", "read", &serde_json::json!({})).await,
+            Decision::Allow
+        );
+        assert!(pending.list(None).is_empty());
+
+        // A write-class tool parks; a concurrent resolve unblocks it with the decision.
+        let parked = pending.clone();
+        let check = tokio::spawn(async move {
+            StorePermissionGate::new(parked)
+                .check("ses_1", "write", &serde_json::json!({ "path": "x" }))
+                .await
+        });
+        // `register` runs synchronously before the gate awaits, so the request appears after a yield.
+        let id = loop {
+            if let Some(m) = pending.list(None).into_iter().next() {
+                break m.id;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(pending.resolve(&id, Decision::Allow));
+        assert_eq!(check.await.unwrap(), Decision::Allow);
     }
 
     #[tokio::test]
