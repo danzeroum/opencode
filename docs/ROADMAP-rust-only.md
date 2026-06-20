@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 33 paths** · PRs desta rodada autônoma: #69–#99.
+> **Rotas nativas contrato-enforçadas: 35 paths** · PRs desta rodada autônoma: #69–#100.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -55,8 +55,9 @@
 - ✅ 2a — `config.get`/`global.config.get` (tipo `Config` + loading deep-merge #96) + `config.update`/`global.config.update` (#97, escreve `opencode.json` com merge preservando campos)
 - ⏳ 2b — **config com proveniência** (cascata 7 níveis) — capacidade nova (ver PENDENCIAS #1); + os 5 níveis restantes do merge (remote/custom/.opencode/inline/managed) + `.jsonc`
 - ⏳ 2c — `provider.list` admin + `provider.auth` (escrita de credencial) + teste de conexão
-- 🔄 2d — agents: `app.agents` rota wirada + tipos `Agent`/`AgentModel` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
-- 🔄 2e — commands: `command.list` rota wirada + tipo `Command` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/command/*.md` + MCP/skills) + escrita
+- 🔄 2d — agents: `app.agents` (V1) rota wirada + tipos `Agent`/`AgentModel` (#87, retorna `[]`); falta `v2.agent.list` (`/api/agent`, precisa `AgentV2Info`+`PermissionV2Rule`), **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
+- 🔄 2e — commands: `command.list` (V1) + `v2.command.list` (`/api/command`, tipo `CommandV2Info`, #100) rotas wiradas (retornam `[]`); falta **loading** (built-in + `.opencode/command/*.md` + MCP/skills) + escrita
+- 🔄 2j — skills: `v2.skill.list` (`/api/skill`, tipo `SkillV2Info`, #100) rota wirada (retorna `[]`); falta **loading** (built-in + `.opencode/skills`) ; resta `v2.reference.list` (`/api/reference`, precisa `Reference*Source`)
 - ⏳ 2f — políticas (permission rules)
 - ⏳ 2g — snapshots timeline (`session.revert` ligado à UI)
 - ⏳ 2h — shared list

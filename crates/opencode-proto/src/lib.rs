@@ -1352,6 +1352,67 @@ pub struct ProviderGetResponse {
     pub data: ProviderV2Info,
 }
 
+/// A skill entry (`v2.skill.list` item). Mirrors the golden `SkillV2Info`: `{ name, description?,
+/// slash?, location, content }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SkillV2Info {
+    /// Skill name.
+    pub name: String,
+    /// Optional description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether the skill is invokable as a slash command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slash: Option<bool>,
+    /// Source location (path or origin id).
+    pub location: String,
+    /// Skill body/content.
+    pub content: String,
+}
+
+/// 200 body of `v2.skill.list` (GET /api/skill): the `Location.response` wrapper `{ location, data }`
+/// around the skill list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SkillListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The skills.
+    pub data: Vec<SkillV2Info>,
+}
+
+/// A command entry (`v2.command.list` item). Mirrors the golden `CommandV2Info`: `{ name, template,
+/// description?, agent?, model?, subtask? }`. `model` is a typed `{ id, providerID, variant? }` ref
+/// (reusing [`ModelRef`]), not a free-form object.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct CommandV2Info {
+    /// Command name.
+    pub name: String,
+    /// Prompt template.
+    pub template: String,
+    /// Optional description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional agent the command runs as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Optional model override (`{ id, providerID, variant? }`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Whether the command runs as a subtask.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtask: Option<bool>,
+}
+
+/// 200 body of `v2.command.list` (GET /api/command): the `Location.response` wrapper
+/// `{ location, data }` around the command list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct CommandListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The commands.
+    pub data: Vec<CommandV2Info>,
+}
+
 /// `ProviderNotFoundError` — 404 for `v2.provider.get` (`{ _tag, providerID, message }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProviderNotFoundError {
