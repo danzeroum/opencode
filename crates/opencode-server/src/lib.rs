@@ -2272,6 +2272,54 @@ async fn project_current(
     }
 }
 
+/// `GET /project/{projectID}/directories` — a project's directories (group `project`). Matches the
+/// golden `project.directories`: 200 `[ProjectDirectory]`, 400 `BadRequestError`. Returns the project's
+/// worktree plus any sandbox worktrees; an unknown project yields an empty list (the contract has no
+/// 404 for this route).
+#[utoipa::path(
+    get,
+    path = "/project/{projectID}/directories",
+    operation_id = "project.directories",
+    params(
+        ("projectID" = String, Path, description = "Project id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Project directories", body = Vec<opencode_proto::ProjectDirectory>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "project"
+)]
+async fn project_directories(
+    State(state): State<ServerState>,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<opencode_proto::ProjectDirectory>>, ApiBadRequest> {
+    let projects = state
+        .ctx
+        .projects()
+        .list()
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    let Some(project) = projects.into_iter().find(|p| p.id == project_id) else {
+        return Ok(Json(Vec::new()));
+    };
+    let mut dirs = vec![opencode_proto::ProjectDirectory {
+        directory: project.worktree,
+        strategy: None,
+    }];
+    dirs.extend(
+        project
+            .sandboxes
+            .into_iter()
+            .map(|directory| opencode_proto::ProjectDirectory {
+                directory,
+                strategy: None,
+            }),
+    );
+    Ok(Json(dirs))
+}
+
 /// Resolve the request `location` (the `Location.response` wrapper's `location` field) from the query.
 /// Mirrors the TS location middleware's `ref()` (query `location[directory]` / `location[workspace]`,
 /// else cwd), then resolves the project from the shared `project` store by worktree. Find-or-create and
@@ -2891,6 +2939,7 @@ async fn v2_provider_get(
         vcs_get,
         project_list,
         project_current,
+        project_directories,
         v2_event_subscribe,
         session_abort,
         v2_model_list,
@@ -2940,6 +2989,7 @@ async fn v2_provider_get(
         opencode_proto::InvalidCursorError,
         opencode_proto::SessionListError,
         opencode_proto::Project,
+        opencode_proto::ProjectDirectory,
         opencode_proto::ProjectIcon,
         opencode_proto::ProjectCommands,
         opencode_proto::ProjectTime,
@@ -4087,6 +4137,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("project") {
         router = router.route("/project", get(project_list));
         router = router.route("/project/current", get(project_current));
+        router = router.route("/project/{projectID}/directories", get(project_directories));
     }
     if state.routes.handles("model") {
         router = router.route("/api/model", get(v2_model_list));
@@ -6452,6 +6503,60 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["name"], "BadRequest");
+    }
+
+    #[tokio::test]
+    async fn project_directories_lists_worktree_and_sandboxes() {
+        use tower::ServiceExt;
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1")); // worktree "/repo", sandboxes ["/repo/sb"]
+        let make = |routes| ServerState {
+            ctx: AppContext::new(AppServices {
+                projects: projects.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse(routes),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(make("project"))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/project/prj_1/directories")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let dirs: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["directory"].as_str().unwrap())
+            .collect();
+        assert_eq!(dirs, vec!["/repo", "/repo/sb"]);
+        // Unknown project → empty list (no 404 in the contract).
+        let resp = build_router(make("project"))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/project/prj_missing/directories")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!([]));
     }
 
     #[tokio::test]

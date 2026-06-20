@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 53 paths** · PRs desta rodada autônoma: #69–#115.
+> **Rotas nativas contrato-enforçadas: 54 paths** · PRs desta rodada autônoma: #69–#116.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -67,6 +67,7 @@
 - 🔄 2e — commands: `command.list` (V1) + `v2.command.list` (`/api/command`, tipo `CommandV2Info`, #100) rotas wiradas (retornam `[]`); falta **loading** (built-in + `.opencode/command/*.md` + MCP/skills) + escrita
 - 🔄 2j — skills/references: `v2.skill.list` (`/api/skill`, tipo `SkillV2Info`, #100) + `v2.reference.list` (`/api/reference`, tipos `ReferenceInfo`/`ReferenceSource`, #101) rotas wiradas (retornam `[]`); falta **loading** (built-in + `.opencode/skills` + `config.references`)
 - ⏳ 2f — políticas (permission rules)
+- ✅ 2k — `project.directories` (`GET /project/{id}/directories`, dados reais: worktree + sandboxes, tipo `ProjectDirectory`) — **#116**; faltam `project.update`/`project.initGit` (escrita/ação)
 - ⏳ 2g — snapshots timeline (`session.revert` ligado à UI)
 - ⏳ 2h — shared list
 - ⏳ 2i — aparência (`config.theme` persistência) — UI-driven, backend mínimo
