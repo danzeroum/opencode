@@ -33,6 +33,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/question",
     "/api/question/request",
     "/api/session/{sessionID}/question",
+    "/api/session/{sessionID}/permission/{requestID}/reply",
     "/mcp",
     "/lsp",
     "/vcs",

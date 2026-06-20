@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 58 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#130. CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
+> **Rotas nativas contrato-enforçadas: 59 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#131. CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -61,7 +61,7 @@
   - ✅ `session.revert` / `session.unrevert` (set/clear revert pointer) — **#86**
   - ⏳ `share`/`unshare` — precisa do **serviço externo de URL** (não é só projeção); ver nota
   - ⏳ `command`/`summarize` — usam a execução (write-path pronto)
-- ✅ 1m — **permission gating (engine) — fim-a-fim**: gate bloqueante `StorePermissionGate` (#130: read-class roda direto; write-class `write`/`edit`/`patch`/`bash` registra pedido e **parqueia o run** até resolver; wired no `from_env` de produção) + store `PendingPermissions` (register/list/resolve via oneshot) + as 3 listas lêem o store + **`permission.respond`** (`POST /session/{id}/permissions/{permID}`, once/always→Allow, reject→Deny) acorda o run — **#129–#130**. **Falta** (refino): `v2.session.permission.reply` (variante V2), semântica de `always` (salvar regra), e política dirigida por config/ruleset (hoje lista fixa de tools)
+- ✅ 1m — **permission gating (engine) — fim-a-fim**: gate bloqueante `StorePermissionGate` (#130: read-class roda direto; write-class `write`/`edit`/`patch`/`bash` registra pedido e **parqueia o run** até resolver; wired no `from_env` de produção) + store `PendingPermissions` (register/list/resolve via oneshot) + as 3 listas lêem o store + **`permission.respond`** (`POST /session/{id}/permissions/{permID}`, once/always→Allow, reject→Deny) acorda o run — **#129–#130**. `v2.session.permission.reply` (`POST /api/session/{id}/permission/{reqID}/reply`, 204, GUI-facing) ✅ **#131** (reusa o store). **Falta** (refino): semântica de `always` (salvar regra) e política dirigida por config/ruleset (hoje lista fixa de tools write/edit/patch/bash)
 - 🔄 1n — `question.list` ✅ (#77, idem) · `v2.question.request.list` + `v2.session.question.list` ✅ (#105, tipos `QuestionV2Request`/`QuestionV2Info`/`QuestionV2Option`/`QuestionV2Tool`; vazios/404 até a engine) · `question.reply`/`reject`/`v2.session.question.reply`/`reject` ⏳ (precisa engine)
 
 ## Fase 2 — Admin

@@ -434,6 +434,16 @@ pub enum PermissionRespondNotFound {
     Permission(PermissionNotFoundError),
 }
 
+/// The 404 union of `v2.session.permission.reply`: `PermissionNotFoundError` | `SessionNotFoundError`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PermissionReplyNotFound {
+    /// The permission request wasn't found.
+    Permission(PermissionNotFoundError),
+    /// The session wasn't found.
+    Session(SessionNotFoundError),
+}
+
 /// One choice for a [`QuestionInfo`] (`{ label, description }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct QuestionOption {

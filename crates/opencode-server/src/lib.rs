@@ -3139,6 +3139,59 @@ async fn permission_respond(
     }
 }
 
+/// Request body for `v2.session.permission.reply`: `{ reply: once|always|reject, message? }`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct PermissionReplyBody {
+    /// The user's decision.
+    reply: String,
+    /// Optional message accompanying the decision.
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// `POST /api/session/{sessionID}/permission/{requestID}/reply` — V2 reply to a pending permission
+/// (group `session`). Matches the golden `v2.session.permission.reply`: 204 (no content), 400/401, 404
+/// `PermissionNotFoundError | SessionNotFoundError`. Same resolution as `permission.respond`
+/// (once/always → Allow, reject → Deny), waking the parked run.
+#[utoipa::path(
+    post,
+    path = "/api/session/{sessionID}/permission/{requestID}/reply",
+    operation_id = "v2.session.permission.reply",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("requestID" = String, Path, description = "Permission request id")
+    ),
+    request_body = PermissionReplyBody,
+    responses(
+        (status = 204, description = "Replied"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Not found", body = opencode_proto::PermissionReplyNotFound)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_permission_reply(
+    State(state): State<ServerState>,
+    axum::extract::Path((_session_id, request_id)): axum::extract::Path<(String, String)>,
+    body: Option<Json<PermissionReplyBody>>,
+) -> Result<axum::http::StatusCode, PermissionRespondFailure> {
+    let (reply, _message) = body.map(|Json(b)| (b.reply, b.message)).unwrap_or_default();
+    let decision = match reply.as_str() {
+        "once" | "always" => Decision::Allow,
+        "reject" => Decision::Deny("rejected by user".to_string()),
+        other => {
+            return Err(PermissionRespondFailure::BadRequest(format!(
+                "invalid reply: {other} (expected once|always|reject)"
+            )))
+        }
+    };
+    if state.runner.pending.resolve(&request_id, decision) {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(PermissionRespondFailure::NotFound(request_id))
+    }
+}
+
 /// `GET /api/question/request` — pending question requests (group `question`). Matches the golden
 /// `v2.question.request.list`: 200 `{ location, data }` + 400/401. Pending questions are ephemeral
 /// execution state produced by the runner; until that engine exists this is empty.
@@ -3433,6 +3486,7 @@ async fn v2_provider_get(
         v2_permission_saved_list,
         v2_session_permission_list,
         permission_respond,
+        v2_session_permission_reply,
         v2_question_request_list,
         v2_session_question_list,
         v2_session_context,
@@ -3604,7 +3658,9 @@ async fn v2_provider_get(
         opencode_proto::SessionPermissionListResponse,
         opencode_proto::PermissionNotFoundError,
         opencode_proto::PermissionRespondNotFound,
+        opencode_proto::PermissionReplyNotFound,
         PermissionRespondBody,
+        PermissionReplyBody,
         opencode_proto::QuestionV2Tool,
         opencode_proto::QuestionV2Option,
         opencode_proto::QuestionV2Info,
@@ -5021,6 +5077,10 @@ pub fn build_router(state: ServerState) -> Router {
             "/api/session/{sessionID}/question",
             get(v2_session_question_list),
         );
+        router = router.route(
+            "/api/session/{sessionID}/permission/{requestID}/reply",
+            post(v2_session_permission_reply),
+        );
         router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
         router = router.route("/session", get(session_list).post(session_create));
         router = router.route("/session/status", get(session_status));
@@ -6221,6 +6281,50 @@ mod tests {
                     .uri(&uri)
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"response":"once"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn v2_permission_reply_resolves_with_204() {
+        use tower::ServiceExt;
+        let pending = Arc::new(PendingPermissions::default());
+        let (req_id, rx) = pending.register("ses_1", "edit", serde_json::json!({}));
+        let state = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices {
+                pending: pending.clone(),
+                ..RunnerServices::default()
+            },
+            coordinator: SessionCoordinator::default(),
+        };
+        let uri = format!("/api/session/ses_1/permission/{req_id}/reply");
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"reply":"always"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert_eq!(rx.await.unwrap(), Decision::Allow);
+        // Already resolved → 404.
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"reply":"reject"}"#))
                     .unwrap(),
             )
             .await
