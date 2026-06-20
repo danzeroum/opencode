@@ -62,6 +62,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/session/status",
     "/session/{sessionID}/todo",
     "/session/{sessionID}/children",
+    "/session/{sessionID}/message/{messageID}",
     "/global/dispose",
     "/global/event",
     "/instance/dispose",
@@ -262,6 +263,17 @@ fn normalize_schema(schema: &Value, components: &Map<String, Value>, depth: u8) 
         } else {
             out.insert("allOf".into(), Value::Array(all));
         }
+    }
+    // An `object` with no statically-declared `properties` (a free-form object, a map via
+    // `additionalProperties`, or a closed empty object `{}`) all describe "some JSON object" at this
+    // structural level. Canonicalize them to `properties: {}` so e.g. utoipa's `{ "type": "object" }`
+    // (a `serde_json::Value` field) matches the golden's `z.object({})` (`{ properties: {} }`).
+    if out.get("type").and_then(Value::as_str) == Some("object")
+        && !out.contains_key("properties")
+        && !out.contains_key("anyOf")
+        && !out.contains_key("allOf")
+    {
+        out.insert("properties".into(), Value::Object(Map::new()));
     }
     Value::Object(out)
 }
