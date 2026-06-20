@@ -299,6 +299,60 @@ pub struct McpRemoteConfig {
     pub timeout: Option<i64>,
 }
 
+/// An agent definition in config (`config.agent[*]` / `config.mode[*]`). All fields optional; unknown
+/// keys fall through `additionalProperties` (dropped by the normalizer). `tools`/`options` are maps →
+/// `Value`; `color` is a hex-or-theme string (both arms normalize to `{type:string}`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AgentConfig {
+    /// Default model (`provider/model`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Experimental-mode variant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    /// Sampling temperature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Nucleus-sampling top-p.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// System prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Per-tool enable/disable map.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub tools: Option<serde_json::Value>,
+    /// Whether the agent is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable: Option<bool>,
+    /// Description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `subagent` | `primary` | `all`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Hidden from the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// Provider/AI-SDK options (free-form).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub options: Option<serde_json::Value>,
+    /// Hex (`#RRGGBB`) or theme color (`primary`/`accent`/…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Max steps per turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<i64>,
+    /// Max steps per turn (alias).
+    #[serde(rename = "maxSteps", skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<i64>,
+    /// Permission overrides for this agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionConfig>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +465,31 @@ mod tests {
             Some(McpOAuthSetting::Config(c)) => assert_eq!(c.client_id.as_deref(), Some("abc")),
             other => panic!("expected oauth config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_config_round_trips_with_maps_and_permission() {
+        let agent: AgentConfig = serde_json::from_value(serde_json::json!({
+            "model": "anthropic/claude",
+            "mode": "primary",
+            "temperature": 0.3,
+            "tools": { "bash": false },
+            "color": "#ff5733",
+            "maxSteps": 12,
+            "permission": { "bash": "ask" }
+        }))
+        .unwrap();
+        assert_eq!(agent.model.as_deref(), Some("anthropic/claude"));
+        assert_eq!(agent.mode.as_deref(), Some("primary"));
+        assert_eq!(agent.tools.as_ref().unwrap()["bash"], false);
+        assert_eq!(agent.color.as_deref(), Some("#ff5733"));
+        assert_eq!(agent.max_steps, Some(12));
+        assert!(matches!(
+            agent.permission,
+            Some(PermissionConfig::Detailed(_))
+        ));
+        let back: AgentConfig =
+            serde_json::from_value(serde_json::to_value(&agent).unwrap()).unwrap();
+        assert_eq!(back, agent);
     }
 }
