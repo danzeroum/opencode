@@ -33,7 +33,7 @@ pub use migration::{MigrationReport, EXPECTED_MIGRATIONS};
 pub use project::{MemoryProjectStore, ProjectRecord, ProjectStore, SqlxProjectStore, PROJECT_DDL};
 pub use session::{
     ListAnchor, ListDirection, MemorySessionStore, SessionContextEpoch, SessionContextEpochRepo,
-    SessionInput, SessionInputRepo, SessionListQuery, SessionRecord, SessionStore,
+    SessionInput, SessionInputRepo, SessionListQuery, SessionRecord, SessionStore, SessionV1Record,
     SqlxSessionStore, SESSION_CONTEXT_EPOCH_DDL, SESSION_INPUT_DDL,
 };
 pub use session_message::{

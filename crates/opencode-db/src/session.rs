@@ -340,6 +340,61 @@ impl SessionListQuery {
     }
 }
 
+/// The full V1 session row (`packages/core/src/v1/session.ts` `Session`) — every column the V1
+/// `Session` wire type needs (superset of [`SessionRecord`]). Read by the mutation routes
+/// (`session.update`/`share`/`revert`/…), which return the whole session. JSON columns
+/// (`model`/`metadata`/`permission`/`revert`/`summary_diffs`) stay as parsed `Value`s; the server maps
+/// them into the typed wire shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionV1Record {
+    /// Session id.
+    pub id: String,
+    /// URL-safe slug.
+    pub slug: String,
+    /// Owning project id.
+    pub project_id: String,
+    /// Workspace id, if any.
+    pub workspace_id: Option<String>,
+    /// Working directory.
+    pub directory: String,
+    /// Session path, if any.
+    pub path: Option<String>,
+    /// Parent session id, if a child.
+    pub parent_id: Option<String>,
+    /// Change-summary counts `(additions, deletions, files)`, if computed.
+    pub summary: Option<(i64, i64, i64)>,
+    /// Per-file diffs JSON, if computed.
+    pub summary_diffs: Option<Value>,
+    /// Accumulated cost.
+    pub cost: f64,
+    /// Token usage `(input, output, reasoning, cache_read, cache_write)`.
+    pub tokens: (i64, i64, i64, i64, i64),
+    /// Share URL, if shared.
+    pub share_url: Option<String>,
+    /// Title.
+    pub title: String,
+    /// Active agent, if set.
+    pub agent: Option<String>,
+    /// Model JSON (`{ id, providerID, variant? }`), if set.
+    pub model: Option<Value>,
+    /// App/schema version that wrote the row.
+    pub version: String,
+    /// Free-form metadata JSON, if set.
+    pub metadata: Option<Value>,
+    /// Creation time (ms).
+    pub time_created: i64,
+    /// Last-updated time (ms).
+    pub time_updated: i64,
+    /// Compaction-in-progress time (ms), if any.
+    pub time_compacting: Option<i64>,
+    /// Archival time (ms), if archived.
+    pub time_archived: Option<i64>,
+    /// Permission ruleset JSON (`[PermissionRule]`), if set.
+    pub permission: Option<Value>,
+    /// Revert pointer JSON, if reverted.
+    pub revert: Option<Value>,
+}
+
 /// Read-only store over the `session` projection table.
 #[async_trait]
 pub trait SessionStore: Send + Sync {
@@ -348,6 +403,119 @@ pub trait SessionStore: Send + Sync {
 
     /// List sessions matching `query`, ordered by `time_created` then `id` per `query.descending`.
     async fn list(&self, query: &SessionListQuery) -> Result<Vec<SessionRecord>, DbError>;
+
+    /// Fetch the full V1 session row (every `Session` column), or `None`. Backs the mutation routes
+    /// that return the whole session.
+    async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError>;
+
+    /// Apply a partial update to a session's mutable fields (any of `title`/`metadata`/`permission`;
+    /// `None` leaves a field unchanged) and bump `time_updated`. Returns whether the session existed.
+    async fn update(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        metadata: Option<&Value>,
+        permission: Option<&Value>,
+    ) -> Result<bool, DbError>;
+}
+
+/// Columns read for [`SessionV1Record`].
+const SESSION_V1_COLS: &str = "id, slug, project_id, workspace_id, directory, path, parent_id, \
+     summary_additions, summary_deletions, summary_files, summary_diffs, cost, tokens_input, \
+     tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, share_url, title, agent, \
+     model, version, metadata, time_created, time_updated, time_compacting, time_archived, \
+     permission, revert";
+
+fn json_col(row: &SqliteRow, name: &str) -> Result<Option<Value>, DbError> {
+    let raw: Option<String> = row.try_get(name)?;
+    Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?)
+}
+
+fn v1_record_from_row(row: &SqliteRow) -> Result<SessionV1Record, DbError> {
+    let summary_additions: Option<i64> = row.try_get("summary_additions")?;
+    let summary = summary_additions.map(|additions| {
+        (
+            additions,
+            row.try_get("summary_deletions").unwrap_or(0),
+            row.try_get("summary_files").unwrap_or(0),
+        )
+    });
+    Ok(SessionV1Record {
+        id: row.try_get("id")?,
+        slug: row.try_get("slug")?,
+        project_id: row.try_get("project_id")?,
+        workspace_id: row.try_get("workspace_id")?,
+        directory: row.try_get("directory")?,
+        path: row.try_get("path")?,
+        parent_id: row.try_get("parent_id")?,
+        summary,
+        summary_diffs: json_col(row, "summary_diffs")?,
+        cost: row.try_get("cost")?,
+        tokens: (
+            row.try_get("tokens_input")?,
+            row.try_get("tokens_output")?,
+            row.try_get("tokens_reasoning")?,
+            row.try_get("tokens_cache_read")?,
+            row.try_get("tokens_cache_write")?,
+        ),
+        share_url: row.try_get("share_url")?,
+        title: row.try_get("title")?,
+        agent: row.try_get("agent")?,
+        model: json_col(row, "model")?,
+        version: row.try_get("version")?,
+        metadata: json_col(row, "metadata")?,
+        time_created: row.try_get("time_created")?,
+        time_updated: row.try_get("time_updated")?,
+        time_compacting: row.try_get("time_compacting")?,
+        time_archived: row.try_get("time_archived")?,
+        permission: json_col(row, "permission")?,
+        revert: json_col(row, "revert")?,
+    })
+}
+
+/// Wall-clock milliseconds since the epoch.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Build a best-effort [`SessionV1Record`] from a (V2) [`SessionRecord`] — used by the in-memory test
+/// double, which only stores the V2 columns. V1-only fields it doesn't track get placeholders
+/// (`slug = id`, `version = "0.0.0"`, the rest empty); the Sqlx store reads the real columns.
+fn v1_from_session_record(r: &SessionRecord) -> SessionV1Record {
+    SessionV1Record {
+        id: r.id.clone(),
+        slug: r.id.clone(),
+        project_id: r.project_id.clone(),
+        workspace_id: r.workspace_id.clone(),
+        directory: r.directory.clone(),
+        path: r.path.clone(),
+        parent_id: r.parent_id.clone(),
+        summary: None,
+        summary_diffs: None,
+        cost: r.cost,
+        tokens: (
+            r.tokens_input,
+            r.tokens_output,
+            r.tokens_reasoning,
+            r.tokens_cache_read,
+            r.tokens_cache_write,
+        ),
+        share_url: None,
+        title: r.title.clone(),
+        agent: r.agent.clone(),
+        model: r.model.clone(),
+        version: "0.0.0".to_string(),
+        metadata: None,
+        time_created: r.time_created,
+        time_updated: r.time_updated,
+        time_compacting: None,
+        time_archived: r.time_archived,
+        permission: None,
+        revert: None,
+    }
 }
 
 /// Build a [`SessionRecord`] from a row. Read via `Row::try_get` (rather than a tuple) — the row has
@@ -470,6 +638,61 @@ impl SessionStore for SqlxSessionStore {
         }
         Ok(records)
     }
+
+    async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError> {
+        let Some(row) = sqlx::query(&format!(
+            "SELECT {SESSION_V1_COLS} FROM session WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        v1_record_from_row(&row).map(Some)
+    }
+
+    async fn update(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        metadata: Option<&Value>,
+        permission: Option<&Value>,
+    ) -> Result<bool, DbError> {
+        let mut sets: Vec<&str> = Vec::new();
+        if title.is_some() {
+            sets.push("title = ?");
+        }
+        if metadata.is_some() {
+            sets.push("metadata = ?");
+        }
+        if permission.is_some() {
+            sets.push("permission = ?");
+        }
+        // Nothing to change: just report whether the session exists.
+        if sets.is_empty() {
+            let found = sqlx::query("SELECT 1 FROM session WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+            return Ok(found);
+        }
+        sets.push("time_updated = ?");
+        let sql = format!("UPDATE session SET {} WHERE id = ?", sets.join(", "));
+        let mut q = sqlx::query(&sql);
+        if let Some(t) = title {
+            q = q.bind(t.to_string());
+        }
+        if let Some(m) = metadata {
+            q = q.bind(m.to_string());
+        }
+        if let Some(p) = permission {
+            q = q.bind(p.to_string());
+        }
+        q = q.bind(now_ms()).bind(id);
+        Ok(q.execute(&self.pool).await?.rows_affected() > 0)
+    }
 }
 
 /// In-memory [`SessionStore`] — test double / the backing for `AppContext::in_memory()`.
@@ -548,6 +771,36 @@ impl SessionStore for MemorySessionStore {
             rows.reverse();
         }
         Ok(rows)
+    }
+
+    async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError> {
+        Ok(self
+            .rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .get(id)
+            .map(v1_from_session_record))
+    }
+
+    async fn update(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        _metadata: Option<&Value>,
+        _permission: Option<&Value>,
+    ) -> Result<bool, DbError> {
+        // The memory double stores only the V2 columns, so it applies `title` (what tests assert);
+        // `metadata`/`permission` are persisted by the Sqlx store in production.
+        let mut rows = self.rows.lock().expect("session store mutex poisoned");
+        match rows.get_mut(id) {
+            Some(record) => {
+                if let Some(t) = title {
+                    record.title = t.to_string();
+                }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -709,6 +962,99 @@ mod tests {
         assert_eq!(got.time_archived, None);
 
         assert!(store.get("ses_missing").await.unwrap().is_none());
+    }
+
+    /// Full session table (the V1 superset), for `get_full`/`update`.
+    const SESSION_V1_DDL: &str = "CREATE TABLE session (\
+        id text PRIMARY KEY, slug text NOT NULL, project_id text NOT NULL, workspace_id text, \
+        directory text NOT NULL, path text, parent_id text, summary_additions integer, \
+        summary_deletions integer, summary_files integer, summary_diffs text, \
+        cost real NOT NULL DEFAULT 0, tokens_input integer NOT NULL DEFAULT 0, \
+        tokens_output integer NOT NULL DEFAULT 0, tokens_reasoning integer NOT NULL DEFAULT 0, \
+        tokens_cache_read integer NOT NULL DEFAULT 0, tokens_cache_write integer NOT NULL DEFAULT 0, \
+        share_url text, title text NOT NULL, agent text, model text, version text NOT NULL, \
+        metadata text, time_created integer NOT NULL, time_updated integer NOT NULL, \
+        time_compacting integer, time_archived integer, permission text, revert text)";
+
+    #[tokio::test]
+    async fn sqlx_session_store_get_full_and_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::connect(dir.path().join("v1.db")).await.unwrap();
+        sqlx::query(SESSION_V1_DDL)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO session (id, slug, project_id, directory, title, version, time_created, \
+             time_updated, cost) VALUES ('ses_1','my-chat','prj_1','/repo','Hello','1.2.3',100,200,0)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let store = SqlxSessionStore::new(db.pool().clone());
+
+        let full = store.get_full("ses_1").await.unwrap().unwrap();
+        assert_eq!(full.slug, "my-chat");
+        assert_eq!(full.version, "1.2.3");
+        assert_eq!(full.title, "Hello");
+
+        // Update the title (+ a permission ruleset JSON) and read it back.
+        assert!(store
+            .update(
+                "ses_1",
+                Some("Renamed"),
+                None,
+                Some(
+                    &serde_json::json!([{ "permission": "bash", "pattern": "*", "action": "ask" }])
+                ),
+            )
+            .await
+            .unwrap());
+        let updated = store.get_full("ses_1").await.unwrap().unwrap();
+        assert_eq!(updated.title, "Renamed");
+        assert!(updated.time_updated >= 200);
+        assert_eq!(updated.permission.unwrap()[0]["action"], "ask");
+
+        // A missing session: update reports false, get_full is None.
+        assert!(!store.update("ses_x", Some("x"), None, None).await.unwrap());
+        assert!(store.get_full("ses_x").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_session_store_update_title_and_get_full() {
+        let store = MemorySessionStore::new();
+        store.insert(SessionRecord {
+            id: "ses_1".into(),
+            project_id: "prj_1".into(),
+            parent_id: None,
+            agent: Some("build".into()),
+            model: None,
+            cost: 0.0,
+            tokens_input: 0,
+            tokens_output: 0,
+            tokens_reasoning: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
+            title: "Hello".into(),
+            directory: "/repo".into(),
+            workspace_id: None,
+            path: None,
+            time_created: 100,
+            time_updated: 200,
+            time_archived: None,
+        });
+        let full = store.get_full("ses_1").await.unwrap().unwrap();
+        assert_eq!(full.title, "Hello");
+        assert_eq!(full.slug, "ses_1"); // placeholder for the memory double
+        assert!(store
+            .update("ses_1", Some("Renamed"), None, None)
+            .await
+            .unwrap());
+        assert_eq!(
+            store.get_full("ses_1").await.unwrap().unwrap().title,
+            "Renamed"
+        );
+        assert!(!store.update("ses_x", Some("x"), None, None).await.unwrap());
     }
 
     #[tokio::test]

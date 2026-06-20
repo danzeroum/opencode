@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     response::Json,
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use opencode_core::native_tools::{self, NativeToolBox};
@@ -1829,6 +1829,149 @@ async fn session_todo(
     Ok(Json(todos))
 }
 
+/// Map a full V1 session row to the `Session` wire shape, parsing the JSON columns
+/// (`model`/`permission`/`revert`/`summary_diffs`) into their typed forms.
+fn session_v1_from_record(r: opencode_db::SessionV1Record) -> opencode_proto::Session {
+    let summary = r.summary.map(
+        |(additions, deletions, files)| opencode_proto::SessionSummary {
+            additions: additions as f64,
+            deletions: deletions as f64,
+            files: files as f64,
+            diffs: r.summary_diffs.and_then(|v| serde_json::from_value(v).ok()),
+        },
+    );
+    opencode_proto::Session {
+        id: r.id,
+        slug: r.slug,
+        project_id: r.project_id,
+        workspace_id: r.workspace_id,
+        directory: r.directory,
+        path: r.path,
+        parent_id: r.parent_id,
+        summary,
+        cost: Some(r.cost),
+        tokens: Some(opencode_proto::SessionTokens {
+            input: r.tokens.0 as f64,
+            output: r.tokens.1 as f64,
+            reasoning: r.tokens.2 as f64,
+            cache: opencode_proto::TokenCache {
+                read: r.tokens.3 as f64,
+                write: r.tokens.4 as f64,
+            },
+        }),
+        share: r.share_url.map(|url| opencode_proto::SessionShare { url }),
+        title: r.title,
+        agent: r.agent,
+        model: r.model.and_then(|v| serde_json::from_value(v).ok()),
+        version: r.version,
+        metadata: r.metadata,
+        time: opencode_proto::SessionV1Time {
+            created: r.time_created,
+            updated: r.time_updated,
+            compacting: r.time_compacting,
+            archived: r.time_archived.map(|x| x as f64),
+        },
+        permission: r.permission.and_then(|v| serde_json::from_value(v).ok()),
+        revert: r.revert.and_then(|v| serde_json::from_value(v).ok()),
+    }
+}
+
+/// Request body for `session.update` (all fields optional; `None` leaves a field unchanged).
+#[derive(Default, serde::Deserialize, utoipa::ToSchema)]
+struct SessionUpdateBody {
+    /// New title.
+    #[serde(default)]
+    title: Option<String>,
+    /// Replacement metadata.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    metadata: Option<serde_json::Value>,
+    /// Replacement permission ruleset.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    permission: Option<serde_json::Value>,
+}
+
+/// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
+/// covers a malformed body (axum rejects it before the handler).
+pub enum SessionUpdateFailure {
+    /// No such session (404 `NotFoundError`).
+    NotFound(String),
+    /// Store failure (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for SessionUpdateFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            SessionUpdateFailure::NotFound(session_id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::NotFoundError {
+                    name: "NotFoundError".to_string(),
+                    data: opencode_proto::NotFoundData {
+                        message: format!("Session not found: {session_id}"),
+                    },
+                }),
+            )
+                .into_response(),
+            SessionUpdateFailure::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `PATCH /session/{sessionID}` — update a session's mutable fields (group `session`). Matches the
+/// golden `session.update`: 200 `Session`, 400 union, 404 `NotFoundError`. Applies any of
+/// `title`/`metadata`/`permission`, then returns the updated session.
+#[utoipa::path(
+    patch,
+    path = "/session/{sessionID}",
+    operation_id = "session.update",
+    params(("sessionID" = String, Path, description = "Session id")),
+    request_body = SessionUpdateBody,
+    responses(
+        (status = 200, description = "Updated session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_update(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    body: Option<Json<SessionUpdateBody>>,
+) -> Result<Json<opencode_proto::Session>, SessionUpdateFailure> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let existed = state
+        .ctx
+        .sessions()
+        .update(
+            &session_id,
+            body.title.as_deref(),
+            body.metadata.as_ref(),
+            body.permission.as_ref(),
+        )
+        .await
+        .map_err(|e| SessionUpdateFailure::Internal(e.to_string()))?;
+    if !existed {
+        return Err(SessionUpdateFailure::NotFound(session_id));
+    }
+    let record = state
+        .ctx
+        .sessions()
+        .get_full(&session_id)
+        .await
+        .map_err(|e| SessionUpdateFailure::Internal(e.to_string()))?
+        .ok_or_else(|| SessionUpdateFailure::NotFound(session_id.clone()))?;
+    Ok(Json(session_v1_from_record(record)))
+}
+
 /// Map a `project` projection row to the `Project` wire shape (the `icon_*` columns fold into one
 /// `icon` object; `commands`/`sandboxes` come from JSON columns).
 fn project_record_to_info(r: opencode_db::ProjectRecord) -> opencode_proto::Project {
@@ -2205,6 +2348,7 @@ async fn v2_provider_get(
         v2_session_messages,
         v2_session_prompt,
         session_todo,
+        session_update,
         global_dispose,
         instance_dispose,
         file_list,
@@ -2305,7 +2449,16 @@ async fn v2_provider_get(
         opencode_proto::QuestionInfo,
         opencode_proto::QuestionOption,
         opencode_proto::QuestionTool,
-        opencode_proto::VcsInfo
+        opencode_proto::VcsInfo,
+        opencode_proto::Session,
+        opencode_proto::SessionSummary,
+        opencode_proto::SnapshotFileDiff,
+        opencode_proto::SessionShare,
+        opencode_proto::SessionV1Time,
+        opencode_proto::SessionRevert,
+        opencode_proto::PermissionRule,
+        opencode_proto::PermissionAction,
+        SessionUpdateBody
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -2602,6 +2755,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/session/{sessionID}/message", get(v2_session_messages));
         router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
+        router = router.route("/session/{sessionID}", patch(session_update));
     }
     if state.routes.handles("event") {
         router = router.route("/api/event", get(v2_event_subscribe));
@@ -3345,6 +3499,73 @@ mod tests {
         assert_eq!(v[0]["content"], "first");
         assert_eq!(v[0]["status"], "completed");
         assert_eq!(v[1]["content"], "second");
+    }
+
+    #[tokio::test]
+    async fn session_update_renames_and_returns_session() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("PATCH")
+                    .uri("/session/ses_1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"title":"Renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], "ses_1");
+        assert_eq!(v["title"], "Renamed");
+        // The V1 shape is present (slug/version filled, time as integers).
+        assert!(v["slug"].is_string());
+        assert!(v["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn session_update_missing_session_is_404() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("PATCH")
+                    .uri("/session/ses_missing")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"title":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["name"], "NotFoundError");
     }
 
     #[tokio::test]
