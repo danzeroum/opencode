@@ -412,6 +412,10 @@ pub trait SessionStore: Send + Sync {
     /// violation. Backs `session.create`.
     async fn create(&self, record: &SessionV1Record) -> Result<(), DbError>;
 
+    /// Delete a session by id. Returns whether it existed. Backs `session.delete` (the schema's
+    /// `ON DELETE CASCADE` removes the session's child rows: messages, todos, inputs, epochs).
+    async fn delete(&self, id: &str) -> Result<bool, DbError>;
+
     /// List sessions as full V1 records (every `Session` column), applying the same filters/order as
     /// [`list`](Self::list). Default impl = `list` then `get_full` per id, so both stores share it.
     /// Backs the V1 `session.list`.
@@ -716,6 +720,15 @@ impl SessionStore for SqlxSessionStore {
         Ok(())
     }
 
+    async fn delete(&self, id: &str) -> Result<bool, DbError> {
+        let affected = sqlx::query("DELETE FROM session WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
     async fn update(
         &self,
         id: &str,
@@ -890,6 +903,24 @@ impl SessionStore for MemorySessionStore {
             .expect("session store mutex poisoned")
             .insert(record.id.clone(), v2_from_v1_record(record));
         Ok(())
+    }
+
+    async fn delete(&self, id: &str) -> Result<bool, DbError> {
+        let removed = self
+            .rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .remove(id)
+            .is_some();
+        self.full_rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .remove(id);
+        self.reverts
+            .lock()
+            .expect("session store mutex poisoned")
+            .remove(id);
+        Ok(removed)
     }
 
     async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError> {
