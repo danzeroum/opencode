@@ -57,6 +57,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/session/{sessionID}/abort",
     "/project",
     "/project/current",
+    "/project/{projectID}/directories",
     "/api/model",
     "/api/provider",
     "/api/provider/{providerID}",

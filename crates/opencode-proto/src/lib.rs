@@ -1026,6 +1026,17 @@ pub struct Project {
     pub sandboxes: Vec<String>,
 }
 
+/// One entry in a project's directory list (`project.directories` item / `ProjectDirectories` array
+/// element). Mirrors the golden shape `{ directory, strategy? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectDirectory {
+    /// Absolute directory path.
+    pub directory: String,
+    /// How the directory is associated with the project (e.g. worktree/sandbox), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // V2 session prompt contract (`v2.session.prompt` — POST /api/session/{sessionID}/prompt).
 // `Prompt` and the `SessionInput.Admitted` projection mirror `packages/core/src/session/input.ts`
