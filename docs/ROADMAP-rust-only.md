@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 59 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#131. CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
+> **Rotas nativas contrato-enforçadas: 61 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#133. **Engine**: runner loop completo + permission gating real (#129–#131) + question flow resolve-half (#133). CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -62,7 +62,7 @@
   - ⏳ `share`/`unshare` — precisa do **serviço externo de URL** (não é só projeção); ver nota
   - ⏳ `command`/`summarize` — usam a execução (write-path pronto)
 - ✅ 1m — **permission gating (engine) — fim-a-fim**: gate bloqueante `StorePermissionGate` (#130: read-class roda direto; write-class `write`/`edit`/`patch`/`bash` registra pedido e **parqueia o run** até resolver; wired no `from_env` de produção) + store `PendingPermissions` (register/list/resolve via oneshot) + as 3 listas lêem o store + **`permission.respond`** (`POST /session/{id}/permissions/{permID}`, once/always→Allow, reject→Deny) acorda o run — **#129–#130**. `v2.session.permission.reply` (`POST /api/session/{id}/permission/{reqID}/reply`, 204, GUI-facing) ✅ **#131** (reusa o store). **Falta** (refino): semântica de `always` (salvar regra) e política dirigida por config/ruleset (hoje lista fixa de tools write/edit/patch/bash)
-- 🔄 1n — `question.list` ✅ (#77, idem) · `v2.question.request.list` + `v2.session.question.list` ✅ (#105, tipos `QuestionV2Request`/`QuestionV2Info`/`QuestionV2Option`/`QuestionV2Tool`; vazios/404 até a engine) · `question.reply`/`reject`/`v2.session.question.reply`/`reject` ⏳ (precisa engine)
+- 🔄 1n — question flow (engine): listas ✅ (#77/#105) · store `PendingQuestions` (register/list/reply/reject via oneshot) + `v2.session.question.list` lê o store + **`v2.session.question.reply`** (`{answers}`, 204) + **`v2.session.question.reject`** (204) resolvem e acordam o run — **#133**. **Falta** (próxima fatia): o **tool produtor** `question` (o modelo pergunta → parqueia no store → retorna as respostas), espelhando o permission gate; + `question.reply`/`reject` V1
 
 ## Fase 2 — Admin
 - ✅ 2a — `config.get`/`global.config.get` (tipo `Config` + loading deep-merge #96) + `config.update`/`global.config.update` (#97, escreve `opencode.json` com merge preservando campos)

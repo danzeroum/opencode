@@ -444,6 +444,30 @@ pub enum PermissionReplyNotFound {
     Session(SessionNotFoundError),
 }
 
+/// `QuestionNotFoundError` — `{ _tag, requestID, message }`, a 404 arm of the question reply/reject
+/// routes when the question request id is unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionNotFoundError {
+    /// Always `"QuestionNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The question request id that was not found.
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// The 404 union of `v2.session.question.reply`/`reject`: `QuestionNotFoundError` | `SessionNotFoundError`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum QuestionReplyNotFound {
+    /// The question request wasn't found.
+    Question(QuestionNotFoundError),
+    /// The session wasn't found.
+    Session(SessionNotFoundError),
+}
+
 /// One choice for a [`QuestionInfo`] (`{ label, description }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct QuestionOption {
