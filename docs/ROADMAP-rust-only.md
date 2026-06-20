@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 56 paths** · PRs desta rodada autônoma: #69–#121. CI `rust` verde (#119: full-workspace clippy no toolchain stable do CI). **Loading real**: `command`/`skill` lêem `.opencode/**.md`.
+> **Rotas nativas contrato-enforçadas: 56 paths** · PRs desta rodada autônoma: #69–#122. CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` (V2) lêem `.opencode/**.md` (global + projeto).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -65,7 +65,7 @@
 - ✅ 2a — `config.get`/`global.config.get` (tipo `Config` + loading deep-merge #96) + `config.update`/`global.config.update` (#97, escreve `opencode.json` com merge preservando campos)
 - ⏳ 2b — **config com proveniência** (cascata 7 níveis) — capacidade nova (ver PENDENCIAS #1); + os 5 níveis restantes do merge (remote/custom/.opencode/inline/managed) + `.jsonc`
 - 🔄 2c — `config.providers` (`GET /config/providers`, tipo V1 `Provider`, #117) rota wirada (retorna `{providers:[], default:{}}`; o merge fiel config+catálogo é refino — superfície real já em `v2.provider.list`/`v2.model.list`); faltam `provider.auth` (escrita de credencial) + teste de conexão
-- 🔄 2d — agents: `app.agents` (V1, #87) + `v2.agent.list` (`/api/agent`, tipos `AgentV2Info`/`AgentV2Request`/`AgentMode`/`PermissionV2Rule`/`PermissionV2Effect`, #102) rotas wiradas (retornam `[]`); falta **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
+- 🔄 2d — agents: `v2.agent.list` (`/api/agent`) agora **carrega dados reais** de `{agent,agents}/**/*.md` (subagentes) + `{mode,modes}/*.md` (primary), global + projeto `.opencode` — **#122**; faltam: expansão `permission`→ruleset (default `[]`), built-ins, o V1 `app.agents` (ainda `[]`), e escrita (PENDENCIAS #2)
 - 🔄 2e — commands: `v2.command.list` (`/api/command`) agora **carrega dados reais** de `{command,commands}/**/*.md` (global config dir + projeto `.opencode`, projeto sobrescreve; parser de frontmatter flat + body, sem dep YAML) — **#120**; faltam built-ins (`init`/`review`), comandos via MCP/skills, e o V1 `command.list` (ainda `[]`) + escrita
 - 🔄 2j — skills/references: `v2.skill.list` (`/api/skill`) agora **carrega dados reais** de `{skill,skills}` (glob `{*.md, **/SKILL.md}`, global + projeto `.opencode`) — **#121**; falta sources via URL + built-ins. `v2.reference.list` (`/api/reference`, #101) ainda `[]` (falta `config.references` + discovery)
 - ⏳ 2f — políticas (permission rules)
