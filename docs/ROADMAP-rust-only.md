@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 50 paths** · PRs desta rodada autônoma: #69–#112.
+> **Rotas nativas contrato-enforçadas: 51 paths** · PRs desta rodada autônoma: #69–#113.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -47,6 +47,7 @@
 - ✅ 1w — `v2.fs.find` (`GET /api/fs/find`, busca real arquivos+dirs via `opencode_tools::find_entries`, filtro `type` + `limit`) — **#107**
 - ✅ 1x — `v2.fs.read` (`GET /api/fs/read/*`, leitura real de bytes, `application/octet-stream`, path wildcard + guarda anti-traversal) — **#108** · **grupo `fs` completo (list/find/read)**
 - ✅ 1z — `file.read` (`GET /file/content`, conteúdo real `FileContent` text/binary+base64, tipos `FilePatch`/`FilePatchHunk`, guarda anti-traversal) — **#111**
+- ✅ 1B — `file.status` (`GET /file/status`, dados reais via `git status --porcelain` + `git diff --numstat`, tipo `File`, parser puro testado) — **#113**
 - ✅ 1s — `permission.list` + `question.list` (vazios até a engine) — **#77**
 - ✅ 1t — `vcs.get` (`GET /vcs`, branch/default_branch via git best-effort) — **#78**
 - ⏳ 1p — `session.status` / `session.diff` — **dependem da engine de execução** (estado live / snapshots), não enxutas

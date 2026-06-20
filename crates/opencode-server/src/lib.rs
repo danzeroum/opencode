@@ -2830,6 +2830,7 @@ async fn v2_provider_get(
         instance_dispose,
         file_list,
         file_read,
+        file_status,
         permission_list,
         question_list,
         mcp_status,
@@ -3023,6 +3024,7 @@ async fn v2_provider_get(
         opencode_proto::SessionQuestionListResponse,
         opencode_proto::FileSystemEntry,
         opencode_proto::FsListResponse,
+        opencode_proto::File,
         opencode_proto::FileContent,
         opencode_proto::FilePatch,
         opencode_proto::FilePatchHunk,
@@ -3444,6 +3446,107 @@ async fn git_field(dir: &str, args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!s.is_empty()).then_some(s)
+}
+
+/// Run `git -C <dir> <args>` and return the **raw** (untrimmed) stdout, or `None` on failure. Unlike
+/// [`git_field`], leading whitespace is preserved — required for parsing `git status --porcelain`
+/// (where the two-char status code at the start of each line is significant).
+async fn git_raw(dir: &str, args: &[&str]) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Parse `git status --porcelain` + `git diff --numstat HEAD` output into the contract's `File` list.
+/// Pure (no I/O) so it's unit-testable: `porcelain` classifies each path's status, `numstat` supplies
+/// the added/removed line counts (0/0 when absent, e.g. untracked or binary files).
+fn parse_file_status(porcelain: &str, numstat: &str) -> Vec<opencode_proto::File> {
+    let mut counts: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    for line in numstat.lines() {
+        let mut p = line.split('\t');
+        let added = p.next().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let removed = p.next().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        if let Some(path) = p.next() {
+            counts.insert(path.to_string(), (added, removed));
+        }
+    }
+    let mut out = Vec::new();
+    for line in porcelain.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let code = &line[..2];
+        let raw_path = line[3..].trim();
+        // Renames are reported as "old -> new"; report the new path.
+        let path = raw_path
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or(raw_path)
+            .to_string();
+        let status = if code.contains('D') {
+            "deleted"
+        } else if code.contains('?') || code.contains('A') {
+            "added"
+        } else {
+            "modified"
+        };
+        let (added, removed) = counts.get(&path).copied().unwrap_or((0, 0));
+        out.push(opencode_proto::File {
+            path,
+            added,
+            removed,
+            status: status.to_string(),
+        });
+    }
+    out
+}
+
+/// `GET /file/status` — working-tree changes (group `file`). Matches the golden `file.status`: 200
+/// `[File]`, 400 `BadRequestError`. Best-effort `git status --porcelain` + `git diff --numstat HEAD`
+/// over `directory` (default cwd); outside a repo (or a clean tree) the list is empty.
+#[utoipa::path(
+    get,
+    path = "/file/status",
+    operation_id = "file.status",
+    params(
+        ("directory" = Option<String>, Query, description = "Base directory (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "File status", body = Vec<opencode_proto::File>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "file"
+)]
+async fn file_status(
+    State(_state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<opencode_proto::File>> {
+    let dir = params
+        .get("directory")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        });
+    let porcelain = git_raw(&dir, &["status", "--porcelain"])
+        .await
+        .unwrap_or_default();
+    let numstat = git_raw(&dir, &["diff", "--numstat", "HEAD"])
+        .await
+        .unwrap_or_default();
+    Json(parse_file_status(&porcelain, &numstat))
 }
 
 /// `GET /vcs` — version-control info for a directory (group `instance`). Matches the golden `vcs.get`:
@@ -3877,6 +3980,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/find", get(find_text));
         router = router.route("/file", get(file_list));
         router = router.route("/file/content", get(file_read));
+        router = router.route("/file/status", get(file_status));
     }
     if state.routes.handles("control") {
         router = router.route("/log", post(app_log));
@@ -5571,6 +5675,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 400);
+    }
+
+    #[test]
+    fn parse_file_status_classifies_and_joins_counts() {
+        // ` M` modified, `??` untracked → added, ` D` deleted, rename "old -> new".
+        let porcelain = " M src/a.rs\n?? new.txt\n D gone.rs\nR  old.rs -> renamed.rs\n";
+        let numstat = "3\t1\tsrc/a.rs\n0\t9\tgone.rs\n2\t2\trenamed.rs\n";
+        let files = parse_file_status(porcelain, numstat);
+        let by = |p: &str| files.iter().find(|f| f.path == p).cloned().unwrap();
+        assert_eq!(by("src/a.rs").status, "modified");
+        assert_eq!((by("src/a.rs").added, by("src/a.rs").removed), (3, 1));
+        assert_eq!(by("new.txt").status, "added");
+        assert_eq!((by("new.txt").added, by("new.txt").removed), (0, 0));
+        assert_eq!(by("gone.rs").status, "deleted");
+        assert_eq!(by("gone.rs").removed, 9);
+        assert_eq!(by("renamed.rs").status, "modified");
+        assert_eq!(by("renamed.rs").added, 2);
+    }
+
+    #[tokio::test]
+    async fn file_status_outside_repo_is_empty() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap(); // not a git repo
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("file"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let uri = format!("/file/status?directory={}", dir.path().display());
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!([]));
     }
 
     #[tokio::test]

@@ -222,6 +222,20 @@ pub struct FileNode {
     pub ignored: bool,
 }
 
+/// A changed file in the working tree (`file.status` item). Mirrors the golden `File`: `{ path, added,
+/// removed, status }`, all required (`status` is `"added"` | `"deleted"` | `"modified"`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct File {
+    /// Path relative to the repository root.
+    pub path: String,
+    /// Lines added.
+    pub added: i64,
+    /// Lines removed.
+    pub removed: i64,
+    /// Change kind.
+    pub status: String,
+}
+
 /// One hunk of a unified diff (`FileContent.patch.hunks` item). Mirrors the golden hunk shape:
 /// `{ oldStart, oldLines, newStart, newLines, lines }`, all required.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
