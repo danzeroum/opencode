@@ -22,6 +22,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/permission",
     "/question",
     "/mcp",
+    "/lsp",
     "/vcs",
     "/agent",
     "/command",

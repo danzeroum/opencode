@@ -2462,6 +2462,7 @@ async fn v2_provider_get(
         permission_list,
         question_list,
         mcp_status,
+        lsp_status,
         vcs_get,
         project_list,
         project_current,
@@ -2606,6 +2607,8 @@ async fn v2_provider_get(
         opencode_proto::LspConfig,
         opencode_proto::PluginEntry,
         opencode_proto::McpStatus,
+        opencode_proto::LspStatus,
+        opencode_proto::LspServerStatus,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2621,7 +2624,8 @@ async fn v2_provider_get(
         (name = "provider", description = "Provider catalog routes"),
         (name = "location", description = "Location routes"),
         (name = "config", description = "Configuration routes"),
-        (name = "mcp", description = "MCP server routes")
+        (name = "mcp", description = "MCP server routes"),
+        (name = "lsp", description = "LSP server routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3079,6 +3083,28 @@ async fn mcp_status(
     Json(std::collections::HashMap::new())
 }
 
+/// `GET /lsp` — status of all running language servers (group `lsp`). Matches the golden `lsp.status`:
+/// 200 `[LSPStatus]`, 400 `BadRequestError`. The running-server set is live runtime state owned by the
+/// LSP host; until that host exists in Rust no server is running, so this returns an empty list —
+/// consistent with `mcp.status`/`permission.list`/`question.list` being empty until the engine exists.
+#[utoipa::path(
+    get,
+    path = "/lsp",
+    operation_id = "lsp.status",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "LSP server status", body = Vec<opencode_proto::LspStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "lsp"
+)]
+async fn lsp_status(State(_state): State<ServerState>) -> Json<Vec<opencode_proto::LspStatus>> {
+    Json(Vec::new())
+}
+
 /// `POST /global/dispose` — dispose the global runtime (group `global`). Matches the golden
 /// `global.dispose`: 200 `boolean`, 400 `BadRequestError`. The Rust server holds no per-call global
 /// state to tear down (DB pool + buses are process-scoped), so this acknowledges the lifecycle hook
@@ -3161,6 +3187,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("mcp") {
         router = router.route("/mcp", get(mcp_status));
+    }
+    if state.routes.handles("lsp") {
+        router = router.route("/lsp", get(lsp_status));
     }
     if state.routes.handles("session") {
         router = router.route("/api/session", get(v2_session_list));
@@ -4276,6 +4305,55 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({ "status": "needs_client_registration", "error": "boom" })
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_status_is_empty_list_until_host_lands() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("lsp"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/lsp")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // No LSP host yet → an empty JSON array.
+        assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[test]
+    fn lsp_status_serializes_lowercase_status() {
+        use opencode_proto::{LspServerStatus, LspStatus};
+        let v = serde_json::to_value(LspStatus {
+            id: "rust".into(),
+            name: "rust-analyzer".into(),
+            root: "/repo".into(),
+            status: LspServerStatus::Connected,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "id": "rust",
+                "name": "rust-analyzer",
+                "root": "/repo",
+                "status": "connected"
+            })
         );
     }
 
