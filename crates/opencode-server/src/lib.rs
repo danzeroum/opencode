@@ -1894,6 +1894,29 @@ async fn session_children(
     Ok(Json(Vec::new()))
 }
 
+/// `GET /session/status` — live status of all sessions (group `session`). Matches the golden
+/// `session.status`: 200 `{ [sessionID]: SessionStatus }`, 400 union. Session status (idle/retry/busy)
+/// is live execution state produced by the runner; until that engine exists this is an empty map.
+#[utoipa::path(
+    get,
+    path = "/session/status",
+    operation_id = "session.status",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Session status", body = std::collections::HashMap<String, opencode_proto::SessionStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "session"
+)]
+async fn session_status(
+    State(_state): State<ServerState>,
+) -> Json<std::collections::HashMap<String, opencode_proto::SessionStatus>> {
+    Json(std::collections::HashMap::new())
+}
+
 /// Map a full V1 session row to the `Session` wire shape, parsing the JSON columns
 /// (`model`/`permission`/`revert`/`summary_diffs`) into their typed forms.
 fn session_v1_from_record(r: opencode_db::SessionV1Record) -> opencode_proto::Session {
@@ -2846,6 +2869,7 @@ async fn v2_provider_get(
         v2_session_prompt,
         session_todo,
         session_children,
+        session_status,
         session_update,
         session_revert,
         session_unrevert,
@@ -3062,6 +3086,8 @@ async fn v2_provider_get(
         opencode_proto::FilePatch,
         opencode_proto::FilePatchHunk,
         opencode_proto::SessionContextResponse,
+        opencode_proto::SessionRetryAction,
+        opencode_proto::SessionStatus,
         opencode_proto::TaggedUnknownError,
         opencode_proto::IntegrationWhen,
         opencode_proto::IntegrationSelectOption,
@@ -4048,6 +4074,7 @@ pub fn build_router(state: ServerState) -> Router {
             get(v2_session_question_list),
         );
         router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
+        router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
         router = router.route("/session/{sessionID}", patch(session_update));
@@ -5250,6 +5277,53 @@ mod tests {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["_tag"], "SessionNotFoundError", "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn session_status_is_empty_map() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/session/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Empty map (no live sessions) — an object, not an array.
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[test]
+    fn session_status_serializes_with_type_tag() {
+        use opencode_proto::SessionStatus;
+        assert_eq!(
+            serde_json::to_value(SessionStatus::Idle).unwrap(),
+            serde_json::json!({ "type": "idle" })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionStatus::Retry {
+                attempt: 2,
+                message: "rate limited".into(),
+                action: None,
+                next: 1000,
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "retry", "attempt": 2, "message": "rate limited", "next": 1000 })
+        );
     }
 
     #[tokio::test]

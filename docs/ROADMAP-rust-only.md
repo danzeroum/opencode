@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 52 paths** · PRs desta rodada autônoma: #69–#114.
+> **Rotas nativas contrato-enforçadas: 53 paths** · PRs desta rodada autônoma: #69–#115.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -38,7 +38,7 @@
 - ✅ 1A — `session.children` (`GET /session/{id}/children`, `[Session]`, 404; vazio até o runner criar sub-sessões) — **#112**
 - ⏳ 1i — `session.diff`
 - ✅ 1y — `v2.session.context` (`GET /api/session/{id}/context`, `{ data: [SessionMessage] }`, 404/500; reusa `SessionMessage` + novo `TaggedUnknownError`=`UnknownError1`) — **#109** (vazio até a engine preparar o contexto)
-- ⏳ 1j — `session.status`
+- ✅ 1j — `session.status` (`GET /session/status`, `{ [id]: SessionStatus }` idle/retry/busy, mapa vazio até a engine) — **#115**
 - ⏳ 1k — `session.summarize`
 - ✅ 1l — `session.todo` (read store `todo` + rota `GET /session/{id}/todo`) — **#73**
 - ✅ 1o — `global.dispose` + `instance.dispose` (lifecycle ack, 200 `true`) — **#74**
