@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 35 paths** · PRs desta rodada autônoma: #69–#100.
+> **Rotas nativas contrato-enforçadas: 36 paths** · PRs desta rodada autônoma: #69–#101.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -57,7 +57,7 @@
 - ⏳ 2c — `provider.list` admin + `provider.auth` (escrita de credencial) + teste de conexão
 - 🔄 2d — agents: `app.agents` (V1) rota wirada + tipos `Agent`/`AgentModel` (#87, retorna `[]`); falta `v2.agent.list` (`/api/agent`, precisa `AgentV2Info`+`PermissionV2Rule`), **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
 - 🔄 2e — commands: `command.list` (V1) + `v2.command.list` (`/api/command`, tipo `CommandV2Info`, #100) rotas wiradas (retornam `[]`); falta **loading** (built-in + `.opencode/command/*.md` + MCP/skills) + escrita
-- 🔄 2j — skills: `v2.skill.list` (`/api/skill`, tipo `SkillV2Info`, #100) rota wirada (retorna `[]`); falta **loading** (built-in + `.opencode/skills`) ; resta `v2.reference.list` (`/api/reference`, precisa `Reference*Source`)
+- 🔄 2j — skills/references: `v2.skill.list` (`/api/skill`, tipo `SkillV2Info`, #100) + `v2.reference.list` (`/api/reference`, tipos `ReferenceInfo`/`ReferenceSource`, #101) rotas wiradas (retornam `[]`); falta **loading** (built-in + `.opencode/skills` + `config.references`)
 - ⏳ 2f — políticas (permission rules)
 - ⏳ 2g — snapshots timeline (`session.revert` ligado à UI)
 - ⏳ 2h — shared list

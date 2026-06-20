@@ -1413,6 +1413,67 @@ pub struct CommandListResponse {
     pub data: Vec<CommandV2Info>,
 }
 
+/// Where a reference comes from (`ReferenceInfo.source`) — the golden union of `ReferenceLocalSource`
+/// (`{ type: "local", path, description?, hidden? }`) and `ReferenceGitSource` (`{ type: "git",
+/// repository, branch?, description?, hidden? }`), internally tagged on `type`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ReferenceSource {
+    /// A local-path reference.
+    Local {
+        /// Filesystem path.
+        path: String,
+        /// Optional description.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// Whether the reference is hidden.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
+    },
+    /// A git-repository reference.
+    Git {
+        /// Repository URL.
+        repository: String,
+        /// Optional branch.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// Optional description.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// Whether the reference is hidden.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
+    },
+}
+
+/// A reference entry (`v2.reference.list` item). Mirrors the golden `ReferenceInfo`: `{ name, path,
+/// description?, hidden?, source }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ReferenceInfo {
+    /// Reference name.
+    pub name: String,
+    /// Reference path/identifier.
+    pub path: String,
+    /// Optional description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether the reference is hidden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// Where the reference comes from.
+    pub source: ReferenceSource,
+}
+
+/// 200 body of `v2.reference.list` (GET /api/reference): the `Location.response` wrapper
+/// `{ location, data }` around the reference list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ReferenceListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The references.
+    pub data: Vec<ReferenceInfo>,
+}
+
 /// `ProviderNotFoundError` — 404 for `v2.provider.get` (`{ _tag, providerID, message }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProviderNotFoundError {
