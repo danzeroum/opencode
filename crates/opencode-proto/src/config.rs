@@ -546,6 +546,165 @@ pub struct ConfigExperimental {
     pub policies: Option<Vec<ConfigV2ExperimentalPolicy>>,
 }
 
+/// `config.autoupdate` — `true`/`false`, or `"notify"` (`anyOf[boolean, "notify"]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AutoupdateConfig {
+    /// Enable/disable auto-update.
+    Enabled(bool),
+    /// `"notify"` — show notifications only.
+    Mode(String),
+}
+
+/// `config.formatter` — `false`/`true` for built-ins, or a per-formatter override map
+/// (`anyOf[boolean, object]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(untagged)]
+pub enum FormatterConfig {
+    /// Enable/disable built-in formatters.
+    Enabled(bool),
+    /// Per-formatter overrides (map → `{type:object}`).
+    Configs(std::collections::BTreeMap<String, serde_json::Value>),
+}
+
+/// `config.lsp` — `false`/`true` for built-ins, or a per-server override map (`anyOf[boolean, object]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(untagged)]
+pub enum LspConfig {
+    /// Enable/disable built-in LSP servers.
+    Enabled(bool),
+    /// Per-server overrides (map → `{type:object}`).
+    Configs(std::collections::BTreeMap<String, serde_json::Value>),
+}
+
+/// One `config.plugin` entry: a bare name, or `[name, options]` (`anyOf[string, [string, object]]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(untagged)]
+pub enum PluginEntry {
+    /// Plugin name/spec.
+    Name(String),
+    /// `[name, options]` (the tuple's `prefixItems` are dropped by the normalizer → `{type:array}`).
+    WithOptions((String, serde_json::Value)),
+}
+
+/// `Config` (`config.get` / `global.config.get`) — the merged opencode configuration. Pure-map fields
+/// (`command`/`provider`/`mcp`/`tools`/`references`/`reference`) are `serde_json::Value` (the normalizer
+/// drops `additionalProperties`); typed objects + unions are modeled explicitly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct Config {
+    /// JSON-schema URL.
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// Default shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// Log level.
+    #[serde(rename = "logLevel", skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<LogLevel>,
+    /// Server config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerConfig>,
+    /// Custom commands (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub command: Option<serde_json::Value>,
+    /// Skill sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<ConfigSkills>,
+    /// Reference sources (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub references: Option<serde_json::Value>,
+    /// Reference sources (legacy alias, map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub reference: Option<serde_json::Value>,
+    /// File-watcher config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watcher: Option<ConfigWatcher>,
+    /// Whether snapshots are enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<bool>,
+    /// Loaded plugins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<Vec<PluginEntry>>,
+    /// Share mode (`manual`/`auto`/`disabled`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
+    /// Auto-share new sessions (deprecated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autoshare: Option<bool>,
+    /// Auto-update behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autoupdate: Option<AutoupdateConfig>,
+    /// Disabled provider ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_providers: Option<Vec<String>>,
+    /// Enabled provider ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled_providers: Option<Vec<String>>,
+    /// Default model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Default small model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+    /// Default agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    /// Username override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Mode configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ConfigMode>,
+    /// Agent configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<ConfigAgents>,
+    /// Provider overrides (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub provider: Option<serde_json::Value>,
+    /// MCP servers (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub mcp: Option<serde_json::Value>,
+    /// Formatter config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatter: Option<FormatterConfig>,
+    /// LSP config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp: Option<LspConfig>,
+    /// Extra instruction files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Vec<String>>,
+    /// Layout (deprecated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutConfig>,
+    /// Global permission config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionConfig>,
+    /// Global tool enable/disable (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub tools: Option<serde_json::Value>,
+    /// Attachment config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AttachmentConfig>,
+    /// Enterprise config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enterprise: Option<ConfigEnterprise>,
+    /// Tool-output limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_output: Option<ConfigToolOutput>,
+    /// Compaction tuning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<ConfigCompaction>,
+    /// Experimental toggles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<ConfigExperimental>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

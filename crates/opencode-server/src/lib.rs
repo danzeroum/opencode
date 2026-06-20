@@ -2452,6 +2452,8 @@ async fn v2_provider_get(
         session_unrevert,
         app_agents,
         command_list,
+        config_get,
+        global_config_get,
         global_dispose,
         instance_dispose,
         file_list,
@@ -2565,6 +2567,41 @@ async fn v2_provider_get(
         opencode_proto::Agent,
         opencode_proto::AgentModel,
         opencode_proto::Command,
+        opencode_proto::Config,
+        opencode_proto::LogLevel,
+        opencode_proto::LayoutConfig,
+        opencode_proto::PolicyEffect,
+        opencode_proto::ServerConfig,
+        opencode_proto::AttachmentConfig,
+        opencode_proto::ImageAttachmentConfig,
+        opencode_proto::ConfigV2ReferenceGit,
+        opencode_proto::ConfigV2ReferenceLocal,
+        opencode_proto::ConfigV2ExperimentalPolicy,
+        opencode_proto::PermissionActionConfig,
+        opencode_proto::PermissionObjectConfig,
+        opencode_proto::PermissionRuleConfig,
+        opencode_proto::PermissionDetailedConfig,
+        opencode_proto::PermissionConfig,
+        opencode_proto::McpOAuthConfig,
+        opencode_proto::McpOAuthSetting,
+        opencode_proto::McpLocalConfig,
+        opencode_proto::McpRemoteConfig,
+        opencode_proto::AgentConfig,
+        opencode_proto::TimeoutConfig,
+        opencode_proto::ProviderOptionsConfig,
+        opencode_proto::ProviderConfig,
+        opencode_proto::ConfigSkills,
+        opencode_proto::ConfigWatcher,
+        opencode_proto::ConfigMode,
+        opencode_proto::ConfigAgents,
+        opencode_proto::ConfigEnterprise,
+        opencode_proto::ConfigToolOutput,
+        opencode_proto::ConfigCompaction,
+        opencode_proto::ConfigExperimental,
+        opencode_proto::AutoupdateConfig,
+        opencode_proto::FormatterConfig,
+        opencode_proto::LspConfig,
+        opencode_proto::PluginEntry,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2578,7 +2615,8 @@ async fn v2_provider_get(
         (name = "events", description = "Event stream routes"),
         (name = "model", description = "Model catalog routes"),
         (name = "provider", description = "Provider catalog routes"),
-        (name = "location", description = "Location routes")
+        (name = "location", description = "Location routes"),
+        (name = "config", description = "Configuration routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -2782,6 +2820,39 @@ async fn command_list(State(_state): State<ServerState>) -> Json<Vec<opencode_pr
     Json(Vec::new())
 }
 
+/// `GET /config` — the merged opencode configuration (group `config`). Matches the golden `config.get`:
+/// 200 `Config`, 400 `BadRequestError`. Config *loading* (the 7-level merge of `opencode.json` etc.) is
+/// a follow-up (PENDENCIAS #1); until then this returns the empty/default config.
+#[utoipa::path(
+    get,
+    path = "/config",
+    operation_id = "config.get",
+    responses(
+        (status = 200, description = "Config", body = opencode_proto::Config),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "config"
+)]
+async fn config_get(State(_state): State<ServerState>) -> Json<opencode_proto::Config> {
+    Json(opencode_proto::Config::default())
+}
+
+/// `GET /global/config` — the global configuration (group `global`). Matches the golden
+/// `global.config.get`: 200 `Config`, 400 `BadRequestError`. Loading is a follow-up (PENDENCIAS #1).
+#[utoipa::path(
+    get,
+    path = "/global/config",
+    operation_id = "global.config.get",
+    responses(
+        (status = 200, description = "Config", body = opencode_proto::Config),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "global"
+)]
+async fn global_config_get(State(_state): State<ServerState>) -> Json<opencode_proto::Config> {
+    Json(opencode_proto::Config::default())
+}
+
 /// `GET /permission` — pending permission requests (group `permission`). Matches the golden
 /// `permission.list`: 200 `[PermissionRequest]`, 400 `BadRequestError`. Pending requests are ephemeral
 /// execution state; until the native runner produces them this is empty (no in-flight approvals).
@@ -2878,6 +2949,10 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
         router = router.route("/global/dispose", post(global_dispose));
+        router = router.route("/global/config", get(global_config_get));
+    }
+    if state.routes.handles("config") {
+        router = router.route("/config", get(config_get));
     }
     if state.routes.handles("instance") {
         router = router.route("/path", get(path_get));
@@ -3835,6 +3910,36 @@ mod tests {
         // No repo → both fields omitted (object present, branch absent).
         assert!(v.is_object());
         assert!(v.get("branch").is_none());
+    }
+
+    #[tokio::test]
+    async fn config_routes_return_an_object() {
+        use tower::ServiceExt;
+        for (group, uri) in [("config", "/config"), ("global", "/global/config")] {
+            let state = ServerState {
+                ctx: AppContext::in_memory(),
+                routes: RouteTable::parse(group),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            // Empty/default config until loading lands → a JSON object (all fields omitted).
+            assert!(v.is_object(), "{uri}");
+        }
     }
 
     #[tokio::test]

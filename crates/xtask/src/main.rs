@@ -24,6 +24,8 @@ const CUTOVER_PATHS: &[&str] = &[
     "/vcs",
     "/agent",
     "/command",
+    "/config",
+    "/global/config",
     "/api/session",
     "/api/session/{sessionID}",
     "/session/{sessionID}",
@@ -178,7 +180,10 @@ fn normalize_schema(schema: &Value, components: &Map<String, Value>, depth: u8) 
         r.dedup();
         out.insert("required".into(), json!(r));
     }
-    if let Some(items) = map.get("items") {
+    // Keep `items` only when it's a real subschema. utoipa emits a boolean `items` (`false`) for fixed
+    // tuples (`prefixItems`); the golden spec omits it, so drop the boolean form as a representation
+    // difference.
+    if let Some(items) = map.get("items").filter(|v| !v.is_boolean()) {
         out.insert(
             "items".into(),
             normalize_schema(items, components, depth - 1),
