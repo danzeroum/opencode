@@ -1474,6 +1474,95 @@ pub struct ReferenceListResponse {
     pub data: Vec<ReferenceInfo>,
 }
 
+/// The effect of a permission rule (`PermissionV2Effect`): `allow` | `deny` | `ask`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionV2Effect {
+    /// Allow the action.
+    Allow,
+    /// Deny the action.
+    Deny,
+    /// Ask the user.
+    Ask,
+}
+
+/// A single permission rule (`PermissionV2Rule`): `{ action, resource, effect }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionV2Rule {
+    /// The action the rule governs.
+    pub action: String,
+    /// The resource the rule governs.
+    pub resource: String,
+    /// What to do when the rule matches.
+    pub effect: PermissionV2Effect,
+}
+
+/// Agent operating mode (`AgentV2Info.mode`): `subagent` | `primary` | `all`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// Usable only as a subagent.
+    Subagent,
+    /// Usable as a primary agent.
+    Primary,
+    /// Usable in any mode.
+    All,
+}
+
+/// The model-request shape an agent carries (`AgentV2Info.request`): `{ headers, body }`, both
+/// required. `headers` is a string map; `body` is a free-form request body.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AgentV2Request {
+    /// HTTP headers to attach to the model request.
+    pub headers: BTreeMap<String, String>,
+    /// Request body overlay.
+    #[schema(value_type = Object)]
+    pub body: serde_json::Value,
+}
+
+/// An agent entry (`v2.agent.list` item). Mirrors the golden `AgentV2Info`: `{ id, model?, request,
+/// system?, description?, mode, hidden, color?, steps?, permissions }`. `model` reuses the typed
+/// [`ModelRef`]; `color` is a string (the golden `anyOf` of a hex pattern and a named-color enum both
+/// collapse to a plain string under the contract normalizer).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AgentV2Info {
+    /// Agent id.
+    pub id: String,
+    /// Optional model override (`{ id, providerID, variant? }`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// The model-request shape.
+    pub request: AgentV2Request,
+    /// Optional system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// Optional description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Operating mode.
+    pub mode: AgentMode,
+    /// Whether the agent is hidden from pickers.
+    pub hidden: bool,
+    /// Optional display color (hex or named).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Optional step limit (> 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<i64>,
+    /// The agent's permission ruleset.
+    pub permissions: Vec<PermissionV2Rule>,
+}
+
+/// 200 body of `v2.agent.list` (GET /api/agent): the `Location.response` wrapper `{ location, data }`
+/// around the agent list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AgentListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The agents.
+    pub data: Vec<AgentV2Info>,
+}
+
 /// `ProviderNotFoundError` — 404 for `v2.provider.get` (`{ _tag, providerID, message }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProviderNotFoundError {
