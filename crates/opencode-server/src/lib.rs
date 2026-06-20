@@ -2321,6 +2321,60 @@ async fn v2_provider_list(
     }))
 }
 
+/// `GET /api/skill` — list skills (group `skill`). Matches the golden `v2.skill.list`: 200
+/// `{ location, data }` + 400/401. Skills are loaded from built-ins + `.opencode/skills` (a loading
+/// epic, see PENDENCIAS #2); until that lands the list is empty — the same wired-empty stance as the
+/// V1 `app.agents`/`command.list`.
+#[utoipa::path(
+    get,
+    path = "/api/skill",
+    operation_id = "v2.skill.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Skills", body = opencode_proto::SkillListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "skills"
+)]
+async fn v2_skill_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::SkillListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(opencode_proto::SkillListResponse {
+        location,
+        data: Vec::new(),
+    }))
+}
+
+/// `GET /api/command` — list commands (group `command`). Matches the golden `v2.command.list`: 200
+/// `{ location, data }` + 400/401. Commands are loaded from built-ins + `.opencode/command` + MCP/skills
+/// (a loading epic, see PENDENCIAS #2); until that lands the list is empty (same wired-empty stance as
+/// the V1 `command.list`).
+#[utoipa::path(
+    get,
+    path = "/api/command",
+    operation_id = "v2.command.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Commands", body = opencode_proto::CommandListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "commands"
+)]
+async fn v2_command_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::CommandListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(opencode_proto::CommandListResponse {
+        location,
+        data: Vec::new(),
+    }))
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2470,6 +2524,8 @@ async fn v2_provider_get(
         session_abort,
         v2_model_list,
         v2_provider_list,
+        v2_skill_list,
+        v2_command_list,
         v2_location_get,
         v2_provider_get
     ),
@@ -2609,6 +2665,10 @@ async fn v2_provider_get(
         opencode_proto::McpStatus,
         opencode_proto::LspStatus,
         opencode_proto::LspServerStatus,
+        opencode_proto::SkillV2Info,
+        opencode_proto::SkillListResponse,
+        opencode_proto::CommandV2Info,
+        opencode_proto::CommandListResponse,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2625,7 +2685,9 @@ async fn v2_provider_get(
         (name = "location", description = "Location routes"),
         (name = "config", description = "Configuration routes"),
         (name = "mcp", description = "MCP server routes"),
-        (name = "lsp", description = "LSP server routes")
+        (name = "lsp", description = "LSP server routes"),
+        (name = "skills", description = "Skill catalog routes"),
+        (name = "commands", description = "Command catalog routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3214,6 +3276,12 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("provider") {
         router = router.route("/api/provider", get(v2_provider_list));
         router = router.route("/api/provider/{providerID}", get(v2_provider_get));
+    }
+    if state.routes.handles("skill") {
+        router = router.route("/api/skill", get(v2_skill_list));
+    }
+    if state.routes.handles("command") {
+        router = router.route("/api/command", get(v2_command_list));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -4306,6 +4374,46 @@ mod tests {
             .unwrap(),
             serde_json::json!({ "status": "needs_client_registration", "error": "boom" })
         );
+    }
+
+    #[tokio::test]
+    async fn v2_skill_and_command_lists_are_empty_until_loading_lands() {
+        use tower::ServiceExt;
+        for (group, uri) in [
+            ("skill", "/api/skill?directory=/repo"),
+            ("command", "/api/command?directory=/repo"),
+        ] {
+            // Seed a project whose worktree matches the requested directory so location resolves.
+            let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+            projects.insert(test_project_record("prj_1"));
+            let state = ServerState {
+                ctx: AppContext::new(AppServices {
+                    projects,
+                    ..Default::default()
+                }),
+                routes: RouteTable::parse(group),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            // The `Location.response` wrapper: a resolved location + an empty data array.
+            assert_eq!(v["location"]["project"]["id"], "prj_1", "{uri}");
+            assert_eq!(v["data"], serde_json::json!([]), "{uri}");
+        }
     }
 
     #[tokio::test]
