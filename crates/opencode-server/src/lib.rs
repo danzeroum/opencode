@@ -126,6 +126,9 @@ pub struct RunnerServices {
     /// Pending permission requests awaiting a user decision (read by the permission list routes,
     /// resolved by `permission.respond`). The asking gate that populates it lands in a follow-up.
     pub(crate) pending: Arc<PendingPermissions>,
+    /// Pending question requests awaiting a user answer (read by `v2.session.question.list`, resolved
+    /// by `v2.session.question.reply`/`reject`). The producer `question` tool lands in a follow-up.
+    pub(crate) questions: Arc<PendingQuestions>,
 }
 
 impl RunnerServices {
@@ -142,6 +145,7 @@ impl RunnerServices {
             gate: Arc::new(StorePermissionGate::new(pending.clone())),
             root: root.into(),
             pending,
+            questions: Arc::new(PendingQuestions::default()),
         })
     }
 }
@@ -156,6 +160,7 @@ impl Default for RunnerServices {
             gate: Arc::new(AllowAll),
             root: std::path::PathBuf::from("."),
             pending: Arc::new(PendingPermissions::default()),
+            questions: Arc::new(PendingQuestions::default()),
         }
     }
 }
@@ -435,6 +440,108 @@ impl PermissionGate for StorePermissionGate {
         let (_id, rx) = self.pending.register(session_id, tool, input.clone());
         rx.await
             .unwrap_or_else(|_| Decision::Deny("permission request dropped".to_string()))
+    }
+}
+
+/// How a pending question resolved: the user's per-question answers, or a rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionResolution {
+    /// Answers in question order (each a list of selected labels).
+    Answered(Vec<Vec<String>>),
+    /// The user dismissed the question.
+    Rejected,
+}
+
+/// Metadata for a pending question request, surfaced by `v2.session.question.list`.
+#[derive(Clone)]
+pub struct QuestionMeta {
+    /// Request id (`qst_…`).
+    pub id: String,
+    /// The session whose run is parked on this question.
+    pub session_id: String,
+    /// The questions to answer.
+    pub questions: Vec<opencode_proto::QuestionV2Info>,
+}
+
+/// A registered pending question: its metadata + the resolver the parked run awaits.
+struct QuestionEntry {
+    meta: QuestionMeta,
+    resolver: tokio::sync::oneshot::Sender<QuestionResolution>,
+}
+
+/// In-process store of question requests awaiting a user answer — the question-flow sibling of
+/// [`PendingPermissions`]. A producer (the `question` tool) registers + parks; `v2.session.question.list`
+/// reads the metadata; `v2.session.question.reply`/`reject` resolve it, waking the run.
+#[derive(Default)]
+pub struct PendingQuestions {
+    entries: Mutex<HashMap<String, QuestionEntry>>,
+}
+
+impl PendingQuestions {
+    /// Register a pending question; returns its id + the receiver the producer awaits for the answer.
+    pub fn register(
+        &self,
+        session_id: impl Into<String>,
+        questions: Vec<opencode_proto::QuestionV2Info>,
+    ) -> (String, tokio::sync::oneshot::Receiver<QuestionResolution>) {
+        let id = format!("qst_{}", ulid::Ulid::new());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let meta = QuestionMeta {
+            id: id.clone(),
+            session_id: session_id.into(),
+            questions,
+        };
+        self.entries
+            .lock()
+            .expect("pending questions mutex poisoned")
+            .insert(id.clone(), QuestionEntry { meta, resolver: tx });
+        (id, rx)
+    }
+
+    /// The pending questions, optionally filtered to one session.
+    pub fn list(&self, session_id: Option<&str>) -> Vec<QuestionMeta> {
+        self.entries
+            .lock()
+            .expect("pending questions mutex poisoned")
+            .values()
+            .filter(|e| session_id.is_none_or(|s| e.meta.session_id == s))
+            .map(|e| e.meta.clone())
+            .collect()
+    }
+
+    /// Resolve a pending question with the user's answers. Returns whether found.
+    pub fn reply(&self, id: &str, answers: Vec<Vec<String>>) -> bool {
+        self.resolve(id, QuestionResolution::Answered(answers))
+    }
+
+    /// Reject (dismiss) a pending question. Returns whether found.
+    pub fn reject(&self, id: &str) -> bool {
+        self.resolve(id, QuestionResolution::Rejected)
+    }
+
+    fn resolve(&self, id: &str, resolution: QuestionResolution) -> bool {
+        match self
+            .entries
+            .lock()
+            .expect("pending questions mutex poisoned")
+            .remove(id)
+        {
+            Some(entry) => {
+                let _ = entry.resolver.send(resolution);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Map a pending question to the `QuestionV2Request` wire shape (`v2.session.question.list`).
+fn question_to_v2(m: QuestionMeta) -> opencode_proto::QuestionV2Request {
+    opencode_proto::QuestionV2Request {
+        id: m.id,
+        session_id: m.session_id,
+        questions: m.questions,
+        tool: None,
     }
 }
 
@@ -3248,9 +3355,104 @@ async fn v2_session_question_list(
     {
         return Err(SessionGetError::NotFound(session_id));
     }
-    Ok(Json(opencode_proto::SessionQuestionListResponse {
-        data: Vec::new(),
-    }))
+    let data = state
+        .runner
+        .questions
+        .list(Some(&session_id))
+        .into_iter()
+        .map(question_to_v2)
+        .collect();
+    Ok(Json(opencode_proto::SessionQuestionListResponse { data }))
+}
+
+/// Request body for `v2.session.question.reply`: `{ answers }` (per-question lists of selected labels).
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct QuestionReplyBody {
+    /// Answers in question order; each is a list of selected option labels.
+    #[serde(default)]
+    answers: Vec<Vec<String>>,
+}
+
+/// 404 responder for the question reply/reject routes: an unknown request id → `QuestionNotFoundError`.
+/// (The contract's 400/401 arms are declared but the lenient handlers don't produce them.)
+struct QuestionNotFound(String);
+
+impl axum::response::IntoResponse for QuestionNotFound {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(opencode_proto::QuestionNotFoundError {
+                tag: "QuestionNotFoundError".to_string(),
+                message: format!("Question request not found: {}", self.0),
+                request_id: self.0,
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// `POST /api/session/{sessionID}/question/{requestID}/reply` — answer a pending question (group
+/// `session`). Matches the golden `v2.session.question.reply`: 204, 400/401, 404
+/// `QuestionNotFoundError | SessionNotFoundError`. Resolves the question with the user's answers,
+/// waking the parked run.
+#[utoipa::path(
+    post,
+    path = "/api/session/{sessionID}/question/{requestID}/reply",
+    operation_id = "v2.session.question.reply",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("requestID" = String, Path, description = "Question request id")
+    ),
+    request_body = QuestionReplyBody,
+    responses(
+        (status = 204, description = "Replied"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Not found", body = opencode_proto::QuestionReplyNotFound)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_question_reply(
+    State(state): State<ServerState>,
+    axum::extract::Path((_session_id, request_id)): axum::extract::Path<(String, String)>,
+    body: Option<Json<QuestionReplyBody>>,
+) -> Result<axum::http::StatusCode, QuestionNotFound> {
+    let answers = body.map(|Json(b)| b.answers).unwrap_or_default();
+    if state.runner.questions.reply(&request_id, answers) {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(QuestionNotFound(request_id))
+    }
+}
+
+/// `POST /api/session/{sessionID}/question/{requestID}/reject` — dismiss a pending question (group
+/// `session`). Matches the golden `v2.session.question.reject`: 204, 400/401, 404
+/// `QuestionNotFoundError | SessionNotFoundError`. Resolves the question as rejected, waking the run.
+#[utoipa::path(
+    post,
+    path = "/api/session/{sessionID}/question/{requestID}/reject",
+    operation_id = "v2.session.question.reject",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("requestID" = String, Path, description = "Question request id")
+    ),
+    responses(
+        (status = 204, description = "Rejected"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Not found", body = opencode_proto::QuestionReplyNotFound)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_question_reject(
+    State(state): State<ServerState>,
+    axum::extract::Path((_session_id, request_id)): axum::extract::Path<(String, String)>,
+) -> Result<axum::http::StatusCode, QuestionNotFound> {
+    if state.runner.questions.reject(&request_id) {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(QuestionNotFound(request_id))
+    }
 }
 
 /// `GET /api/session/{sessionID}/context` — a session's prepared context (group `session`). Matches the
@@ -3487,6 +3689,8 @@ async fn v2_provider_get(
         v2_session_permission_list,
         permission_respond,
         v2_session_permission_reply,
+        v2_session_question_reply,
+        v2_session_question_reject,
         v2_question_request_list,
         v2_session_question_list,
         v2_session_context,
@@ -3659,8 +3863,11 @@ async fn v2_provider_get(
         opencode_proto::PermissionNotFoundError,
         opencode_proto::PermissionRespondNotFound,
         opencode_proto::PermissionReplyNotFound,
+        opencode_proto::QuestionNotFoundError,
+        opencode_proto::QuestionReplyNotFound,
         PermissionRespondBody,
         PermissionReplyBody,
+        QuestionReplyBody,
         opencode_proto::QuestionV2Tool,
         opencode_proto::QuestionV2Option,
         opencode_proto::QuestionV2Info,
@@ -5081,6 +5288,14 @@ pub fn build_router(state: ServerState) -> Router {
             "/api/session/{sessionID}/permission/{requestID}/reply",
             post(v2_session_permission_reply),
         );
+        router = router.route(
+            "/api/session/{sessionID}/question/{requestID}/reply",
+            post(v2_session_question_reply),
+        );
+        router = router.route(
+            "/api/session/{sessionID}/question/{requestID}/reject",
+            post(v2_session_question_reject),
+        );
         router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
         router = router.route("/session", get(session_list).post(session_create));
         router = router.route("/session/status", get(session_status));
@@ -5408,6 +5623,7 @@ mod tests {
                 gate: Arc::new(AllowAll),
                 root,
                 pending: Arc::new(PendingPermissions::default()),
+                questions: Arc::new(PendingQuestions::default()),
             },
             coordinator: SessionCoordinator::default(),
         }
@@ -6325,6 +6541,70 @@ mod tests {
                     .uri(&uri)
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"reply":"reject"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn v2_question_reply_and_reject_resolve_with_204() {
+        use tower::ServiceExt;
+        let questions = Arc::new(PendingQuestions::default());
+        let state = |questions: Arc<PendingQuestions>| ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices {
+                questions,
+                ..RunnerServices::default()
+            },
+            coordinator: SessionCoordinator::default(),
+        };
+        // reply → 204 + the parked producer receives the answers.
+        let (req_id, rx) = questions.register("ses_1", Vec::new());
+        let uri = format!("/api/session/ses_1/question/{req_id}/reply");
+        let resp = build_router(state(questions.clone()))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"answers":[["yes"]]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert_eq!(
+            rx.await.unwrap(),
+            QuestionResolution::Answered(vec![vec!["yes".to_string()]])
+        );
+
+        // reject → 204 + the producer receives Rejected.
+        let (req_id2, rx2) = questions.register("ses_1", Vec::new());
+        let uri2 = format!("/api/session/ses_1/question/{req_id2}/reject");
+        let resp = build_router(state(questions.clone()))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(&uri2)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert_eq!(rx2.await.unwrap(), QuestionResolution::Rejected);
+
+        // Replying to an unknown request → 404.
+        let resp = build_router(state(questions))
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/api/session/ses_1/question/qst_missing/reject")
+                    .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
@@ -8525,6 +8805,7 @@ mod tests {
                 gate: Arc::new(AllowAll),
                 root,
                 pending: Arc::new(PendingPermissions::default()),
+                questions: Arc::new(PendingQuestions::default()),
             },
             coordinator: SessionCoordinator::default(),
         }
