@@ -424,6 +424,128 @@ pub struct ProviderConfig {
     pub models: Option<serde_json::Value>,
 }
 
+/// `config.skills` — extra skill sources.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConfigSkills {
+    /// Local skill directories.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+    /// Remote skill URLs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub urls: Option<Vec<String>>,
+}
+
+/// `config.watcher` — file-watcher tuning.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConfigWatcher {
+    /// Glob patterns to ignore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore: Option<Vec<String>>,
+}
+
+/// `config.mode` — the two built-in modes (plus arbitrary extras via the map, dropped by the
+/// normalizer). Each value is an [`AgentConfig`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ConfigMode {
+    /// `build` mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<AgentConfig>,
+    /// `plan` mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AgentConfig>,
+}
+
+/// `config.agent` — the built-in agents (plus extras via the map). Each value is an [`AgentConfig`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ConfigAgents {
+    /// `plan` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AgentConfig>,
+    /// `build` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<AgentConfig>,
+    /// `general` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub general: Option<AgentConfig>,
+    /// `explore` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explore: Option<AgentConfig>,
+    /// `title` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<AgentConfig>,
+    /// `summary` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<AgentConfig>,
+    /// `compaction` agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AgentConfig>,
+}
+
+/// `config.enterprise` — enterprise endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConfigEnterprise {
+    /// Enterprise URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// `config.tool_output` — tool-output truncation limits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConfigToolOutput {
+    /// Max output lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_lines: Option<i64>,
+    /// Max output bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<i64>,
+}
+
+/// `config.compaction` — context-compaction tuning.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConfigCompaction {
+    /// Auto-compact when context fills.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<bool>,
+    /// Prune pruneable tool output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune: Option<bool>,
+    /// Turns kept in the recent tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_turns: Option<i64>,
+    /// Recent tokens to preserve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserve_recent_tokens: Option<i64>,
+    /// Reserved context tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved: Option<i64>,
+}
+
+/// `config.experimental` — opt-in/experimental toggles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConfigExperimental {
+    /// Disable the paste-summary feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_paste_summary: Option<bool>,
+    /// Enable the batch tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_tool: Option<bool>,
+    /// Enable OpenTelemetry.
+    #[serde(rename = "openTelemetry", skip_serializing_if = "Option::is_none")]
+    pub open_telemetry: Option<bool>,
+    /// Tools always offered to the primary agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_tools: Option<Vec<String>>,
+    /// Continue the loop even when a tool is denied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_loop_on_deny: Option<bool>,
+    /// MCP connection timeout (ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_timeout: Option<i64>,
+    /// Provider-use policies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<ConfigV2ExperimentalPolicy>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +705,34 @@ mod tests {
         let back: ProviderConfig =
             serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn config_inline_objects_round_trip() {
+        let experimental: ConfigExperimental = serde_json::from_value(serde_json::json!({
+            "openTelemetry": true,
+            "mcp_timeout": 5000,
+            "policies": [{ "action": "provider.use", "effect": "deny", "resource": "openai/*" }]
+        }))
+        .unwrap();
+        assert_eq!(experimental.open_telemetry, Some(true));
+        assert_eq!(experimental.mcp_timeout, Some(5000));
+        assert_eq!(
+            experimental.policies.as_ref().unwrap()[0].effect,
+            PolicyEffect::Deny
+        );
+
+        let agents: ConfigAgents = serde_json::from_value(serde_json::json!({
+            "build": { "model": "anthropic/claude" },
+            "plan": { "mode": "primary" }
+        }))
+        .unwrap();
+        assert_eq!(
+            agents.build.as_ref().unwrap().model.as_deref(),
+            Some("anthropic/claude")
+        );
+        let back: ConfigAgents =
+            serde_json::from_value(serde_json::to_value(&agents).unwrap()).unwrap();
+        assert_eq!(back, agents);
     }
 }
