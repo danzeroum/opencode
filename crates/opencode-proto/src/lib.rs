@@ -572,6 +572,48 @@ pub struct SessionContextResponse {
     pub data: Vec<SessionMessage>,
 }
 
+/// A user-facing action shown while a session retries (`SessionStatus::Retry.action`):
+/// `{ reason, provider, title, message, label, link? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionRetryAction {
+    /// Why the retry is happening.
+    pub reason: String,
+    /// The provider involved.
+    pub provider: String,
+    /// A short title.
+    pub title: String,
+    /// A longer message.
+    pub message: String,
+    /// A call-to-action label.
+    pub label: String,
+    /// An optional link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+/// Live status of a session (`session.status` map value). Mirrors the golden `SessionStatus` union,
+/// internally tagged on `type`: `idle` | `retry` (with attempt/backoff details) | `busy`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SessionStatus {
+    /// No turn in progress.
+    Idle,
+    /// A turn is retrying after a transient failure.
+    Retry {
+        /// The current attempt number.
+        attempt: i64,
+        /// A human-readable status message.
+        message: String,
+        /// An optional user-facing action.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<SessionRetryAction>,
+        /// Milliseconds until the next attempt.
+        next: i64,
+    },
+    /// A turn is actively running.
+    Busy,
+}
+
 /// `UnknownError1` (golden) — the `_tag`-discriminated unknown-error envelope some V2 routes declare for
 /// their 500 response: `{ _tag: "UnknownError", message, ref? }`. Distinct from [`UnknownError`]
 /// (`{ name, data }`) and [`ErrorEnvelope`] (no `ref`).
