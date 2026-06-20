@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 55 paths** · PRs desta rodada autônoma: #69–#117.
+> **Rotas nativas contrato-enforçadas: 56 paths** · PRs desta rodada autônoma: #69–#118.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -42,6 +42,7 @@
 - ⏳ 1k — `session.summarize`
 - ✅ 1l — `session.todo` (read store `todo` + rota `GET /session/{id}/todo`) — **#73**
 - ✅ 1o — `global.dispose` + `instance.dispose` (lifecycle ack, 200 `true`) — **#74**
+- ✅ 1C — `global.event` (`GET /global/event`, SSE `text/event-stream`, compartilha o event bus do `v2.event.subscribe`) — **#118**
 - ✅ 1r — `file.list` (`GET /file`, listagem de diretório com flag gitignore) — **#76**
 - ✅ 1v — `v2.fs.list` (`GET /api/fs/list`, dados reais: `{ path, type, mime }` via `opencode_tools`, mime best-effort sem dep nova) — **#106**
 - ✅ 1w — `v2.fs.find` (`GET /api/fs/find`, busca real arquivos+dirs via `opencode_tools::find_entries`, filtro `type` + `limit`) — **#107**

@@ -53,6 +53,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/session/{sessionID}/todo",
     "/session/{sessionID}/children",
     "/global/dispose",
+    "/global/event",
     "/instance/dispose",
     "/api/event",
     "/session/{sessionID}/abort",
