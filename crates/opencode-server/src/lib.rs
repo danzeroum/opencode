@@ -1333,6 +1333,36 @@ async fn v2_event_subscribe(
     axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
+/// `GET /global/event` — global SSE event stream (group `global`). Matches the golden `global.event`:
+/// a `text/event-stream` (200) + 400 `BadRequestError`. Shares the in-process event bus with
+/// `v2.event.subscribe`; the global stream carries the same contract events. (The golden's 200 body is
+/// `text/event-stream`, which the OpenAPI diff doesn't compare — only `application/json` schemas.)
+#[utoipa::path(
+    get,
+    path = "/global/event",
+    operation_id = "global.event",
+    responses(
+        (status = 200, description = "Event stream", content_type = "text/event-stream", body = String),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "global"
+)]
+async fn global_event(
+    State(state): State<ServerState>,
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use futures::StreamExt;
+    let stream = state.ctx.event_bus().subscribe().map(|event| {
+        let data = serde_json::to_string(&contract_event_payload(&event))
+            .unwrap_or_else(|_| "{}".to_string());
+        Ok(axum::response::sse::Event::default()
+            .event("message")
+            .data(data))
+    });
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 /// Default page size when `limit` is omitted (mirrors TS `DefaultSessionsLimit`).
 const DEFAULT_SESSIONS_LIMIT: i64 = 50;
 
@@ -2929,6 +2959,7 @@ async fn v2_provider_get(
         global_config_get,
         global_config_update,
         global_dispose,
+        global_event,
         instance_dispose,
         file_list,
         file_read,
@@ -4099,6 +4130,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
         router = router.route("/global/dispose", post(global_dispose));
+        router = router.route("/global/event", get(global_event));
         router = router.route(
             "/global/config",
             get(global_config_get).patch(global_config_update),
@@ -6480,6 +6512,35 @@ mod tests {
             .await
             .unwrap();
         // Always-native SSE infra route → 200 text/event-stream. (Body is an open stream; not read.)
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_event_serves_sse_stream() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("global"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/global/event")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 200 text/event-stream (body is an open stream; not read).
         assert_eq!(resp.status(), 200);
         assert_eq!(
             resp.headers()
