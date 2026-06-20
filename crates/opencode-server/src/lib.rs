@@ -568,6 +568,34 @@ impl opencode_core::native_tools::QuestionAsker for StoreQuestionAsker {
     }
 }
 
+/// Rebuild a session's prior conversation as LLM messages, so a new turn is seeded with history (the
+/// model sees the whole conversation, not just the latest prompt). Reads the `session_message` timeline
+/// and maps it via [`opencode_core::session_timeline::timeline_to_llm`]. A read failure degrades to no
+/// history (a context-less turn beats failing the run).
+async fn load_llm_history(ctx: &AppContext, session_id: &str) -> Vec<opencode_llm::Message> {
+    let rows = match ctx
+        .session_messages()
+        .list(session_id, None, None, opencode_db::MessageOrder::Asc, None)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(session = session_id, %error, "failed to load conversation history");
+            return Vec::new();
+        }
+    };
+    let mut timeline = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row_to_session_message(row) {
+            Ok(msg) => timeline.push(msg),
+            Err(error) => {
+                tracing::warn!(session = session_id, %error, "failed to decode a timeline entry");
+            }
+        }
+    }
+    opencode_core::session_timeline::timeline_to_llm(&timeline)
+}
+
 /// Build the engine + native tools + persist-then-announce sink and drive one user turn to completion.
 /// Shared by the synchronous execute route and the background [`LiveTurnRunner`].
 #[allow(clippy::too_many_arguments)]
@@ -605,6 +633,11 @@ async fn drive_one_turn(
         .map_err(|e| e.to_string())?;
     let secondary = BusSink::new(ctx.event_bus().clone(), session_id);
     let sink = FanOutSink::new(primary, secondary);
+    // Seed the turn with the prior conversation so the model has context; the new prompt goes last.
+    let history = load_llm_history(ctx, session_id).await;
+    let history_len = history.len();
+    let mut seed = history;
+    seed.push(Message::user_text(prompt));
     let started = std::time::Instant::now();
     let result = run_gated(
         engine.as_ref(),
@@ -612,7 +645,7 @@ async fn drive_one_turn(
         &sink,
         runner.gate.as_ref(),
         &session,
-        vec![Message::user_text(prompt)],
+        seed,
         cancel,
     )
     .await;
@@ -630,13 +663,15 @@ async fn drive_one_turn(
                 ctx.metrics().record_cancellation();
             }
             // Project the finished turn into the `session_message` timeline so `v2.session.messages`
-            // returns real data (the native write path; see `persist_timeline`).
+            // returns real data (the native write path; see `persist_timeline`). Only the *new* tail is
+            // persisted — `run.messages` is seeded with prior history, which is already stored.
+            let tail = run.messages.get(history_len..).unwrap_or(&[]);
             persist_timeline(
                 ctx,
                 session_id,
                 provider.as_str(),
                 model_id,
-                &run.messages,
+                tail,
                 &run.usage,
             )
             .await;
