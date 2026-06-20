@@ -412,6 +412,19 @@ pub trait SessionStore: Send + Sync {
     /// violation. Backs `session.create`.
     async fn create(&self, record: &SessionV1Record) -> Result<(), DbError>;
 
+    /// List sessions as full V1 records (every `Session` column), applying the same filters/order as
+    /// [`list`](Self::list). Default impl = `list` then `get_full` per id, so both stores share it.
+    /// Backs the V1 `session.list`.
+    async fn list_full(&self, query: &SessionListQuery) -> Result<Vec<SessionV1Record>, DbError> {
+        let mut out = Vec::new();
+        for r in self.list(query).await? {
+            if let Some(full) = self.get_full(&r.id).await? {
+                out.push(full);
+            }
+        }
+        Ok(out)
+    }
+
     /// Apply a partial update to a session's mutable fields (any of `title`/`metadata`/`permission`;
     /// `None` leaves a field unchanged) and bump `time_updated`. Returns whether the session existed.
     async fn update(

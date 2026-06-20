@@ -2101,6 +2101,58 @@ async fn session_create(
     Ok(Json(session_v1_from_record(record)))
 }
 
+/// `GET /session` — list sessions as V1 `Session` objects (group `session`). Matches the golden
+/// `session.list`: 200 `[Session]`, 400 `BadRequestError`. Applies the `directory`/`workspace`/`project`/
+/// `search`/`limit` filters (most-recent first); the advanced `scope`/`roots`/`path`/`start` filters are
+/// best-effort follow-ups. Returns full V1 rows via [`opencode_db::SessionStore::list_full`].
+#[utoipa::path(
+    get,
+    path = "/session",
+    operation_id = "session.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Filter by directory"),
+        ("workspace" = Option<String>, Query, description = "Filter by workspace id"),
+        ("search" = Option<String>, Query, description = "Title substring filter"),
+        ("limit" = Option<i64>, Query, description = "Max results")
+    ),
+    responses(
+        (status = 200, description = "List of sessions", body = Vec<opencode_proto::Session>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "session"
+)]
+async fn session_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<opencode_proto::Session>>, ApiBadRequest> {
+    let pick = |k: &str| params.get(k).filter(|s| !s.is_empty()).cloned();
+    let limit = match params.get("limit") {
+        None => None,
+        Some(s) => Some(
+            s.parse::<i64>()
+                .map_err(|_| bad_request(format!("limit must be an integer: {s}"), "Query"))?,
+        ),
+    };
+    let query = opencode_db::SessionListQuery {
+        limit,
+        descending: true,
+        search: pick("search"),
+        project: pick("project"),
+        workspace: pick("workspace"),
+        directory: pick("directory"),
+        anchor: None,
+    };
+    let records = state
+        .ctx
+        .sessions()
+        .list_full(&query)
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    Ok(Json(
+        records.into_iter().map(session_v1_from_record).collect(),
+    ))
+}
+
 /// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
 /// covers a malformed body (axum rejects it before the handler).
 pub enum SessionMutateFailure {
@@ -3038,6 +3090,7 @@ async fn v2_provider_get(
         session_children,
         session_status,
         session_create,
+        session_list,
         session_update,
         session_revert,
         session_unrevert,
@@ -4652,7 +4705,7 @@ pub fn build_router(state: ServerState) -> Router {
             get(v2_session_question_list),
         );
         router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
-        router = router.route("/session", post(session_create));
+        router = router.route("/session", get(session_list).post(session_create));
         router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
@@ -5956,6 +6009,75 @@ mod tests {
         use opencode_db::SessionStore as _;
         let id = v["id"].as_str().unwrap();
         assert!(sessions.get(id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn session_list_returns_created_sessions_as_v1() {
+        use opencode_db::SessionStore as _;
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        // Two created sessions (full V1 records).
+        for (id, title) in [("ses_a", "Alpha"), ("ses_b", "Beta")] {
+            sessions
+                .create(&opencode_db::SessionV1Record {
+                    id: id.into(),
+                    slug: format!("{id}-slug"),
+                    project_id: "prj_1".into(),
+                    workspace_id: None,
+                    directory: "/repo".into(),
+                    path: None,
+                    parent_id: None,
+                    summary: None,
+                    summary_diffs: None,
+                    cost: 0.0,
+                    tokens: (0, 0, 0, 0, 0),
+                    share_url: None,
+                    title: title.into(),
+                    agent: None,
+                    model: None,
+                    version: "1.0.0".into(),
+                    metadata: None,
+                    time_created: 1,
+                    time_updated: 1,
+                    time_compacting: None,
+                    time_archived: None,
+                    permission: None,
+                    revert: None,
+                })
+                .await
+                .unwrap();
+        }
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/session?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // Full V1 fields are present (slug/version), not just the V2 subset.
+        let alpha = arr.iter().find(|s| s["id"] == "ses_a").unwrap();
+        assert_eq!(alpha["slug"], "ses_a-slug");
+        assert_eq!(alpha["title"], "Alpha");
+        assert_eq!(alpha["version"], "1.0.0");
     }
 
     #[tokio::test]
