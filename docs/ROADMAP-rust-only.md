@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 56 paths** · PRs desta rodada autônoma: #69–#123. CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` (V2 + V1 `/agent`,`/command`) lêem `.opencode/**.md` (global + projeto).
+> **Rotas nativas contrato-enforçadas: 57 paths** · PRs desta rodada autônoma: #69–#125. CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` (V2 + V1) lêem `.opencode/**.md`. **1ª escrita real**: `session.create` persiste no DB (#125).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -27,6 +27,7 @@
 - ⏳ **Schema ownership**: Rust passa a **aplicar** migrações (hoje só verifica). Bloqueador pra desligar o TS. (ver PENDENCIAS #4)
 
 ## Fase 1 — Session core (chat) 🔄
+- ✅ 1D — **`session.create`** (`POST /session`, **1ª escrita real**): novo `SessionStore::create` (trait + INSERT sqlx casando o schema da tabela `session` + double em memória com round-trip completo); o handler gera id/slug, resolve o projeto, aplica o body e persiste — **#125**
 - ✅ 1u — `v2.health.get` (`GET /api/health`, `{ healthy: true }`, #103) — liveness V2 do GUI
 - ✅ 1a — proto `SessionMessage` (união 8 variantes + content + tool-state) — **#69**
 - ✅ 1b — read-store `session_message` (seq-window + cursor) — **#70**

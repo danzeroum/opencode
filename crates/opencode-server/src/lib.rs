@@ -2010,6 +2010,97 @@ struct SessionUpdateBody {
     permission: Option<serde_json::Value>,
 }
 
+/// Request body for `session.create` (all fields optional). The OpenAPI diff doesn't compare request
+/// bodies, so this stays lenient (`Default` + `Option`s, empty/absent body OK).
+#[derive(Default, serde::Deserialize, utoipa::ToSchema)]
+struct SessionCreateBody {
+    /// Parent session id, for a child session.
+    #[serde(rename = "parentID", default)]
+    parent_id: Option<String>,
+    /// Initial title.
+    #[serde(default)]
+    title: Option<String>,
+    /// Pinned agent.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Pinned model.
+    #[serde(default)]
+    model: Option<opencode_proto::ModelRef>,
+    /// Free-form metadata.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    metadata: Option<serde_json::Value>,
+    /// Permission ruleset.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    permission: Option<serde_json::Value>,
+    /// Owning workspace id.
+    #[serde(rename = "workspaceID", default)]
+    workspace_id: Option<String>,
+}
+
+/// `POST /session` — create a new session (group `session`). Matches the golden `session.create`: 200
+/// `Session`, 400 union. Generates the id/slug, resolves the project from the request location, applies
+/// the body, persists via [`opencode_db::SessionStore::create`], and returns the new session.
+#[utoipa::path(
+    post,
+    path = "/session",
+    operation_id = "session.create",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    request_body = SessionCreateBody,
+    responses(
+        (status = 200, description = "Created session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "session"
+)]
+async fn session_create(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: Option<Json<SessionCreateBody>>,
+) -> Result<Json<opencode_proto::Session>, ApiError> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let location = resolve_location(&state, &params).await?;
+    let id = format!("ses_{}", ulid::Ulid::new());
+    let slug = id.trim_start_matches("ses_").to_ascii_lowercase();
+    let now = now_ms() as i64;
+    let model = body.model.and_then(|m| serde_json::to_value(m).ok());
+    let record = opencode_db::SessionV1Record {
+        id,
+        slug,
+        project_id: location.project.id.clone(),
+        workspace_id: body.workspace_id.or_else(|| location.workspace_id.clone()),
+        directory: location.directory.clone(),
+        path: None,
+        parent_id: body.parent_id,
+        summary: None,
+        summary_diffs: None,
+        cost: 0.0,
+        tokens: (0, 0, 0, 0, 0),
+        share_url: None,
+        title: body.title.unwrap_or_default(),
+        agent: body.agent,
+        model,
+        version: VERSION.to_string(),
+        metadata: body.metadata,
+        time_created: now,
+        time_updated: now,
+        time_compacting: None,
+        time_archived: None,
+        permission: body.permission,
+        revert: None,
+    };
+    state.ctx.sessions().create(&record).await.map_err(|e| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))
+    })?;
+    Ok(Json(session_v1_from_record(record)))
+}
+
 /// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
 /// covers a malformed body (axum rejects it before the handler).
 pub enum SessionMutateFailure {
@@ -2946,6 +3037,7 @@ async fn v2_provider_get(
         session_todo,
         session_children,
         session_status,
+        session_create,
         session_update,
         session_revert,
         session_unrevert,
@@ -3179,6 +3271,7 @@ async fn v2_provider_get(
         opencode_proto::IntegrationInfo,
         opencode_proto::IntegrationListResponse,
         SessionUpdateBody,
+        SessionCreateBody,
         RevertBody
     )),
     tags(
@@ -4559,6 +4652,7 @@ pub fn build_router(state: ServerState) -> Router {
             get(v2_session_question_list),
         );
         router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
+        router = router.route("/session", post(session_create));
         router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
@@ -5810,6 +5904,58 @@ mod tests {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["_tag"], "SessionNotFoundError", "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn session_create_persists_and_returns_session() {
+        use tower::ServiceExt;
+        // Seed a project whose worktree is the requested directory so the location resolves.
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        let mut rec = test_project_record("prj_1");
+        rec.worktree = "/repo".into();
+        projects.insert(rec);
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                sessions: sessions.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session?directory=/repo")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"title":"My Chat","agent":"build"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["id"].as_str().unwrap().starts_with("ses_"));
+        assert_eq!(v["title"], "My Chat");
+        assert_eq!(v["agent"], "build");
+        assert_eq!(v["projectID"], "prj_1");
+        assert_eq!(v["directory"], "/repo");
+        assert!(v["slug"].is_string());
+        assert!(v["version"].is_string());
+        assert!(v["time"]["created"].as_i64().unwrap() > 0);
+        // It was persisted: the session store now has it.
+        use opencode_db::SessionStore as _;
+        let id = v["id"].as_str().unwrap();
+        assert!(sessions.get(id).await.unwrap().is_some());
     }
 
     #[tokio::test]
