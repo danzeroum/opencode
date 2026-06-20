@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 47 paths** · PRs desta rodada autônoma: #69–#109.
+> **Rotas nativas contrato-enforçadas: 48 paths** · PRs desta rodada autônoma: #69–#110.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -72,7 +72,8 @@
 - ⏳ 3a — plugin host JS out-of-process (RPC/JSON, Bun) + ciclo de hooks
 - 🔄 3b — MCP via `rmcp` (add/connect/status + reconnect):
   - ✅ `mcp.status` (`GET /mcp`) rota wirada + tipo `McpStatus` (#98, retorna `{}` até o host); falta o **runtime** (`rmcp`) + `mcp.add`/`connect`/`disconnect`
-- ⏳ 3c — integrações in-core (GitHub/GitLab/Slack adapters)
+- 🔄 3c — integrações in-core (GitHub/GitLab/Slack adapters):
+  - ✅ `v2.integration.list` (`GET /api/integration`) rota wirada + closure completo (`IntegrationInfo`/`IntegrationMethod`/`IntegrationPrompt`/`ConnectionInfo`/`IntegrationWhen`/…, #110, retorna `[]` até o runtime); falta o **runtime** + `connect`/`attempt.*`
 - 🔄 3d — LSP: `lsp.status` (`GET /lsp`) rota wirada + tipos `LspStatus`/`LspServerStatus` (#99, retorna `[]` até o host LSP); resto de `lsp.*` fora do escopo web-only
 
 ## Fase 4 — Cutover Rust-only

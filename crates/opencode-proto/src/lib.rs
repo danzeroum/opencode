@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 mod config;
+mod integration;
 mod lsp;
 mod mcp;
 mod session_message;
 pub use config::*;
+pub use integration::*;
 pub use lsp::*;
 pub use mcp::*;
 pub use session_message::*;
