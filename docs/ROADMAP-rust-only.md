@@ -45,7 +45,8 @@
 - ⏳ 1p — `session.status` / `session.diff` — **dependem da engine de execução** (estado live / snapshots), não enxutas
 - 🔄 1q — mutações de sessão (tipo `Session` v1 #83; `SessionStore::get_full`+`update` aditivos #85):
   - ✅ `session.update` (`PATCH /session/{id}`) — **#85**
-  - ⏳ `share`/`unshare` (set/clear share_url + URL), `revert`/`unrevert` (set/clear revert pointer) — reusam `get_full`+`update`/converter
+  - ✅ `session.revert` / `session.unrevert` (set/clear revert pointer) — **#86**
+  - ⏳ `share`/`unshare` — precisa do **serviço externo de URL** (não é só projeção); ver nota
   - ⏳ `command`/`summarize` — usam a execução (write-path pronto)
 - 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `permission.respond` ⏳ (precisa engine)
 - 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)

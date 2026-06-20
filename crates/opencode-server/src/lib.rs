@@ -1894,17 +1894,17 @@ struct SessionUpdateBody {
 
 /// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
 /// covers a malformed body (axum rejects it before the handler).
-pub enum SessionUpdateFailure {
+pub enum SessionMutateFailure {
     /// No such session (404 `NotFoundError`).
     NotFound(String),
     /// Store failure (500).
     Internal(String),
 }
 
-impl axum::response::IntoResponse for SessionUpdateFailure {
+impl axum::response::IntoResponse for SessionMutateFailure {
     fn into_response(self) -> axum::response::Response {
         match self {
-            SessionUpdateFailure::NotFound(session_id) => (
+            SessionMutateFailure::NotFound(session_id) => (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(opencode_proto::NotFoundError {
                     name: "NotFoundError".to_string(),
@@ -1914,7 +1914,7 @@ impl axum::response::IntoResponse for SessionUpdateFailure {
                 }),
             )
                 .into_response(),
-            SessionUpdateFailure::Internal(message) => (
+            SessionMutateFailure::Internal(message) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(opencode_proto::ErrorEnvelope {
                     tag: "InternalError".to_string(),
@@ -1946,7 +1946,7 @@ async fn session_update(
     State(state): State<ServerState>,
     axum::extract::Path(session_id): axum::extract::Path<String>,
     body: Option<Json<SessionUpdateBody>>,
-) -> Result<Json<opencode_proto::Session>, SessionUpdateFailure> {
+) -> Result<Json<opencode_proto::Session>, SessionMutateFailure> {
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let existed = state
         .ctx
@@ -1958,18 +1958,117 @@ async fn session_update(
             body.permission.as_ref(),
         )
         .await
-        .map_err(|e| SessionUpdateFailure::Internal(e.to_string()))?;
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?;
     if !existed {
-        return Err(SessionUpdateFailure::NotFound(session_id));
+        return Err(SessionMutateFailure::NotFound(session_id));
     }
     let record = state
         .ctx
         .sessions()
         .get_full(&session_id)
         .await
-        .map_err(|e| SessionUpdateFailure::Internal(e.to_string()))?
-        .ok_or_else(|| SessionUpdateFailure::NotFound(session_id.clone()))?;
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?
+        .ok_or_else(|| SessionMutateFailure::NotFound(session_id.clone()))?;
     Ok(Json(session_v1_from_record(record)))
+}
+
+/// Read the updated session and map it to the V1 `Session` wire shape (shared by the mutation routes).
+async fn mutated_session(
+    state: &ServerState,
+    session_id: &str,
+) -> Result<Json<opencode_proto::Session>, SessionMutateFailure> {
+    let record = state
+        .ctx
+        .sessions()
+        .get_full(session_id)
+        .await
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?
+        .ok_or_else(|| SessionMutateFailure::NotFound(session_id.to_string()))?;
+    Ok(Json(session_v1_from_record(record)))
+}
+
+/// Request body for `session.revert` (`{ messageID, partID? }`).
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct RevertBody {
+    /// The message to revert to.
+    #[serde(rename = "messageID")]
+    message_id: String,
+    /// The part within the message, if finer-grained.
+    #[serde(rename = "partID", default)]
+    part_id: Option<String>,
+}
+
+/// `POST /session/{sessionID}/revert` — set the session's revert pointer (group `session`). Matches the
+/// golden `session.revert`: 200 `Session`, 400 union, 404 `NotFoundError`, 409 `SessionBusyError`.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/revert",
+    operation_id = "session.revert",
+    params(("sessionID" = String, Path, description = "Session id")),
+    request_body = RevertBody,
+    responses(
+        (status = 200, description = "Reverted session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError),
+        (status = 409, description = "Session busy", body = opencode_proto::SessionBusyError)
+    ),
+    tag = "session"
+)]
+async fn session_revert(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(body): Json<RevertBody>,
+) -> Result<Json<opencode_proto::Session>, SessionMutateFailure> {
+    let mut revert = serde_json::Map::new();
+    revert.insert(
+        "messageID".to_string(),
+        serde_json::Value::String(body.message_id),
+    );
+    if let Some(part_id) = body.part_id {
+        revert.insert("partID".to_string(), serde_json::Value::String(part_id));
+    }
+    let existed = state
+        .ctx
+        .sessions()
+        .set_revert(&session_id, Some(&serde_json::Value::Object(revert)))
+        .await
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?;
+    if !existed {
+        return Err(SessionMutateFailure::NotFound(session_id));
+    }
+    mutated_session(&state, &session_id).await
+}
+
+/// `POST /session/{sessionID}/unrevert` — clear the session's revert pointer (group `session`).
+/// Matches the golden `session.unrevert`: 200 `Session`, 400 union, 404 `NotFoundError`, 409
+/// `SessionBusyError`.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/unrevert",
+    operation_id = "session.unrevert",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Unreverted session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError),
+        (status = 409, description = "Session busy", body = opencode_proto::SessionBusyError)
+    ),
+    tag = "session"
+)]
+async fn session_unrevert(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::Session>, SessionMutateFailure> {
+    let existed = state
+        .ctx
+        .sessions()
+        .set_revert(&session_id, None)
+        .await
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?;
+    if !existed {
+        return Err(SessionMutateFailure::NotFound(session_id));
+    }
+    mutated_session(&state, &session_id).await
 }
 
 /// Map a `project` projection row to the `Project` wire shape (the `icon_*` columns fold into one
@@ -2349,6 +2448,8 @@ async fn v2_provider_get(
         v2_session_prompt,
         session_todo,
         session_update,
+        session_revert,
+        session_unrevert,
         global_dispose,
         instance_dispose,
         file_list,
@@ -2458,7 +2559,9 @@ async fn v2_provider_get(
         opencode_proto::SessionRevert,
         opencode_proto::PermissionRule,
         opencode_proto::PermissionAction,
-        SessionUpdateBody
+        opencode_proto::SessionBusyError,
+        SessionUpdateBody,
+        RevertBody
     )),
     tags(
         (name = "control", description = "Control-plane routes"),
@@ -2756,6 +2859,8 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}", patch(session_update));
+        router = router.route("/session/{sessionID}/revert", post(session_revert));
+        router = router.route("/session/{sessionID}/unrevert", post(session_unrevert));
     }
     if state.routes.handles("event") {
         router = router.route("/api/event", get(v2_event_subscribe));
@@ -3537,6 +3642,62 @@ mod tests {
         // The V1 shape is present (slug/version filled, time as integers).
         assert!(v["slug"].is_string());
         assert!(v["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn session_revert_then_unrevert_round_trips() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        // Revert sets the pointer.
+        let resp = build_router(state.clone())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_1/revert")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"messageID":"msg_9"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["revert"]["messageID"], "msg_9");
+        // Unrevert clears it.
+        let resp2 = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_1/unrevert")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), 200);
+        let v2: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(v2.get("revert").is_none());
     }
 
     #[tokio::test]

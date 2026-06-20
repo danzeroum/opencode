@@ -566,6 +566,20 @@ pub struct SessionV1Time {
     pub archived: Option<f64>,
 }
 
+/// `{ _tag: "SessionBusyError", sessionID, message }` — the 409 for mutations that can't run while a
+/// session is busy (`revert`/`unrevert`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionBusyError {
+    /// Always `"SessionBusyError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The busy session.
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
 /// A session's revert pointer (`{ messageID, partID?, snapshot?, diff? }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct SessionRevert {
