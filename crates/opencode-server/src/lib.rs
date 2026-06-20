@@ -2453,7 +2453,9 @@ async fn v2_provider_get(
         app_agents,
         command_list,
         config_get,
+        config_update,
         global_config_get,
+        global_config_update,
         global_dispose,
         instance_dispose,
         file_list,
@@ -2911,6 +2913,98 @@ async fn global_config_get(State(_state): State<ServerState>) -> Json<opencode_p
     Json(serde_json::from_value(global_config_value()).unwrap_or_default())
 }
 
+/// Deep-merge `update` into the JSON at `path` (creating it if missing) and write it back, pretty.
+/// The unit of the config-write routes — testable against a temp path (the routes pass the real file).
+fn write_config_merge(path: &std::path::Path, update: serde_json::Value) -> std::io::Result<()> {
+    let mut existing = read_config_json(path).unwrap_or_else(|| serde_json::json!({}));
+    deep_merge(&mut existing, update);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&existing).unwrap_or_else(|_| "{}".to_string()),
+    )
+}
+
+/// Error responder for the config-write routes: a generic 500 (write failure). The declared 400 union
+/// covers a malformed body (axum rejects it before the handler).
+pub enum ConfigUpdateFailure {
+    /// Write/serialization failure (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for ConfigUpdateFailure {
+    fn into_response(self) -> axum::response::Response {
+        let ConfigUpdateFailure::Internal(message) = self;
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(opencode_proto::ErrorEnvelope {
+                tag: "InternalError".to_string(),
+                message,
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// `PATCH /config` — merge the body into the project `opencode.json` (group `config`). Matches the
+/// golden `config.update`: 200 `Config`, 400 union. Deep-merges the patch into `cwd/opencode.json`
+/// (preserving untouched fields) and returns the new resolved config.
+#[utoipa::path(
+    patch,
+    path = "/config",
+    operation_id = "config.update",
+    request_body = opencode_proto::Config,
+    responses(
+        (status = 200, description = "Updated config", body = opencode_proto::Config),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "config"
+)]
+async fn config_update(
+    State(_state): State<ServerState>,
+    Json(body): Json<opencode_proto::Config>,
+) -> Result<Json<opencode_proto::Config>, ConfigUpdateFailure> {
+    let path = std::env::current_dir()
+        .map_err(|e| ConfigUpdateFailure::Internal(e.to_string()))?
+        .join("opencode.json");
+    let update =
+        serde_json::to_value(&body).map_err(|e| ConfigUpdateFailure::Internal(e.to_string()))?;
+    write_config_merge(&path, update).map_err(|e| ConfigUpdateFailure::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::from_value(resolved_config_value()).unwrap_or_default(),
+    ))
+}
+
+/// `PATCH /global/config` — merge the body into the global `opencode.json` (group `global`). Matches the
+/// golden `global.config.update`: 200 `Config`, 400 union. Returns the new global config.
+#[utoipa::path(
+    patch,
+    path = "/global/config",
+    operation_id = "global.config.update",
+    request_body = opencode_proto::Config,
+    responses(
+        (status = 200, description = "Updated config", body = opencode_proto::Config),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "global"
+)]
+async fn global_config_update(
+    State(_state): State<ServerState>,
+    Json(body): Json<opencode_proto::Config>,
+) -> Result<Json<opencode_proto::Config>, ConfigUpdateFailure> {
+    let path = config_dir()
+        .ok_or_else(|| ConfigUpdateFailure::Internal("no config dir (HOME unset)".to_string()))?
+        .join("opencode.json");
+    let update =
+        serde_json::to_value(&body).map_err(|e| ConfigUpdateFailure::Internal(e.to_string()))?;
+    write_config_merge(&path, update).map_err(|e| ConfigUpdateFailure::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::from_value(global_config_value()).unwrap_or_default(),
+    ))
+}
+
 /// `GET /permission` — pending permission requests (group `permission`). Matches the golden
 /// `permission.list`: 200 `[PermissionRequest]`, 400 `BadRequestError`. Pending requests are ephemeral
 /// execution state; until the native runner produces them this is empty (no in-flight approvals).
@@ -3007,10 +3101,13 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
         router = router.route("/global/dispose", post(global_dispose));
-        router = router.route("/global/config", get(global_config_get));
+        router = router.route(
+            "/global/config",
+            get(global_config_get).patch(global_config_update),
+        );
     }
     if state.routes.handles("config") {
-        router = router.route("/config", get(config_get));
+        router = router.route("/config", get(config_get).patch(config_update));
     }
     if state.routes.handles("instance") {
         router = router.route("/path", get(path_get));
@@ -3990,6 +4087,32 @@ mod tests {
         assert_eq!(base["server"]["port"], 2);
         assert_eq!(base["server"]["hostname"], "a");
         assert_eq!(base["instructions"], serde_json::json!(["p"]));
+    }
+
+    #[test]
+    fn write_config_merge_preserves_untouched_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"model":"old","server":{"port":1,"hostname":"a"}}"#,
+        )
+        .unwrap();
+        // Patch the model + server.port; hostname (untouched) survives.
+        write_config_merge(
+            &path,
+            serde_json::json!({ "model": "new", "server": { "port": 2 } }),
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["model"], "new");
+        assert_eq!(v["server"]["port"], 2);
+        assert_eq!(v["server"]["hostname"], "a");
+        // Writing into a missing file creates it.
+        let fresh = dir.path().join("sub/opencode.json");
+        write_config_merge(&fresh, serde_json::json!({ "shell": "zsh" })).unwrap();
+        assert!(fresh.exists());
     }
 
     #[tokio::test]

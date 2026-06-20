@@ -52,7 +52,7 @@
 - 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)
 
 ## Fase 2 — Admin
-- 🔄 2a — `config.get` ✅ + `global.config.get` ✅ (tipo `Config` completo + **loading global+projeto deep-merge** #96; retorna config real) · `config.update` ⏳
+- ✅ 2a — `config.get`/`global.config.get` (tipo `Config` + loading deep-merge #96) + `config.update`/`global.config.update` (#97, escreve `opencode.json` com merge preservando campos)
 - ⏳ 2b — **config com proveniência** (cascata 7 níveis) — capacidade nova (ver PENDENCIAS #1); + os 5 níveis restantes do merge (remote/custom/.opencode/inline/managed) + `.jsonc`
 - ⏳ 2c — `provider.list` admin + `provider.auth` (escrita de credencial) + teste de conexão
 - 🔄 2d — agents: `app.agents` rota wirada + tipos `Agent`/`AgentModel` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
