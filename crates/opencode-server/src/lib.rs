@@ -2515,9 +2515,10 @@ async fn v2_skill_list(
 }
 
 /// `GET /api/command` — list commands (group `command`). Matches the golden `v2.command.list`: 200
-/// `{ location, data }` + 400/401. Commands are loaded from built-ins + `.opencode/command` + MCP/skills
-/// (a loading epic, see PENDENCIAS #2); until that lands the list is empty (same wired-empty stance as
-/// the V1 `command.list`).
+/// `{ location, data }` + 400/401. Loads real commands from the global config dir's `{command,commands}`
+/// and the project's `.opencode/{command,commands}` (`**/*.md`, project overrides global by name),
+/// parsing each file's frontmatter + body (mirrors the TS `config-command` plugin). Built-in commands
+/// (`init`/`review`) and MCP-sourced commands are a follow-up.
 #[utoipa::path(
     get,
     path = "/api/command",
@@ -2535,10 +2536,8 @@ async fn v2_command_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::CommandListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    Ok(Json(opencode_proto::CommandListResponse {
-        location,
-        data: Vec::new(),
-    }))
+    let data = load_commands(&location.directory);
+    Ok(Json(opencode_proto::CommandListResponse { location, data }))
 }
 
 /// `GET /api/reference` — list references (group `reference`). Matches the golden `v2.reference.list`:
@@ -3791,6 +3790,137 @@ fn config_dir() -> Option<std::path::PathBuf> {
 /// Read + parse an `opencode.json` at `path` to a JSON value (None if missing/unparseable).
 fn read_config_json(path: &std::path::Path) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Parse a `.md` command/agent file's frontmatter (flat YAML scalars only) + body. Returns the
+/// frontmatter as a `{ key: value }` map (surrounding quotes stripped) and the trimmed body. The
+/// frontmatter is the block between a leading `---` line and the next `---` line; without it, the whole
+/// content is the body. Command frontmatter is flat (`description`/`agent`/`model`/`variant`/`subtask`),
+/// so a YAML dependency isn't needed — nested/indented lines are skipped.
+fn parse_md_frontmatter(content: &str) -> (std::collections::BTreeMap<String, String>, String) {
+    let normalized = content.replace("\r\n", "\n");
+    let mut map = std::collections::BTreeMap::new();
+    let mut lines = normalized.lines();
+    if lines.next() == Some("---") {
+        let mut front = Vec::new();
+        let mut found_end = false;
+        for line in lines.by_ref() {
+            if line.trim_end() == "---" {
+                found_end = true;
+                break;
+            }
+            front.push(line);
+        }
+        if found_end {
+            for line in front {
+                if line.starts_with(char::is_whitespace) {
+                    continue; // nested value — out of scope for flat frontmatter
+                }
+                let t = line.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = t.split_once(':') {
+                    let key = k.trim().to_string();
+                    let mut val = v.trim().to_string();
+                    if val.len() >= 2
+                        && ((val.starts_with('"') && val.ends_with('"'))
+                            || (val.starts_with('\'') && val.ends_with('\'')))
+                    {
+                        val = val[1..val.len() - 1].to_string();
+                    }
+                    if !key.is_empty() && !val.is_empty() {
+                        map.insert(key, val);
+                    }
+                }
+            }
+            let body = lines.collect::<Vec<_>>().join("\n");
+            return (map, body.trim().to_string());
+        }
+    }
+    (map, normalized.trim().to_string())
+}
+
+/// Recursively collect `*.md` files under `dir` (sorted by the caller).
+fn collect_md_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_md_files(&p, out);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+/// Parse a `provider/model` reference string into a [`ModelRef`] (provider before the first `/`, the
+/// remainder is the model id), carrying an optional `variant`.
+fn parse_model_ref(model: &str, variant: Option<String>) -> opencode_proto::ModelRef {
+    let (provider, id) = model.split_once('/').unwrap_or(("", model));
+    opencode_proto::ModelRef {
+        id: id.to_string(),
+        provider_id: provider.to_string(),
+        variant,
+    }
+}
+
+/// Load command definitions from `<base>/command` and `<base>/commands` (recursively). `base` is a
+/// config directory (the global config dir, or a project's `.opencode`). The command `name` is the
+/// file path relative to that subdirectory, without the `.md` extension. Mirrors the TS
+/// `config-command` plugin (`{command,commands}/**/*.md`).
+fn load_commands_from_base(base: &std::path::Path) -> Vec<opencode_proto::CommandV2Info> {
+    let mut out = Vec::new();
+    for sub in ["command", "commands"] {
+        let dir = base.join(sub);
+        let mut files = Vec::new();
+        collect_md_files(&dir, &mut files);
+        files.sort();
+        for file in files {
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let Some(rel) = file.strip_prefix(&dir).ok().and_then(|r| r.to_str()) else {
+                continue;
+            };
+            let name = rel.replace('\\', "/");
+            let name = name.strip_suffix(".md").unwrap_or(&name).to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let (front, body) = parse_md_frontmatter(&content);
+            let model = front
+                .get("model")
+                .map(|m| parse_model_ref(m, front.get("variant").cloned()));
+            out.push(opencode_proto::CommandV2Info {
+                name,
+                template: body,
+                description: front.get("description").cloned(),
+                agent: front.get("agent").cloned(),
+                model,
+                subtask: front.get("subtask").map(|s| s == "true"),
+            });
+        }
+    }
+    out
+}
+
+/// Load all commands for a resolved location: global config dir (lower precedence) then the project's
+/// `.opencode` (overrides by name). Returns them sorted by name.
+fn load_commands(directory: &str) -> Vec<opencode_proto::CommandV2Info> {
+    let mut by_name: std::collections::BTreeMap<String, opencode_proto::CommandV2Info> =
+        std::collections::BTreeMap::new();
+    if let Some(global) = config_dir() {
+        for info in load_commands_from_base(&global) {
+            by_name.insert(info.name.clone(), info);
+        }
+    }
+    let project = std::path::Path::new(directory).join(".opencode");
+    for info in load_commands_from_base(&project) {
+        by_name.insert(info.name.clone(), info);
+    }
+    by_name.into_values().collect()
 }
 
 /// Recursively merge `overlay` into `base`: objects merge key-by-key, everything else (scalars/arrays)
@@ -5665,12 +5795,107 @@ mod tests {
         assert_eq!(v, serde_json::json!({ "healthy": true }));
     }
 
+    #[test]
+    fn parse_md_frontmatter_splits_scalars_and_body() {
+        let (front, body) = parse_md_frontmatter(
+            "---\ndescription: Run the build\nagent: build\nmodel: anthropic/claude-x\nsubtask: true\n# a comment\nnested:\n  deep: skipme\n---\nThe template\nbody.\n",
+        );
+        assert_eq!(front.get("description").unwrap(), "Run the build");
+        assert_eq!(front.get("agent").unwrap(), "build");
+        assert_eq!(front.get("model").unwrap(), "anthropic/claude-x");
+        assert_eq!(front.get("subtask").unwrap(), "true");
+        assert!(!front.contains_key("nested")); // nested map key kept, but deep value skipped
+        assert!(!front.contains_key("deep")); // indented line skipped
+        assert_eq!(body, "The template\nbody.");
+        // No frontmatter → whole content is the body.
+        let (front2, body2) = parse_md_frontmatter("just a prompt\n");
+        assert!(front2.is_empty());
+        assert_eq!(body2, "just a prompt");
+    }
+
+    #[test]
+    fn load_commands_from_base_reads_md_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd_dir = dir.path().join("command/sub");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(
+            dir.path().join("command/deploy.md"),
+            "---\ndescription: Deploy it\nmodel: anthropic/claude-x\nsubtask: true\n---\nDeploy the {{thing}}.",
+        )
+        .unwrap();
+        std::fs::write(cmd_dir.join("nested.md"), "no frontmatter here").unwrap();
+        let cmds = load_commands_from_base(dir.path());
+        let deploy = cmds.iter().find(|c| c.name == "deploy").unwrap();
+        assert_eq!(deploy.template, "Deploy the {{thing}}.");
+        assert_eq!(deploy.description.as_deref(), Some("Deploy it"));
+        assert_eq!(deploy.subtask, Some(true));
+        let model = deploy.model.as_ref().unwrap();
+        assert_eq!(model.provider_id, "anthropic");
+        assert_eq!(model.id, "claude-x");
+        // Nested path → name keeps the subdir; no frontmatter → empty description.
+        let nested = cmds.iter().find(|c| c.name == "sub/nested").unwrap();
+        assert_eq!(nested.template, "no frontmatter here");
+        assert!(nested.description.is_none());
+    }
+
+    #[tokio::test]
+    async fn v2_command_list_loads_project_commands() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode/command")).unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/command/hello.md"),
+            "---\ndescription: Say hi\n---\nSay hello to the user.",
+        )
+        .unwrap();
+        // Seed a project whose worktree is the temp dir so the location resolves to it.
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        let mut rec = test_project_record("prj_1");
+        rec.worktree = dir.path().display().to_string();
+        projects.insert(rec);
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("command"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let uri = format!("/api/command?directory={}", dir.path().display());
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // The project command is present (global config dir may add more, so don't assert exact len).
+        let hello = v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "hello")
+            .expect("project command loaded");
+        assert_eq!(hello["template"], "Say hello to the user.");
+        assert_eq!(hello["description"], "Say hi");
+    }
+
     #[tokio::test]
     async fn v2_catalog_lists_are_empty_until_loading_lands() {
         use tower::ServiceExt;
+        // `command` loads real `.opencode/command/*.md` data (see v2_command_list_loads_project_commands);
+        // the rest remain wired-empty until their loaders land.
         for (group, uri) in [
             ("skill", "/api/skill?directory=/repo"),
-            ("command", "/api/command?directory=/repo"),
             ("reference", "/api/reference?directory=/repo"),
             ("agent", "/api/agent?directory=/repo"),
         ] {
