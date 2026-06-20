@@ -1037,6 +1037,42 @@ pub struct ProjectDirectory {
     pub strategy: Option<String>,
 }
 
+/// A provider entry in the resolved config view (`config.providers` item). Mirrors the golden V1
+/// `Provider`: `{ id, name, source, env, key?, options, models }`. `options` is free-form and `models`
+/// is a `{ [modelID]: Model }` map; both are modeled as JSON values (the contract normalizer drops the
+/// map's `additionalProperties`, so the nested `Model` type isn't needed here).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct Provider {
+    /// Provider id.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Where the provider config came from (`env` | `config` | `custom` | `api`).
+    pub source: String,
+    /// Environment variable names that enable the provider.
+    pub env: Vec<String>,
+    /// The active credential key, if resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Provider options (free-form).
+    #[schema(value_type = Object)]
+    pub options: serde_json::Value,
+    /// The provider's models, keyed by model id.
+    #[schema(value_type = Object)]
+    pub models: serde_json::Value,
+}
+
+/// 200 body of `config.providers` (GET /config/providers): `{ providers, default }` — the resolved
+/// provider list plus a `{ [providerID]: defaultModelID }` map.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ConfigProvidersResponse {
+    /// The resolved providers.
+    pub providers: Vec<Provider>,
+    /// Default model per provider.
+    #[serde(rename = "default")]
+    pub defaults: BTreeMap<String, String>,
+}
+
 // ---------------------------------------------------------------------------
 // V2 session prompt contract (`v2.session.prompt` — POST /api/session/{sessionID}/prompt).
 // `Prompt` and the `SessionInput.Admitted` projection mirror `packages/core/src/session/input.ts`

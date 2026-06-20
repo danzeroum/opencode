@@ -2925,6 +2925,7 @@ async fn v2_provider_get(
         command_list,
         config_get,
         config_update,
+        config_providers,
         global_config_get,
         global_config_update,
         global_dispose,
@@ -2990,6 +2991,8 @@ async fn v2_provider_get(
         opencode_proto::SessionListError,
         opencode_proto::Project,
         opencode_proto::ProjectDirectory,
+        opencode_proto::Provider,
+        opencode_proto::ConfigProvidersResponse,
         opencode_proto::ProjectIcon,
         opencode_proto::ProjectCommands,
         opencode_proto::ProjectTime,
@@ -3832,6 +3835,34 @@ async fn global_config_get(State(_state): State<ServerState>) -> Json<opencode_p
     Json(serde_json::from_value(global_config_value()).unwrap_or_default())
 }
 
+/// `GET /config/providers` — the resolved provider list (group `config`). Matches the golden
+/// `config.providers`: 200 `{ providers, default }`, 400 `BadRequestError`. The faithful V1 view merges
+/// `config.provider` + the models.dev catalog + per-provider defaults; that merge is a refinement
+/// (the live provider surface is already served by `v2.provider.list` / `v2.model.list`), so this
+/// returns an empty set for now.
+#[utoipa::path(
+    get,
+    path = "/config/providers",
+    operation_id = "config.providers",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Providers", body = opencode_proto::ConfigProvidersResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "config"
+)]
+async fn config_providers(
+    State(_state): State<ServerState>,
+) -> Json<opencode_proto::ConfigProvidersResponse> {
+    Json(opencode_proto::ConfigProvidersResponse {
+        providers: Vec::new(),
+        defaults: std::collections::BTreeMap::new(),
+    })
+}
+
 /// Deep-merge `update` into the JSON at `path` (creating it if missing) and write it back, pretty.
 /// The unit of the config-write routes — testable against a temp path (the routes pass the real file).
 fn write_config_merge(path: &std::path::Path, update: serde_json::Value) -> std::io::Result<()> {
@@ -4075,6 +4106,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("config") {
         router = router.route("/config", get(config_get).patch(config_update));
+        router = router.route("/config/providers", get(config_providers));
     }
     if state.routes.handles("instance") {
         router = router.route("/path", get(path_get));
@@ -5154,6 +5186,35 @@ mod tests {
             // Empty/default config until loading lands → a JSON object (all fields omitted).
             assert!(v.is_object(), "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn config_providers_returns_providers_and_default_keys() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("config"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/config/providers")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // The contract shape: a providers array + a default map (both empty until the merge lands).
+        assert_eq!(v["providers"], serde_json::json!([]));
+        assert_eq!(v["default"], serde_json::json!({}));
     }
 
     #[tokio::test]
