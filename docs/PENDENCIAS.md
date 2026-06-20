@@ -45,6 +45,11 @@ A rota `v2.session.messages` lê `session_message`, mas **nada grava ali ainda**
 - **Plano:** vou portar incrementalmente (começando por user + assistant message events, que é o que o chat precisa) quando as leituras tratáveis estiverem cobertas. Não bloqueia as demais rotas.
 - **Status:** épico aberto; priorizando leituras/rotas independentes primeiro para maximizar progresso mergeado.
 
+### #7 — Projeção V1 de mensagens (read-time) — fidelidade e mutações
+A GUI web lê o histórico do chat via **`session.messages` V1** (`GET /session/{id}/message`; o `@opencode-ai/sdk/v2` mapeia `session.messages` para o path V1, com `directory`/`before`). Isso agora **retorna dados reais** (#139): projeto o timeline V2 `session_message` (fonte única) → V1 `{info, parts}` em tempo de leitura (`session_timeline_v1::timeline_to_v1`), back-fillando `agent`/`model`/`path` do registro da sessão (o timeline V2 não os carrega no nível `user`).
+- **Lossiness conhecida (aceita por ora):** ids de `Part` são sintetizados deterministicamente (`prt_{messageID}_{i}`); entradas-marcador que o V1 não modela são **puladas** (`agent-switched`/`model-switched`/`system`/`shell`/`compaction`). Inócuo hoje porque os **produtores** dessas entradas (troca de agente/modelo mid-run, `session.shell`, `session.summarize`) ainda não estão na engine Rust. Quando entrarem, decidir: (a) mapear essas entradas no projetor V1, ou (b) trocar para um **store V1 raw** de `message`/`part` (mais fiel, mais código + storage duplo).
+- **Mutações V1 ainda pendentes** (precisam de run síncrono + escrita no timeline + projeção): `session.command` (`{info,parts}`), `session.shell` (idem + 409), `session.deleteMessage` (bool), `part.update` (Part), `part.delete` (bool). `session.command`/`shell` são os próximos pontos da engine.
+
 ## Resolvidas
 
 ### #6 — Write-path do runner ✅ (resolvido — #80/#81/#82)

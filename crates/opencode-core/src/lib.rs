@@ -13,6 +13,7 @@ pub mod provider;
 pub mod runner;
 pub mod session;
 pub mod session_timeline;
+pub mod session_timeline_v1;
 
 /// Folds events into read-model state — the projector pattern (`session/projector.ts`). Implementors
 /// derive aggregate state from the event log; `replay`-flagged events skip non-replayable side
