@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 32 paths** · PRs desta rodada autônoma: #69–#98.
+> **Rotas nativas contrato-enforçadas: 33 paths** · PRs desta rodada autônoma: #69–#99.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -67,6 +67,7 @@
 - 🔄 3b — MCP via `rmcp` (add/connect/status + reconnect):
   - ✅ `mcp.status` (`GET /mcp`) rota wirada + tipo `McpStatus` (#98, retorna `{}` até o host); falta o **runtime** (`rmcp`) + `mcp.add`/`connect`/`disconnect`
 - ⏳ 3c — integrações in-core (GitHub/GitLab/Slack adapters)
+- 🔄 3d — LSP: `lsp.status` (`GET /lsp`) rota wirada + tipos `LspStatus`/`LspServerStatus` (#99, retorna `[]` até o host LSP); resto de `lsp.*` fora do escopo web-only
 
 ## Fase 4 — Cutover Rust-only
 - ⏳ 4a — cobertura de providers (execução LLM real) — ver PENDENCIAS #5
