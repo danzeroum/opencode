@@ -8,6 +8,10 @@
 O design põe a **precedência (REMOTE…MANAGED) por campo** como núcleo do Admin, mas o contrato atual (`config.get`) devolve um `Config` **plano, sem origem por campo**. Para renderizar a cascata, o backend precisa expor a origem de cada valor.
 - **Decisão necessária:** (a) novo endpoint Rust que anota proveniência por campo (paridade+, eu defino o shape), ou (b) expor os configs crus por nível e o front mescla. Recomendo (a).
 - **Status:** vou implementar `config.get/update` planos primeiro (2a) e deixar a proveniência (2b) para depois desta decisão.
+- **⚠️ Achado de escopo (importante):** o tipo `Config` é o **mais complexo do contrato** — 35 props de topo + ~19 tipos no closure, com **maps** (`additionalProperties`: command/provider/mcp/tools/references) e **uniões inline** (`mcp` = Local|Remote|{enabled}, `formatter` = bool|obj, `lsp` = bool|obj, `autoupdate` = bool|"notify", `plugin` = string|[string,obj]). O `openapi-diff` exige a estrutura exata (não dá pra usar `serde_json::Value` como atalho). Então o **tipo `Config` sozinho é um épico multi-fatia**, não uma fatia única. Plano de sub-fatias:
+  1. Leaves simples: `ServerConfig`, `LogLevel`, `LayoutConfig`, `AttachmentConfig`/`ImageAttachmentConfig`, `ConfigV2ReferenceGit`/`Local`, `ConfigV2ExperimentalPolicy`, `PolicyEffect`.
+  2. Médios: `AgentConfig` (15 props), `ProviderConfig` (9), `McpLocalConfig`/`RemoteConfig`/`OAuthConfig`, `PermissionConfig`/`RuleConfig`/`ActionConfig`/`ObjectConfig`.
+  3. O struct `Config` (com os maps + uniões inline) + `config.get`/`update` (leitura/merge).
 
 ### #2 — Escrita de agents/commands — Fase 2
 Editar agents/commands = escrever arquivos `.opencode/agents/*.md` e de comandos. O contrato é **read-only** (não há `agent.update`/`command.update`).
