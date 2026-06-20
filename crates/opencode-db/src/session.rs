@@ -417,6 +417,10 @@ pub trait SessionStore: Send + Sync {
         metadata: Option<&Value>,
         permission: Option<&Value>,
     ) -> Result<bool, DbError>;
+
+    /// Set (`Some`) or clear (`None`) a session's `revert` pointer and bump `time_updated`. Returns
+    /// whether the session existed. Backs `session.revert`/`session.unrevert`.
+    async fn set_revert(&self, id: &str, revert: Option<&Value>) -> Result<bool, DbError>;
 }
 
 /// Columns read for [`SessionV1Record`].
@@ -693,12 +697,27 @@ impl SessionStore for SqlxSessionStore {
         q = q.bind(now_ms()).bind(id);
         Ok(q.execute(&self.pool).await?.rows_affected() > 0)
     }
+
+    async fn set_revert(&self, id: &str, revert: Option<&Value>) -> Result<bool, DbError> {
+        let revert_json = revert.map(|v| v.to_string());
+        let affected = sqlx::query("UPDATE session SET revert = ?, time_updated = ? WHERE id = ?")
+            .bind(revert_json)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(affected > 0)
+    }
 }
 
 /// In-memory [`SessionStore`] — test double / the backing for `AppContext::in_memory()`.
 #[derive(Default)]
 pub struct MemorySessionStore {
     rows: Mutex<HashMap<String, SessionRecord>>,
+    /// Revert pointers set via [`SessionStore::set_revert`] (the V2 `SessionRecord` doesn't hold one),
+    /// so the double can round-trip `revert`/`unrevert` through `get_full`.
+    reverts: Mutex<HashMap<String, Value>>,
 }
 
 impl MemorySessionStore {
@@ -774,12 +793,22 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn get_full(&self, id: &str) -> Result<Option<SessionV1Record>, DbError> {
-        Ok(self
+        let Some(mut record) = self
             .rows
             .lock()
             .expect("session store mutex poisoned")
             .get(id)
-            .map(v1_from_session_record))
+            .map(v1_from_session_record)
+        else {
+            return Ok(None);
+        };
+        record.revert = self
+            .reverts
+            .lock()
+            .expect("session store mutex poisoned")
+            .get(id)
+            .cloned();
+        Ok(Some(record))
     }
 
     async fn update(
@@ -801,6 +830,27 @@ impl SessionStore for MemorySessionStore {
             }
             None => Ok(false),
         }
+    }
+
+    async fn set_revert(&self, id: &str, revert: Option<&Value>) -> Result<bool, DbError> {
+        if !self
+            .rows
+            .lock()
+            .expect("session store mutex poisoned")
+            .contains_key(id)
+        {
+            return Ok(false);
+        }
+        let mut reverts = self.reverts.lock().expect("session store mutex poisoned");
+        match revert {
+            Some(v) => {
+                reverts.insert(id.to_string(), v.clone());
+            }
+            None => {
+                reverts.remove(id);
+            }
+        }
+        Ok(true)
     }
 }
 
