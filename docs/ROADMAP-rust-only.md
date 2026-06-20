@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 41 paths** · PRs desta rodada autônoma: #69–#104.
+> **Rotas nativas contrato-enforçadas: 43 paths** · PRs desta rodada autônoma: #69–#105.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -50,7 +50,7 @@
   - ⏳ `share`/`unshare` — precisa do **serviço externo de URL** (não é só projeção); ver nota
   - ⏳ `command`/`summarize` — usam a execução (write-path pronto)
 - 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `v2.permission.request.list` + `v2.permission.saved.list` + `v2.session.permission.list` ✅ (#104, tipos `PermissionV2Request`/`PermissionV2Source`/`PermissionSavedInfo`; vazios/404 até a engine) · `permission.respond`/`v2.session.permission.reply` ⏳ (precisa engine)
-- 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)
+- 🔄 1n — `question.list` ✅ (#77, idem) · `v2.question.request.list` + `v2.session.question.list` ✅ (#105, tipos `QuestionV2Request`/`QuestionV2Info`/`QuestionV2Option`/`QuestionV2Tool`; vazios/404 até a engine) · `question.reply`/`reject`/`v2.session.question.reply`/`reject` ⏳ (precisa engine)
 
 ## Fase 2 — Admin
 - ✅ 2a — `config.get`/`global.config.get` (tipo `Config` + loading deep-merge #96) + `config.update`/`global.config.update` (#97, escreve `opencode.json` com merge preservando campos)
