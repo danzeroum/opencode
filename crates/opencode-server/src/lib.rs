@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     response::Json,
-    routing::{get, patch, post},
+    routing::{get, post},
     Router,
 };
 use opencode_core::native_tools::{self, NativeToolBox};
@@ -2153,6 +2153,69 @@ async fn session_list(
     ))
 }
 
+/// `GET /session/{sessionID}` — fetch a session as a V1 `Session` (group `session`). Matches the golden
+/// `session.get`: 200 `Session`, 400 union, 404 `NotFoundError`. (Distinct from `v2.session.get` at
+/// `/api/session/{id}`, which returns the leaner `SessionV2Info`.)
+#[utoipa::path(
+    get,
+    path = "/session/{sessionID}",
+    operation_id = "session.get",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_get_v1(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::Session>, SessionMutateFailure> {
+    let record = state
+        .ctx
+        .sessions()
+        .get_full(&session_id)
+        .await
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?;
+    match record {
+        Some(r) => Ok(Json(session_v1_from_record(r))),
+        None => Err(SessionMutateFailure::NotFound(session_id)),
+    }
+}
+
+/// `DELETE /session/{sessionID}` — delete a session (group `session`). Matches the golden
+/// `session.delete`: 200 `true`, 400 union, 404 `NotFoundError`. The schema's `ON DELETE CASCADE`
+/// removes the session's child rows (messages/todos/inputs/epochs).
+#[utoipa::path(
+    delete,
+    path = "/session/{sessionID}",
+    operation_id = "session.delete",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Deleted", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_delete(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<bool>, SessionMutateFailure> {
+    let existed = state
+        .ctx
+        .sessions()
+        .delete(&session_id)
+        .await
+        .map_err(|e| SessionMutateFailure::Internal(e.to_string()))?;
+    if existed {
+        Ok(Json(true))
+    } else {
+        Err(SessionMutateFailure::NotFound(session_id))
+    }
+}
+
 /// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
 /// covers a malformed body (axum rejects it before the handler).
 pub enum SessionMutateFailure {
@@ -3091,6 +3154,8 @@ async fn v2_provider_get(
         session_status,
         session_create,
         session_list,
+        session_get_v1,
+        session_delete,
         session_update,
         session_revert,
         session_unrevert,
@@ -4709,7 +4774,12 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
-        router = router.route("/session/{sessionID}", patch(session_update));
+        router = router.route(
+            "/session/{sessionID}",
+            get(session_get_v1)
+                .patch(session_update)
+                .delete(session_delete),
+        );
         router = router.route("/session/{sessionID}/revert", post(session_revert));
         router = router.route("/session/{sessionID}/unrevert", post(session_unrevert));
     }
@@ -6078,6 +6148,79 @@ mod tests {
         assert_eq!(alpha["slug"], "ses_a-slug");
         assert_eq!(alpha["title"], "Alpha");
         assert_eq!(alpha["version"], "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn session_get_v1_and_delete_round_trip() {
+        use opencode_db::SessionStore as _;
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions
+            .create(&opencode_db::SessionV1Record {
+                id: "ses_x".into(),
+                slug: "x-slug".into(),
+                project_id: "prj_1".into(),
+                workspace_id: None,
+                directory: "/repo".into(),
+                path: None,
+                parent_id: None,
+                summary: None,
+                summary_diffs: None,
+                cost: 0.0,
+                tokens: (0, 0, 0, 0, 0),
+                share_url: None,
+                title: "X".into(),
+                agent: None,
+                model: None,
+                version: "1.0.0".into(),
+                metadata: None,
+                time_created: 1,
+                time_updated: 1,
+                time_compacting: None,
+                time_archived: None,
+                permission: None,
+                revert: None,
+            })
+            .await
+            .unwrap();
+        let make = || ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions: sessions.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let send = |method: &str| {
+            let req = axum::extract::Request::builder()
+                .method(method)
+                .uri("/session/ses_x")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            build_router(make()).oneshot(req)
+        };
+        // GET (V1) returns the full Session.
+        let resp = send("GET").await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["slug"], "x-slug");
+        assert_eq!(v["version"], "1.0.0");
+        // DELETE returns true and removes it.
+        let resp = send("DELETE").await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"true");
+        assert!(sessions.get("ses_x").await.unwrap().is_none());
+        // GET + DELETE on the now-missing session → 404.
+        assert_eq!(send("GET").await.unwrap().status(), 404);
+        assert_eq!(send("DELETE").await.unwrap().status(), 404);
     }
 
     #[tokio::test]
