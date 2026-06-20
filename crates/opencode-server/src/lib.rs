@@ -2402,6 +2402,33 @@ async fn v2_reference_list(
     }))
 }
 
+/// `GET /api/agent` — list agents (group `agent`). Matches the golden `v2.agent.list`: 200
+/// `{ location, data }` + 400/401. Agents are loaded from built-ins + `.opencode/agents/*.md` (a
+/// loading epic, see PENDENCIAS #2); until that lands the list is empty (same wired-empty stance as the
+/// V1 `app.agents`).
+#[utoipa::path(
+    get,
+    path = "/api/agent",
+    operation_id = "v2.agent.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Agents", body = opencode_proto::AgentListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "agent"
+)]
+async fn v2_agent_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::AgentListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(opencode_proto::AgentListResponse {
+        location,
+        data: Vec::new(),
+    }))
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2554,6 +2581,7 @@ async fn v2_provider_get(
         v2_skill_list,
         v2_command_list,
         v2_reference_list,
+        v2_agent_list,
         v2_location_get,
         v2_provider_get
     ),
@@ -2700,6 +2728,12 @@ async fn v2_provider_get(
         opencode_proto::ReferenceSource,
         opencode_proto::ReferenceInfo,
         opencode_proto::ReferenceListResponse,
+        opencode_proto::PermissionV2Effect,
+        opencode_proto::PermissionV2Rule,
+        opencode_proto::AgentMode,
+        opencode_proto::AgentV2Request,
+        opencode_proto::AgentV2Info,
+        opencode_proto::AgentListResponse,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2719,7 +2753,8 @@ async fn v2_provider_get(
         (name = "lsp", description = "LSP server routes"),
         (name = "skills", description = "Skill catalog routes"),
         (name = "commands", description = "Command catalog routes"),
-        (name = "reference", description = "Reference catalog routes")
+        (name = "reference", description = "Reference catalog routes"),
+        (name = "agent", description = "Agent catalog routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3317,6 +3352,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("reference") {
         router = router.route("/api/reference", get(v2_reference_list));
+    }
+    if state.routes.handles("agent") {
+        router = router.route("/api/agent", get(v2_agent_list));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -4418,6 +4456,7 @@ mod tests {
             ("skill", "/api/skill?directory=/repo"),
             ("command", "/api/command?directory=/repo"),
             ("reference", "/api/reference?directory=/repo"),
+            ("agent", "/api/agent?directory=/repo"),
         ] {
             // Seed a project whose worktree matches the requested directory so location resolves.
             let projects = Arc::new(opencode_db::MemoryProjectStore::new());
@@ -4478,6 +4517,47 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // No LSP host yet → an empty JSON array.
         assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[test]
+    fn agent_v2_info_serializes_to_golden_shape() {
+        use opencode_proto::{
+            AgentMode, AgentV2Info, AgentV2Request, ModelRef, PermissionV2Effect, PermissionV2Rule,
+        };
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("x-key".to_string(), "v".to_string());
+        let v = serde_json::to_value(AgentV2Info {
+            id: "build".into(),
+            model: Some(ModelRef {
+                id: "claude".into(),
+                provider_id: "anthropic".into(),
+                variant: None,
+            }),
+            request: AgentV2Request {
+                headers,
+                body: serde_json::json!({ "temperature": 0 }),
+            },
+            system: None,
+            description: None,
+            mode: AgentMode::Primary,
+            hidden: false,
+            color: Some("#ffffff".into()),
+            steps: Some(5),
+            permissions: vec![PermissionV2Rule {
+                action: "edit".into(),
+                resource: "**".into(),
+                effect: PermissionV2Effect::Ask,
+            }],
+        })
+        .unwrap();
+        assert_eq!(v["id"], "build");
+        assert_eq!(v["mode"], "primary");
+        assert_eq!(v["model"]["providerID"], "anthropic");
+        assert_eq!(v["request"]["headers"]["x-key"], "v");
+        assert_eq!(v["permissions"][0]["effect"], "ask");
+        // Optional unset fields are omitted (system/description/variant).
+        assert!(v.get("system").is_none());
+        assert!(v["model"].get("variant").is_none());
     }
 
     #[test]

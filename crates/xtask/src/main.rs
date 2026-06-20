@@ -48,6 +48,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/api/skill",
     "/api/command",
     "/api/reference",
+    "/api/agent",
     "/api/location",
 ];
 
