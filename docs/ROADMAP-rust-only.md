@@ -99,20 +99,25 @@
 
 ## Estado & próximos épicos (para a próxima sessão)
 
-**Feito nesta rodada autônoma (mergeado):** #69 tipos, #70 store, #71 rota `messages`, #72 docs, #73 `session.todo`, #74 `dispose`, #76 `file.list`, #77 `permission.list`+`question.list`, #78 `vcs.get`. As **fatias enxutas** (read sobre dado existente) estão **cobertas**. Restantes precisam de: type-modeling grande (Config/agents), escrita+coexistência (auth), subsistema greenfield (mcp/lsp), ou a engine de execução (mutações/status/diff).
+**Marco atingido nesta rodada (mergeado, CI `rust` verde):** a **superfície de leitura do GUI web está nativa em Rust** — chat (session list/get/messages + write-path do runner), catálogo (model/provider/location), **agents/commands/skills com dados reais** (carregados de `.opencode/**.md`, global + projeto), config admin (get/update), file browser (`fs.list/find/read`, `file.read/status`), eventos (SSE `api`+`global`), e os reads wired-empty até a engine (permissions/questions/mcp/lsp/integration/session.status/context). **56 paths contrato-enforçados.** PRs desta rodada: #69–#123. **#119 consertou o job `rust` do CI** (clippy full-workspace no stable do CI — antes mascarado por clippy escopado por crate).
 
-O que resta são **épicos** — cada um é multi-fatia e merece uma sessão focada com contexto cheio. Sequência recomendada (maior valor primeiro):
+O que resta são **épicos** — cada um multi-fatia, e vários **bloqueados em decisões** (ver PENDENCIAS). Sequência recomendada (maior valor primeiro):
 
-1. **Write-path / projector** (PENDENCIAS #6) — *linchpin do chat real*. Plano de fatias:
-   - 1a. Portar `projector.ts` como **função pura** em `opencode-core` (eventos → linhas `session_message`), com testes — **contrato-neutro, mergeável sozinho**. Começar pelo subconjunto user+assistant message.
-   - 1b. Runner emite eventos de sessão no event store durante a execução do turno.
-   - 1c. Ligar projector ao stream de eventos → grava `session_message` (+ `message`/`part`).
-   - Resultado: `messages` passa a retornar dados reais → **chat funciona**.
-2. **Config** (Fase 2a/2b) — modelar o tipo `Config` (35 props de topo, ~19 tipos no closure) + `config.get`/`update`. Grande, mas tratável (sem engine). Proveniência (cascata) depende de PENDENCIAS #1.
-3. **agents/commands** — `app.agents`/`command.list` (parse de `.opencode/*.md` + defaults) e escrita (PENDENCIAS #2).
-4. **Mutações de sessão** (`update/revert/share/command/summarize`) — dependem do write-path (épico 1).
-5. **`session.status`/`diff`** — dependem do estado de execução / snapshots.
-6. **Extensões** (Fase 3) — plugin host + MCP `rmcp` + integrações (greenfield, grande).
-7. **Cutover** (Fase 4) — schema-apply (PENDENCIAS #4), cobertura de providers (#5), remover proxy, deletar TS.
+1. **Mutações/ações de sessão que dependem da engine** — `session.create` (insere registro + emite evento), `session.command`/`summarize`/`compact`/`init`/`fork`/`shell`/`prompt_async`, `message`/`part` mutations. Dependem do runner de execução (write-path já existe para o turno básico).
+2. **Permissions/questions engine** — `permission.respond`/`reply`, `question.reply`/`reject` + produzir os requests pendentes (hoje as listas são vazias). Depende do gate do runner.
+3. **Auth/credenciais (Fase 4b)** — `auth.set`/`remove`, `provider.auth` (GET, tipo `ProviderAuthMethod`), `provider.oauth.*`. PENDENCIAS: local de storage de credencial + coexistência.
+4. **MCP/LSP runtime (Fase 3b/3d)** — `rmcp` (mcp.connect/add/disconnect/auth) + LSP host; hoje `mcp.status`/`lsp.status`/`find.symbols` retornam vazio.
+5. **references loading** — `v2.reference.list` lê `config.references` (local resolve direto; **git refs exigem clone/materialização** — runtime).
+6. **Config proveniência + níveis restantes** (PENDENCIAS #1) — cascata 7 níveis + `.jsonc`.
+7. **`project.update`/`initGit`, session.share/unshare** — escrita de projeto (store precisa de `update`/create) + serviço externo de share-URL.
+8. **Cutover (Fase 4)** — schema-apply (PENDENCIAS #4), cobertura de providers (#5), habilitar grupos por padrão + remover proxy, deletar TS.
 
-**Nota de integridade:** não meio-implemento épicos para "parecer pronto" — um projector que compila mas não bate o comportamento do TS seria pior que não-feito. Cada épico será portado fielmente e testado.
+**Padrões reutilizáveis desta rodada (para continuar rápido):**
+- **Rotas wired-empty**: modelar o tipo + retornar `[]`/`{}`/404 até a engine (ex.: permission/question/mcp/lsp/integration).
+- **Maps no contrato** (`additionalProperties`) → o normalizador do `openapi-diff` os descarta → modelar como `Value`/`HashMap` (não precisa do tipo aninhado).
+- **Uniões** `anyOf[$ref...]` → enum serde internamente-tagueado em `type`; o normalizador resolve+colapsa. `anyOf[string,string]`→`String`. `anyOf[X,X]` (404) → dedup → `X`.
+- **Respostas não-JSON** (octet-stream/SSE): declarar via `content_type`; o diff só compara `application/json` (200 vira `Null`==`Null`).
+- **Loaders `.opencode/**.md`**: `parse_md_frontmatter` (frontmatter flat sem dep YAML) + `collect_md_files`; merge global→projeto.
+- **CI**: rodar `cargo clippy --all-targets` (full workspace) no **stable atualizado** (`rustup update stable`), nunca escopado por crate.
+
+**Nota de integridade:** não meio-implemento épicos para "parecer pronto". O que está marcado ✅ bate o contrato (`openapi-diff`) e tem teste; o que retorna vazio está **rotulado** como tal (aguardando engine/decisão), nunca disfarçado de completo.
