@@ -2495,6 +2495,146 @@ async fn session_delete(
     }
 }
 
+/// A `{ providerID, modelID }` model selector (the body shape used by several session-action routes).
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct ModelSelector {
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    #[serde(rename = "modelID")]
+    model_id: String,
+}
+
+/// Request body for `session.prompt_async` (lenient; the OpenAPI diff doesn't compare request bodies).
+#[derive(Default, serde::Deserialize, utoipa::ToSchema)]
+struct PromptAsyncBody {
+    /// Model selector (defaults to the session's pinned model).
+    #[serde(default)]
+    model: Option<ModelSelector>,
+    /// Override system prompt.
+    #[serde(default)]
+    system: Option<String>,
+    /// The user message parts (text parts are concatenated into the prompt).
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    parts: Option<serde_json::Value>,
+}
+
+/// Error responder for `session.prompt_async`: 404 `NotFoundError` (unknown session) or 400
+/// `InvalidRequestError` (no resolvable model).
+enum PromptAsyncFailure {
+    NotFound(String),
+    BadRequest(String),
+}
+
+impl axum::response::IntoResponse for PromptAsyncFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            PromptAsyncFailure::NotFound(session_id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::NotFoundError {
+                    name: "NotFoundError".to_string(),
+                    data: opencode_proto::NotFoundData {
+                        message: format!("Session not found: {session_id}"),
+                    },
+                }),
+            )
+                .into_response(),
+            PromptAsyncFailure::BadRequest(message) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message,
+                    kind: None,
+                    field: None,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Concatenate the `text` fields of a prompt's `parts` array into a single prompt string.
+fn prompt_text_from_parts(parts: &Option<serde_json::Value>) -> String {
+    let Some(serde_json::Value::Array(items)) = parts else {
+        return String::new();
+    };
+    items
+        .iter()
+        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `POST /session/{sessionID}/prompt_async` — fire-and-forget prompt (group `session`). Matches the
+/// golden `session.prompt_async`: 204, 400 union, 404 `NotFoundError`. Admits the prompt to the
+/// session's inbox and returns immediately; the background runner drives the turn(s), persisting events
+/// (observable on the event stream). Reuses the same admit/coordinator path as the V2 prompt route.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/prompt_async",
+    operation_id = "session.prompt_async",
+    params(("sessionID" = String, Path, description = "Session id")),
+    request_body = PromptAsyncBody,
+    responses(
+        (status = 204, description = "Admitted"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_prompt_async(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    body: Option<Json<PromptAsyncBody>>,
+) -> Result<axum::http::StatusCode, PromptAsyncFailure> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    // Existence + the session's pinned model come from the projection row.
+    let record = state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| PromptAsyncFailure::BadRequest(e.to_string()))?
+        .ok_or_else(|| PromptAsyncFailure::NotFound(session_id.clone()))?;
+    // Resolve the model: the body selector, else the session's pinned `{ id, providerID }`.
+    let model = match &body.model {
+        Some(m) => format!("{}/{}", m.provider_id, m.model_id),
+        None => match record.model.as_ref().and_then(|m| {
+            let provider = m.get("providerID").and_then(|v| v.as_str())?;
+            let id = m.get("id").and_then(|v| v.as_str())?;
+            Some(format!("{provider}/{id}"))
+        }) {
+            Some(model) => model,
+            None => {
+                return Err(PromptAsyncFailure::BadRequest(
+                    "no model: provide `model` or pin one on the session".to_string(),
+                ))
+            }
+        },
+    };
+    if split_model(&model).is_err() {
+        return Err(PromptAsyncFailure::BadRequest(format!(
+            "invalid model: {model}"
+        )));
+    }
+    state.ctx.metrics().record_prompt();
+    let live: Arc<dyn TurnRunner> = Arc::new(LiveTurnRunner {
+        ctx: state.ctx.clone(),
+        runner: state.runner.clone(),
+    });
+    state.coordinator.admit(
+        live,
+        session_id,
+        AdmittedPrompt {
+            model,
+            prompt: prompt_text_from_parts(&body.parts),
+            system: body.system.into_iter().collect(),
+            step_limit: default_step_limit(),
+        },
+    );
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
 /// covers a malformed body (axum rejects it before the handler).
 pub enum SessionMutateFailure {
@@ -3681,6 +3821,7 @@ async fn v2_provider_get(
         session_list,
         session_get_v1,
         session_delete,
+        session_prompt_async,
         session_update,
         session_revert,
         session_unrevert,
@@ -3927,6 +4068,8 @@ async fn v2_provider_get(
         opencode_proto::IntegrationListResponse,
         SessionUpdateBody,
         SessionCreateBody,
+        PromptAsyncBody,
+        ModelSelector,
         RevertBody
     )),
     tags(
@@ -5339,6 +5482,10 @@ pub fn build_router(state: ServerState) -> Router {
         );
         router = router.route("/session/{sessionID}/revert", post(session_revert));
         router = router.route("/session/{sessionID}/unrevert", post(session_unrevert));
+        router = router.route(
+            "/session/{sessionID}/prompt_async",
+            post(session_prompt_async),
+        );
         router = router.route(
             "/session/{sessionID}/permissions/{permissionID}",
             post(permission_respond),
@@ -6945,6 +7092,57 @@ mod tests {
         assert_eq!(alpha["slug"], "ses_a-slug");
         assert_eq!(alpha["title"], "Alpha");
         assert_eq!(alpha["version"], "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn session_prompt_async_admits_and_404s_unknown() {
+        use tower::ServiceExt;
+        // Seed a session with a pinned model so prompt_async can resolve it.
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        let mut rec = test_session_record("ses_1");
+        rec.model = Some(serde_json::json!({ "id": "claude-x", "providerID": "anthropic" }));
+        sessions.insert(rec);
+        let state = || ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions: sessions.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        // Known session → admitted (204) + a drain task spawned.
+        let st = state();
+        let coordinator = st.coordinator.clone();
+        let resp = build_router(st)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_1/prompt_async")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"parts":[{"type":"text","text":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert!(coordinator.spawn_count() >= 1);
+        // Unknown session → 404.
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_missing/prompt_async")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"parts":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
     }
 
     #[tokio::test]
