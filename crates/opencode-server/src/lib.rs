@@ -2567,9 +2567,11 @@ async fn v2_reference_list(
 }
 
 /// `GET /api/agent` — list agents (group `agent`). Matches the golden `v2.agent.list`: 200
-/// `{ location, data }` + 400/401. Agents are loaded from built-ins + `.opencode/agents/*.md` (a
-/// loading epic, see PENDENCIAS #2); until that lands the list is empty (same wired-empty stance as the
-/// V1 `app.agents`).
+/// `{ location, data }` + 400/401. Loads real agents from the global config dir and the project's
+/// `.opencode`: `{agent,agents}/**/*.md` (subagents; `mode` from frontmatter, default `all`) and
+/// `{mode,modes}/*.md` (primary agents). Each file's frontmatter (`model`/`description`/`mode`/`hidden`/
+/// `color`/`steps`) + body (system prompt) builds the agent; project overrides global by id. The
+/// config-permission → ruleset expansion and built-in agents are follow-ups (permissions default `[]`).
 #[utoipa::path(
     get,
     path = "/api/agent",
@@ -2587,10 +2589,8 @@ async fn v2_agent_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::AgentListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    Ok(Json(opencode_proto::AgentListResponse {
-        location,
-        data: Vec::new(),
-    }))
+    let data = load_agents(&location.directory);
+    Ok(Json(opencode_proto::AgentListResponse { location, data }))
 }
 
 /// `GET /api/health` — V2 liveness (group `health`). Matches the golden `v2.health.get`: 200
@@ -3983,6 +3983,110 @@ fn load_skills(directory: &str) -> Vec<opencode_proto::SkillV2Info> {
         by_name.insert(info.name.clone(), info);
     }
     by_name.into_values().collect()
+}
+
+/// Build an [`AgentV2Info`] from a single agent/mode `.md` file (relative to its `dir`). `primary`
+/// forces `mode = "primary"` (the `{mode,modes}` sources); otherwise `mode` is the frontmatter value
+/// (default `"all"`). Returns `None` for an empty name or a `disabled: true` agent. `request` defaults
+/// to empty maps and `permissions` to `[]` (the config-permission → ruleset expansion is a follow-up).
+fn build_agent(
+    dir: &std::path::Path,
+    file: &std::path::Path,
+    primary: bool,
+) -> Option<opencode_proto::AgentV2Info> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let rel = file.strip_prefix(dir).ok()?.to_str()?.replace('\\', "/");
+    let name = rel.strip_suffix(".md").unwrap_or(&rel).to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let (front, body) = parse_md_frontmatter(&content);
+    if front.get("disabled").map(|s| s == "true").unwrap_or(false) {
+        return None;
+    }
+    let mode = if primary {
+        opencode_proto::AgentMode::Primary
+    } else {
+        match front.get("mode").map(String::as_str) {
+            Some("subagent") => opencode_proto::AgentMode::Subagent,
+            Some("primary") => opencode_proto::AgentMode::Primary,
+            _ => opencode_proto::AgentMode::All,
+        }
+    };
+    Some(opencode_proto::AgentV2Info {
+        id: name,
+        model: front
+            .get("model")
+            .map(|m| parse_model_ref(m, front.get("variant").cloned())),
+        request: opencode_proto::AgentV2Request {
+            headers: std::collections::BTreeMap::new(),
+            body: serde_json::json!({}),
+        },
+        system: (!body.is_empty()).then_some(body),
+        description: front.get("description").cloned(),
+        mode,
+        hidden: front.get("hidden").map(|s| s == "true").unwrap_or(false),
+        color: front.get("color").cloned(),
+        steps: front.get("steps").and_then(|s| s.parse::<i64>().ok()),
+        permissions: Vec::new(),
+    })
+}
+
+/// Top-level `*.md` files directly in `dir` (non-recursive), sorted.
+fn top_level_md_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Load agent definitions from a config base: `{agent,agents}/**/*.md` (subagents, mode from
+/// frontmatter) and `{mode,modes}/*.md` (primary agents). Mirrors the TS `config-agent` plugin's source
+/// globs.
+fn load_agents_from_base(base: &std::path::Path) -> Vec<opencode_proto::AgentV2Info> {
+    let mut out = Vec::new();
+    for sub in ["agent", "agents"] {
+        let dir = base.join(sub);
+        let mut files = Vec::new();
+        collect_md_files(&dir, &mut files);
+        files.sort();
+        for file in files {
+            if let Some(agent) = build_agent(&dir, &file, false) {
+                out.push(agent);
+            }
+        }
+    }
+    for sub in ["mode", "modes"] {
+        let dir = base.join(sub);
+        for file in top_level_md_files(&dir) {
+            if let Some(agent) = build_agent(&dir, &file, true) {
+                out.push(agent);
+            }
+        }
+    }
+    out
+}
+
+/// Load all agents for a resolved location: global config dir (lower precedence) then the project's
+/// `.opencode` (overrides by id). Returns them sorted by id.
+fn load_agents(directory: &str) -> Vec<opencode_proto::AgentV2Info> {
+    let mut by_id: std::collections::BTreeMap<String, opencode_proto::AgentV2Info> =
+        std::collections::BTreeMap::new();
+    if let Some(global) = config_dir() {
+        for info in load_agents_from_base(&global) {
+            by_id.insert(info.id.clone(), info);
+        }
+    }
+    let project = std::path::Path::new(directory).join(".opencode");
+    for info in load_agents_from_base(&project) {
+        by_id.insert(info.id.clone(), info);
+    }
+    by_id.into_values().collect()
 }
 
 /// Recursively merge `overlay` into `base`: objects merge key-by-key, everything else (scalars/arrays)
@@ -5901,6 +6005,43 @@ mod tests {
     }
 
     #[test]
+    fn load_agents_from_base_reads_subagents_and_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("agent")).unwrap();
+        std::fs::create_dir_all(dir.path().join("mode")).unwrap();
+        // subagent: mode defaults to "all" (no frontmatter mode), model parsed, body is the system.
+        std::fs::write(
+            dir.path().join("agent/researcher.md"),
+            "---\ndescription: Researches\nmodel: anthropic/claude-x\ncolor: \"#abcdef\"\nsteps: 7\n---\nYou research things.",
+        )
+        .unwrap();
+        // primary: {mode}/*.md forces mode = "primary".
+        std::fs::write(
+            dir.path().join("mode/plan.md"),
+            "---\ndescription: Planning\n---\nPlan carefully.",
+        )
+        .unwrap();
+        // disabled agent is skipped.
+        std::fs::write(
+            dir.path().join("agent/old.md"),
+            "---\ndisabled: true\n---\nlegacy",
+        )
+        .unwrap();
+        let agents = load_agents_from_base(dir.path());
+        let researcher = agents.iter().find(|a| a.id == "researcher").unwrap();
+        assert_eq!(researcher.mode, opencode_proto::AgentMode::All);
+        assert_eq!(researcher.system.as_deref(), Some("You research things."));
+        assert_eq!(researcher.description.as_deref(), Some("Researches"));
+        assert_eq!(researcher.color.as_deref(), Some("#abcdef"));
+        assert_eq!(researcher.steps, Some(7));
+        assert_eq!(researcher.model.as_ref().unwrap().provider_id, "anthropic");
+        assert!(researcher.permissions.is_empty());
+        let plan = agents.iter().find(|a| a.id == "plan").unwrap();
+        assert_eq!(plan.mode, opencode_proto::AgentMode::Primary);
+        assert!(!agents.iter().any(|a| a.id == "old")); // disabled skipped
+    }
+
+    #[test]
     fn load_skills_from_base_reads_top_level_and_nested() {
         let dir = tempfile::tempdir().unwrap();
         // top-level *.md → name from file stem (no frontmatter name).
@@ -5985,12 +6126,9 @@ mod tests {
     #[tokio::test]
     async fn v2_catalog_lists_are_empty_until_loading_lands() {
         use tower::ServiceExt;
-        // `command`/`skill` load real `.opencode/**.md` data (see their dedicated tests); the rest
-        // remain wired-empty until their loaders land.
-        for (group, uri) in [
-            ("reference", "/api/reference?directory=/repo"),
-            ("agent", "/api/agent?directory=/repo"),
-        ] {
+        // `command`/`skill`/`agent` load real `.opencode/**.md` data (see their dedicated tests);
+        // `reference` remains wired-empty until its loader lands.
+        for (group, uri) in [("reference", "/api/reference?directory=/repo")] {
             // Seed a project whose worktree matches the requested directory so location resolves.
             let projects = Arc::new(opencode_db::MemoryProjectStore::new());
             projects.insert(test_project_record("prj_1"));
