@@ -1829,6 +1829,43 @@ async fn session_todo(
     Ok(Json(todos))
 }
 
+/// `GET /session/{sessionID}/children` — a session's child sessions (group `session`). Matches the
+/// golden `session.children`: 200 `[Session]`, 400 union, 404 `NotFoundError`. Child sessions are
+/// created by the runner when it spawns sub-agents; until that execution path persists them this is
+/// empty (404s an unknown session). Reuses [`TodoFailure`] for the shared NotFoundError/500 responder.
+#[utoipa::path(
+    get,
+    path = "/session/{sessionID}/children",
+    operation_id = "session.children",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Child sessions", body = Vec<opencode_proto::Session>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_children(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<opencode_proto::Session>>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    Ok(Json(Vec::new()))
+}
+
 /// Map a full V1 session row to the `Session` wire shape, parsing the JSON columns
 /// (`model`/`permission`/`revert`/`summary_diffs`) into their typed forms.
 fn session_v1_from_record(r: opencode_db::SessionV1Record) -> opencode_proto::Session {
@@ -2779,6 +2816,7 @@ async fn v2_provider_get(
         v2_session_messages,
         v2_session_prompt,
         session_todo,
+        session_children,
         session_update,
         session_revert,
         session_unrevert,
@@ -3873,6 +3911,7 @@ pub fn build_router(state: ServerState) -> Router {
         );
         router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
+        router = router.route("/session/{sessionID}/children", get(session_children));
         router = router.route("/session/{sessionID}", patch(session_update));
         router = router.route("/session/{sessionID}/revert", post(session_revert));
         router = router.route("/session/{sessionID}/unrevert", post(session_unrevert));
@@ -5073,6 +5112,56 @@ mod tests {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["_tag"], "SessionNotFoundError", "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn session_children_404s_unknown_and_is_empty_for_known() {
+        use tower::ServiceExt;
+        // Unknown session → 404 NotFoundError.
+        let resp = build_router(ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        })
+        .oneshot(
+            axum::extract::Request::builder()
+                .uri("/session/ses_missing/children")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // Known session → 200 with an empty array.
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let resp = build_router(ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        })
+        .oneshot(
+            axum::extract::Request::builder()
+                .uri("/session/ses_1/children")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!([]));
     }
 
     #[tokio::test]
