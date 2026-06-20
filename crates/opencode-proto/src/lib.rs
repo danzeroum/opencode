@@ -1651,6 +1651,77 @@ pub struct SessionPermissionListResponse {
     pub data: Vec<PermissionV2Request>,
 }
 
+/// The tool-call a question is attached to (`QuestionV2Request.tool`): `{ messageID, callID }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionV2Tool {
+    /// The message the question originated from.
+    #[serde(rename = "messageID")]
+    pub message_id: String,
+    /// The tool-call the question originated from.
+    #[serde(rename = "callID")]
+    pub call_id: String,
+}
+
+/// A single choice for a question (`QuestionV2Option`): `{ label, description }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionV2Option {
+    /// The option label.
+    pub label: String,
+    /// The option description.
+    pub description: String,
+}
+
+/// A single question (`QuestionV2Info`): `{ question, header, options, multiple?, custom? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionV2Info {
+    /// The question text.
+    pub question: String,
+    /// A short header/label.
+    pub header: String,
+    /// The available choices.
+    pub options: Vec<QuestionV2Option>,
+    /// Whether multiple options may be selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
+    /// Whether a custom (free-text) answer is allowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom: Option<bool>,
+}
+
+/// A pending question request (`v2.question.request.list` / `v2.session.question.list` item). Mirrors
+/// the golden `QuestionV2Request`: `{ id, sessionID, questions, tool? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionV2Request {
+    /// Request id.
+    pub id: String,
+    /// The session the request belongs to.
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// The questions to answer.
+    pub questions: Vec<QuestionV2Info>,
+    /// The tool-call the request is attached to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<QuestionV2Tool>,
+}
+
+/// 200 body of `v2.question.request.list` (GET /api/question/request): the `Location.response` wrapper
+/// `{ location, data }` around the pending question requests.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct QuestionRequestListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The pending requests.
+    pub data: Vec<QuestionV2Request>,
+}
+
+/// 200 body of `v2.session.question.list` (GET /api/session/{sessionID}/question): `{ data }` (no
+/// location) around the session's pending question requests.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionQuestionListResponse {
+    /// The pending requests.
+    pub data: Vec<QuestionV2Request>,
+}
+
 /// `ProviderNotFoundError` — 404 for `v2.provider.get` (`{ _tag, providerID, message }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProviderNotFoundError {
