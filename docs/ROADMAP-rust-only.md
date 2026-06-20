@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 38 paths** · PRs desta rodada autônoma: #69–#103.
+> **Rotas nativas contrato-enforçadas: 41 paths** · PRs desta rodada autônoma: #69–#104.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -49,7 +49,7 @@
   - ✅ `session.revert` / `session.unrevert` (set/clear revert pointer) — **#86**
   - ⏳ `share`/`unshare` — precisa do **serviço externo de URL** (não é só projeção); ver nota
   - ⏳ `command`/`summarize` — usam a execução (write-path pronto)
-- 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `permission.respond` ⏳ (precisa engine)
+- 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `v2.permission.request.list` + `v2.permission.saved.list` + `v2.session.permission.list` ✅ (#104, tipos `PermissionV2Request`/`PermissionV2Source`/`PermissionSavedInfo`; vazios/404 até a engine) · `permission.respond`/`v2.session.permission.reply` ⏳ (precisa engine)
 - 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)
 
 ## Fase 2 — Admin

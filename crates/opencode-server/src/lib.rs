@@ -2447,6 +2447,88 @@ async fn v2_health_get() -> Json<opencode_proto::HealthV2> {
     Json(opencode_proto::HealthV2 { healthy: true })
 }
 
+/// `GET /api/permission/request` — pending permission requests (group `permission`). Matches the golden
+/// `v2.permission.request.list`: 200 `{ location, data }` + 400/401. Pending requests are ephemeral
+/// execution state produced by the runner's permission gate; until that engine exists this is empty.
+#[utoipa::path(
+    get,
+    path = "/api/permission/request",
+    operation_id = "v2.permission.request.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Pending permission requests", body = opencode_proto::PermissionRequestListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "permission"
+)]
+async fn v2_permission_request_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::PermissionRequestListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(opencode_proto::PermissionRequestListResponse {
+        location,
+        data: Vec::new(),
+    }))
+}
+
+/// `GET /api/permission/saved` — saved permission decisions (group `permission`). Matches the golden
+/// `v2.permission.saved.list`: 200 `{ data }` + 400/401. Saved rules will be read from the permission
+/// store once policy persistence lands; until then this is empty.
+#[utoipa::path(
+    get,
+    path = "/api/permission/saved",
+    operation_id = "v2.permission.saved.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Saved permission rules", body = opencode_proto::PermissionSavedListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "permission"
+)]
+async fn v2_permission_saved_list(
+    State(_state): State<ServerState>,
+) -> Json<opencode_proto::PermissionSavedListResponse> {
+    Json(opencode_proto::PermissionSavedListResponse { data: Vec::new() })
+}
+
+/// `GET /api/session/{sessionID}/permission` — a session's pending permission requests (group
+/// `session`). Matches the golden `v2.session.permission.list`: 200 `{ data }`, 400/401, 404
+/// `SessionNotFoundError`. 404s an unknown session; otherwise empty until the runner produces requests.
+#[utoipa::path(
+    get,
+    path = "/api/session/{sessionID}/permission",
+    operation_id = "v2.session.permission.list",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Pending permission requests", body = opencode_proto::SessionPermissionListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_permission_list(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::SessionPermissionListResponse>, SessionGetError> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| SessionGetError::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(SessionGetError::NotFound(session_id));
+    }
+    Ok(Json(opencode_proto::SessionPermissionListResponse {
+        data: Vec::new(),
+    }))
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2601,6 +2683,9 @@ async fn v2_provider_get(
         v2_reference_list,
         v2_agent_list,
         v2_health_get,
+        v2_permission_request_list,
+        v2_permission_saved_list,
+        v2_session_permission_list,
         v2_location_get,
         v2_provider_get
     ),
@@ -2754,6 +2839,12 @@ async fn v2_provider_get(
         opencode_proto::AgentV2Request,
         opencode_proto::AgentV2Info,
         opencode_proto::AgentListResponse,
+        opencode_proto::PermissionV2Source,
+        opencode_proto::PermissionV2Request,
+        opencode_proto::PermissionSavedInfo,
+        opencode_proto::PermissionRequestListResponse,
+        opencode_proto::PermissionSavedListResponse,
+        opencode_proto::SessionPermissionListResponse,
         SessionUpdateBody,
         RevertBody
     )),
@@ -3331,6 +3422,8 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("permission") {
         router = router.route("/permission", get(permission_list));
+        router = router.route("/api/permission/request", get(v2_permission_request_list));
+        router = router.route("/api/permission/saved", get(v2_permission_saved_list));
     }
     if state.routes.handles("question") {
         router = router.route("/question", get(question_list));
@@ -3346,6 +3439,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
         router = router.route("/api/session/{sessionID}/message", get(v2_session_messages));
         router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
+        router = router.route(
+            "/api/session/{sessionID}/permission",
+            get(v2_session_permission_list),
+        );
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}", patch(session_update));
         router = router.route("/session/{sessionID}/revert", post(session_revert));
@@ -4468,6 +4565,72 @@ mod tests {
             .unwrap(),
             serde_json::json!({ "status": "needs_client_registration", "error": "boom" })
         );
+    }
+
+    #[tokio::test]
+    async fn v2_permission_global_lists_are_empty() {
+        use tower::ServiceExt;
+        // request.list carries a location wrapper; saved.list is bare { data }.
+        for (uri, has_location) in [
+            ("/api/permission/request?directory=/repo", true),
+            ("/api/permission/saved", false),
+        ] {
+            let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+            projects.insert(test_project_record("prj_1"));
+            let state = ServerState {
+                ctx: AppContext::new(AppServices {
+                    projects,
+                    ..Default::default()
+                }),
+                routes: RouteTable::parse("permission"),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v["data"], serde_json::json!([]), "{uri}");
+            assert_eq!(v.get("location").is_some(), has_location, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_session_permission_list_404s_unknown_session() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_missing/permission")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["_tag"], "SessionNotFoundError");
     }
 
     #[tokio::test]
