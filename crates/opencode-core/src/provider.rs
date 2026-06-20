@@ -126,6 +126,13 @@ pub fn split_model(model: &str) -> Result<(Provider, &str), EngineError> {
 pub trait Credentials {
     /// The value of credential `name` (an env-var name like `ANTHROPIC_API_KEY`), if set.
     fn get(&self, name: &str) -> Option<String>;
+
+    /// The API key for a provider, looked up by provider id (e.g. `"anthropic"`) and/or its env-var
+    /// name. The default reads only the env var; richer sources (e.g. [`OpencodeCredentials`], which
+    /// reads `opencode auth login`'s `auth.json` keyed by provider id) override this.
+    fn api_key(&self, _provider_id: &str, env: &str) -> Option<String> {
+        self.get(env)
+    }
 }
 
 /// Reads credentials from the process environment ([`std::env::var`]).
@@ -134,6 +141,77 @@ pub struct EnvCredentials;
 impl Credentials for EnvCredentials {
     fn get(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
+    }
+}
+
+/// The opencode data directory (`$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode`), mirroring
+/// `packages/core/src/global.ts`.
+fn opencode_data_dir() -> std::path::PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            return std::path::PathBuf::from(xdg).join("opencode");
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".local/share/opencode")
+}
+
+/// Reads opencode's `auth.json` — what `opencode auth login` writes — so the backend finds API keys
+/// stored by the CLI/GUI, falling back to the process environment. The file is a
+/// `{ [providerID]: { type, key?, … } }` map (mirroring the TS `Auth` service); `OPENCODE_AUTH_CONTENT`
+/// (inline JSON) takes precedence over the file. Only `key`-bearing entries (`type: "api"`/`"wellknown"`)
+/// yield a static key; `oauth` entries (which need token refresh) are skipped, leaving the env fallback.
+pub struct OpencodeCredentials {
+    /// providerID → API key, extracted from `auth.json` / `OPENCODE_AUTH_CONTENT`.
+    keys: std::collections::HashMap<String, String>,
+}
+
+impl OpencodeCredentials {
+    /// Load the stored auth map. A missing or unparseable source yields an empty map (the env-var
+    /// fallback still applies), so this never fails.
+    pub fn load() -> Self {
+        let raw = std::env::var("OPENCODE_AUTH_CONTENT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::fs::read_to_string(opencode_data_dir().join("auth.json")).ok());
+        Self {
+            keys: raw.as_deref().map(parse_auth_keys).unwrap_or_default(),
+        }
+    }
+}
+
+/// Extract the `{ providerID: key }` map from an `auth.json` body: each `key`-bearing entry
+/// (`type: "api"`/`"wellknown"`) yields a static key; `oauth` entries (no static key) are skipped.
+/// Unparseable input yields an empty map.
+fn parse_auth_keys(raw: &str) -> std::collections::HashMap<String, String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter_map(|(provider, info)| {
+                    info.get("key")
+                        .and_then(|k| k.as_str())
+                        .filter(|k| !k.is_empty())
+                        .map(|k| (provider, k.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl Credentials for OpencodeCredentials {
+    fn get(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    fn api_key(&self, provider_id: &str, env: &str) -> Option<String> {
+        self.keys
+            .get(provider_id)
+            .cloned()
+            .or_else(|| std::env::var(env).ok())
     }
 }
 
@@ -166,14 +244,13 @@ impl EngineSettings {
     ) -> Result<Self, EngineError> {
         let (provider, model_id) = split_model(model)?;
         let env = provider.api_key_env();
-        let api_key =
-            creds
-                .get(env)
-                .filter(|key| !key.is_empty())
-                .ok_or(EngineError::MissingApiKey {
-                    provider: provider.as_str(),
-                    env,
-                })?;
+        let api_key = creds
+            .api_key(provider.as_str(), env)
+            .filter(|key| !key.is_empty())
+            .ok_or(EngineError::MissingApiKey {
+                provider: provider.as_str(),
+                env,
+            })?;
         Ok(Self {
             provider,
             model: model_id.to_string(),
@@ -285,6 +362,54 @@ mod tests {
 
     fn with_key() -> MapCreds {
         creds(&[("ANTHROPIC_API_KEY", "sk-ant-test")])
+    }
+
+    // ---- auth.json credential source ----
+
+    #[test]
+    fn parse_auth_keys_extracts_api_keys_and_skips_oauth() {
+        let raw = json!({
+            "anthropic": { "type": "api", "key": "sk-ant-stored" },
+            "openai": { "type": "wellknown", "key": "sk-wk", "token": "t" },
+            "google": { "type": "oauth", "refresh": "r", "access": "a", "expires": 1 },
+            "empty": { "type": "api", "key": "" }
+        })
+        .to_string();
+        let keys = parse_auth_keys(&raw);
+        assert_eq!(
+            keys.get("anthropic").map(String::as_str),
+            Some("sk-ant-stored")
+        );
+        assert_eq!(keys.get("openai").map(String::as_str), Some("sk-wk"));
+        // OAuth (no static key) and empty keys are skipped.
+        assert!(!keys.contains_key("google"));
+        assert!(!keys.contains_key("empty"));
+    }
+
+    #[test]
+    fn parse_auth_keys_tolerates_garbage() {
+        assert!(parse_auth_keys("not json").is_empty());
+        assert!(parse_auth_keys("[]").is_empty());
+    }
+
+    #[test]
+    fn opencode_credentials_prefers_stored_key_then_env_fallback() {
+        let creds = OpencodeCredentials {
+            keys: [("anthropic".to_string(), "sk-ant-stored".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        // Stored key wins (independent of the env var).
+        assert_eq!(
+            creds.api_key("anthropic", "ANTHROPIC_API_KEY").as_deref(),
+            Some("sk-ant-stored")
+        );
+        // A provider with no stored key falls back to env — use an env var that is certainly unset, so
+        // the assertion doesn't depend on the test host's environment.
+        assert_eq!(
+            creds.api_key("nope", "OPENCODE_UNSET_KEY_FOR_TEST_XZ"),
+            None
+        );
     }
 
     // ---- Settings resolution (no network) ----
