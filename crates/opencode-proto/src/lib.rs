@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 mod config;
+mod mcp;
 mod session_message;
 pub use config::*;
+pub use mcp::*;
 pub use session_message::*;
 
 /// Response of `GET /health` — the first contract route cut over to Rust (Phase 1).

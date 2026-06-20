@@ -2461,6 +2461,7 @@ async fn v2_provider_get(
         file_list,
         permission_list,
         question_list,
+        mcp_status,
         vcs_get,
         project_list,
         project_current,
@@ -2604,6 +2605,7 @@ async fn v2_provider_get(
         opencode_proto::FormatterConfig,
         opencode_proto::LspConfig,
         opencode_proto::PluginEntry,
+        opencode_proto::McpStatus,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2618,7 +2620,8 @@ async fn v2_provider_get(
         (name = "model", description = "Model catalog routes"),
         (name = "provider", description = "Provider catalog routes"),
         (name = "location", description = "Location routes"),
-        (name = "config", description = "Configuration routes")
+        (name = "config", description = "Configuration routes"),
+        (name = "mcp", description = "MCP server routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3051,6 +3054,31 @@ async fn question_list(
     Json(Vec::new())
 }
 
+/// `GET /mcp` — status of all configured MCP servers (group `mcp`). Matches the golden `mcp.status`:
+/// 200 `{ [server]: MCPStatus }`, 400 `BadRequestError`. MCP connection status is live runtime state
+/// owned by the MCP host (Phase 3b, `rmcp`); until that host exists no server is connected, so this
+/// returns an empty map — consistent with `permission.list`/`question.list` being empty until the
+/// engine produces their state.
+#[utoipa::path(
+    get,
+    path = "/mcp",
+    operation_id = "mcp.status",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "MCP server status", body = std::collections::HashMap<String, opencode_proto::McpStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "mcp"
+)]
+async fn mcp_status(
+    State(_state): State<ServerState>,
+) -> Json<std::collections::HashMap<String, opencode_proto::McpStatus>> {
+    Json(std::collections::HashMap::new())
+}
+
 /// `POST /global/dispose` — dispose the global runtime (group `global`). Matches the golden
 /// `global.dispose`: 200 `boolean`, 400 `BadRequestError`. The Rust server holds no per-call global
 /// state to tear down (DB pool + buses are process-scoped), so this acknowledges the lifecycle hook
@@ -3130,6 +3158,9 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("question") {
         router = router.route("/question", get(question_list));
+    }
+    if state.routes.handles("mcp") {
+        router = router.route("/mcp", get(mcp_status));
     }
     if state.routes.handles("session") {
         router = router.route("/api/session", get(v2_session_list));
@@ -4201,6 +4232,51 @@ mod tests {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v, serde_json::json!([]), "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_status_is_empty_map_until_host_lands() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("mcp"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/mcp")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // No MCP host yet → an empty JSON object map (not an array).
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[test]
+    fn mcp_status_serializes_with_status_tag() {
+        use opencode_proto::McpStatus;
+        // Unit variant → just the discriminator; struct variant → discriminator + field.
+        assert_eq!(
+            serde_json::to_value(McpStatus::Connected).unwrap(),
+            serde_json::json!({ "status": "connected" })
+        );
+        assert_eq!(
+            serde_json::to_value(McpStatus::NeedsClientRegistration {
+                error: "boom".into()
+            })
+            .unwrap(),
+            serde_json::json!({ "status": "needs_client_registration", "error": "boom" })
+        );
     }
 
     #[tokio::test]

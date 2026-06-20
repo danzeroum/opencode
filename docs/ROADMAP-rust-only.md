@@ -2,9 +2,9 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-19 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente); restam **épicos** (ver "Estado & próximos épicos").
+> **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 23** · PRs desta rodada autônoma: #69–#78.
+> **Rotas nativas contrato-enforçadas: 32 paths** · PRs desta rodada autônoma: #69–#98.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -64,7 +64,8 @@
 
 ## Fase 3 — Extensões (greenfield em Rust)
 - ⏳ 3a — plugin host JS out-of-process (RPC/JSON, Bun) + ciclo de hooks
-- ⏳ 3b — MCP via `rmcp` (add/connect/status + reconnect)
+- 🔄 3b — MCP via `rmcp` (add/connect/status + reconnect):
+  - ✅ `mcp.status` (`GET /mcp`) rota wirada + tipo `McpStatus` (#98, retorna `{}` até o host); falta o **runtime** (`rmcp`) + `mcp.add`/`connect`/`disconnect`
 - ⏳ 3c — integrações in-core (GitHub/GitLab/Slack adapters)
 
 ## Fase 4 — Cutover Rust-only
