@@ -2751,6 +2751,7 @@ async fn v2_provider_get(
         v2_session_question_list,
         v2_fs_list,
         v2_fs_find,
+        v2_fs_read,
         v2_location_get,
         v2_provider_get
     ),
@@ -3186,6 +3187,59 @@ async fn v2_fs_find(
         })
         .collect();
     Ok(Json(opencode_proto::FsListResponse { location, data }))
+}
+
+/// `GET /api/fs/read/*` — read a file's raw bytes (group `fs`). Matches the golden `v2.fs.read`: 200
+/// `application/octet-stream` (binary), 400/401. The wildcard captures the path relative to the
+/// resolved location; the read is guarded against path traversal (the canonical target must stay inside
+/// the canonical location root). A missing file or escaping path is a 400.
+///
+/// (The contract's 200 body is `application/octet-stream`; the OpenAPI diff only compares
+/// `application/json` schemas, so the binary body is declared via `content_type` and not diffed.)
+#[utoipa::path(
+    get,
+    path = "/api/fs/read/*",
+    operation_id = "v2.fs.read",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "File contents", body = String, content_type = "application/octet-stream"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "fs"
+)]
+async fn v2_fs_read(
+    State(state): State<ServerState>,
+    axum::extract::Path(rel): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    let bad = |m: &str| ApiError(opencode_effect::AppError::BadRequest(m.to_string()));
+    let location = resolve_location(&state, &params).await?;
+    let base = std::path::PathBuf::from(&location.directory);
+    // Containment guard: resolve both sides and require the target to stay within the location root.
+    let canon_base = base
+        .canonicalize()
+        .map_err(|_| bad("cannot resolve location directory"))?;
+    let canon_target = base
+        .join(&rel)
+        .canonicalize()
+        .map_err(|_| bad("file not found"))?;
+    if !canon_target.starts_with(&canon_base) {
+        return Err(bad("path escapes the location root"));
+    }
+    if !canon_target.is_file() {
+        return Err(bad("not a file"));
+    }
+    let bytes = tokio::fs::read(&canon_target)
+        .await
+        .map_err(|e| bad(&format!("cannot read file: {e}")))?;
+    Ok((
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Run `git -C <dir> <args>` and return trimmed stdout, or `None` on any failure (not a repo, git
@@ -3701,6 +3755,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));
         router = router.route("/api/fs/find", get(v2_fs_find));
+        router = router.route("/api/fs/read/{*path}", get(v2_fs_read));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -5178,6 +5233,66 @@ mod tests {
         assert_eq!(paths, vec!["alpha.rs"]);
         // A missing query is a 400.
         let uri = format!("/api/fs/find?directory={}", dir.path().display());
+        let resp = build_router(build_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn v2_fs_read_returns_bytes_and_guards_traversal() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi there").unwrap();
+        let build_state = || {
+            let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+            let mut rec = test_project_record("prj_1");
+            rec.worktree = dir.path().display().to_string();
+            projects.insert(rec);
+            ServerState {
+                ctx: AppContext::new(AppServices {
+                    projects,
+                    ..Default::default()
+                }),
+                routes: RouteTable::parse("fs"),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            }
+        };
+        // Reads the file's raw bytes as octet-stream.
+        let uri = format!("/api/fs/read/hello.txt?directory={}", dir.path().display());
+        let resp = build_router(build_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/octet-stream")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"hi there");
+        // A traversal attempt escaping the location root is a 400.
+        let uri = format!(
+            "/api/fs/read/../../etc/passwd?directory={}",
+            dir.path().display()
+        );
         let resp = build_router(build_state())
             .oneshot(
                 axum::extract::Request::builder()
