@@ -39,4 +39,13 @@ A rota `v2.session.messages` lê `session_message`, mas **nada grava ali ainda**
 - **Status:** épico aberto; priorizando leituras/rotas independentes primeiro para maximizar progresso mergeado.
 
 ## Resolvidas
-(nenhuma ainda)
+
+### #6 — Write-path do runner ✅ (resolvido — #80/#81/#82)
+Resolvido com uma abordagem **Rust-native** (em vez de portar o `projector.ts` acoplado): o runner já produz a conversa (`Vec<Message>`), então:
+- **#80** `SessionMessageStore::append` (escrita com auto-seq).
+- **#81** `session_timeline::project_turn` (transform puro `Message → SessionMessage`).
+- **#82** `drive_one_turn` projeta o turno e persiste → `v2.session.messages` retorna dados reais.
+
+**Caveat de coexistência (atenção):** se um servidor **TS também estiver projetando** o mesmo event stream, ambos gravariam `session_message` (duplicação). Rode **apenas um projector** quando os dois servidores estiverem vivos — o alvo é deploy **Rust-only**. (Se precisar de coexistência real, dá pra gatear a projeção Rust atrás de uma env flag; hoje ela roda sempre que o runner Rust executa o turno.)
+
+Refinos futuros (não bloqueiam): `cost` por turno (precisa de pricing do catálogo), `finish` reason por step, blocos de `reasoning`.
