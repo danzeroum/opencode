@@ -1571,6 +1571,86 @@ pub struct AgentListResponse {
     pub data: Vec<AgentV2Info>,
 }
 
+/// What triggered a permission request (`PermissionV2Request.source`): `{ type, messageID, callID }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionV2Source {
+    /// Source kind.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The message the request originated from.
+    #[serde(rename = "messageID")]
+    pub message_id: String,
+    /// The tool-call the request originated from.
+    #[serde(rename = "callID")]
+    pub call_id: String,
+}
+
+/// A pending permission request (`v2.permission.request.list` / `v2.session.permission.list` item).
+/// Mirrors the golden `PermissionV2Request`: `{ id, sessionID, action, resources, save?, metadata?,
+/// source? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct PermissionV2Request {
+    /// Request id.
+    pub id: String,
+    /// The session the request belongs to.
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+    /// The action being requested.
+    pub action: String,
+    /// The resources the action targets.
+    pub resources: Vec<String>,
+    /// Rule patterns offered for "save" (remember this decision).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub save: Option<Vec<String>>,
+    /// Free-form request metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub metadata: Option<serde_json::Value>,
+    /// What triggered the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<PermissionV2Source>,
+}
+
+/// A saved permission decision (`v2.permission.saved.list` item). Mirrors the golden
+/// `PermissionSavedInfo`: `{ id, projectID, action, resource }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionSavedInfo {
+    /// Saved-rule id.
+    pub id: String,
+    /// The project the rule belongs to.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// The action the rule governs.
+    pub action: String,
+    /// The resource the rule governs.
+    pub resource: String,
+}
+
+/// 200 body of `v2.permission.request.list` (GET /api/permission/request): the `Location.response`
+/// wrapper `{ location, data }` around the pending permission requests.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct PermissionRequestListResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The pending requests.
+    pub data: Vec<PermissionV2Request>,
+}
+
+/// 200 body of `v2.permission.saved.list` (GET /api/permission/saved): `{ data }` (no location).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionSavedListResponse {
+    /// The saved rules.
+    pub data: Vec<PermissionSavedInfo>,
+}
+
+/// 200 body of `v2.session.permission.list` (GET /api/session/{sessionID}/permission): `{ data }` (no
+/// location) around the session's pending permission requests.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SessionPermissionListResponse {
+    /// The pending requests.
+    pub data: Vec<PermissionV2Request>,
+}
+
 /// `ProviderNotFoundError` — 404 for `v2.provider.get` (`{ _tag, providerID, message }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProviderNotFoundError {
