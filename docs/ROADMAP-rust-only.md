@@ -52,8 +52,8 @@
 - 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)
 
 ## Fase 2 — Admin
-- ⏳ 2a — `config.get` / `config.update`
-- ⏳ 2b — **config com proveniência** (cascata 7 níveis) — capacidade nova (ver PENDENCIAS #1)
+- 🔄 2a — `config.get` ✅ + `global.config.get` ✅ (#88–#95: tipo `Config` completo + rotas; retornam config **vazio** até o loading/merge) · `config.update` ⏳
+- ⏳ 2b — **config com proveniência** (cascata 7 níveis) — capacidade nova (ver PENDENCIAS #1); + **loading/merge** dos 7 níveis
 - ⏳ 2c — `provider.list` admin + `provider.auth` (escrita de credencial) + teste de conexão
 - 🔄 2d — agents: `app.agents` rota wirada + tipos `Agent`/`AgentModel` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
 - 🔄 2e — commands: `command.list` rota wirada + tipo `Command` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/command/*.md` + MCP/skills) + escrita
