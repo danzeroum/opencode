@@ -236,6 +236,45 @@ pub struct File {
     pub status: String,
 }
 
+/// A zero-based position in a text document (`{ line, character }`) — LSP semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Position {
+    /// Zero-based line number.
+    pub line: i64,
+    /// Zero-based character offset.
+    pub character: i64,
+}
+
+/// A range in a text document (`{ start, end }`) — LSP semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Range {
+    /// Start position (inclusive).
+    pub start: Position,
+    /// End position (exclusive).
+    pub end: Position,
+}
+
+/// Where a [`Symbol`] is defined (`{ uri, range }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SymbolLocation {
+    /// Document URI.
+    pub uri: String,
+    /// The symbol's range within the document.
+    pub range: Range,
+}
+
+/// A workspace symbol (`find.symbols` item). Mirrors the golden `Symbol`: `{ name, kind, location }`
+/// (`kind` is the LSP `SymbolKind` integer).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Symbol {
+    /// Symbol name.
+    pub name: String,
+    /// LSP `SymbolKind` (integer).
+    pub kind: i64,
+    /// Where the symbol is defined.
+    pub location: SymbolLocation,
+}
+
 /// One hunk of a unified diff (`FileContent.patch.hunks` item). Mirrors the golden hunk shape:
 /// `{ oldStart, oldLines, newStart, newLines, lines }`, all required.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

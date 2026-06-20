@@ -18,6 +18,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/path",
     "/find/file",
     "/find",
+    "/find/symbol",
     "/file",
     "/file/content",
     "/file/status",

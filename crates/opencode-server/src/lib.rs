@@ -873,6 +873,34 @@ async fn find_text(
     Ok(Json(items))
 }
 
+/// `GET /find/symbol` — workspace symbol search (group `file`). Matches the golden `find.symbols`: 200
+/// `[Symbol]`, 400 `BadRequestError`. Symbols come from the LSP host (workspace/symbol); until that
+/// host exists in Rust this is empty. `query` is required (400 if empty).
+#[utoipa::path(
+    get,
+    path = "/find/symbol",
+    operation_id = "find.symbols",
+    params(
+        ("directory" = Option<String>, Query, description = "Directory to search (defaults to cwd)"),
+        ("workspace" = Option<String>, Query, description = "Workspace id"),
+        ("query" = String, Query, description = "Symbol query")
+    ),
+    responses(
+        (status = 200, description = "Symbols", body = Vec<opencode_proto::Symbol>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "file"
+)]
+async fn find_symbols(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<opencode_proto::Symbol>>, ApiBadRequest> {
+    let _query = params
+        .get("query")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad_request("missing required query parameter: query", "Query"))?;
+    Ok(Json(Vec::new()))
+}
+
 /// `POST /log` — write a client log entry (group `control`). Matches the golden `app.log`: 200
 /// `boolean` + 400 `BadRequestError`. The body is parsed into `LogEntry` and emitted via `tracing`;
 /// any parse error returns a contract-shaped `BadRequestError`. (openapi-diff gates responses only,
@@ -2810,6 +2838,7 @@ async fn v2_provider_get(
         path_get,
         find_files,
         find_text,
+        find_symbols,
         app_log,
         v2_session_get,
         v2_session_list,
@@ -3025,6 +3054,10 @@ async fn v2_provider_get(
         opencode_proto::FileSystemEntry,
         opencode_proto::FsListResponse,
         opencode_proto::File,
+        opencode_proto::Position,
+        opencode_proto::Range,
+        opencode_proto::SymbolLocation,
+        opencode_proto::Symbol,
         opencode_proto::FileContent,
         opencode_proto::FilePatch,
         opencode_proto::FilePatchHunk,
@@ -3978,6 +4011,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
         router = router.route("/find", get(find_text));
+        router = router.route("/find/symbol", get(find_symbols));
         router = router.route("/file", get(file_list));
         router = router.route("/file/content", get(file_read));
         router = router.route("/file/status", get(file_status));
@@ -5692,6 +5726,45 @@ mod tests {
         assert_eq!(by("gone.rs").removed, 9);
         assert_eq!(by("renamed.rs").status, "modified");
         assert_eq!(by("renamed.rs").added, 2);
+    }
+
+    #[tokio::test]
+    async fn find_symbols_requires_query_and_is_empty_until_lsp() {
+        use tower::ServiceExt;
+        let state = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("file"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        // Missing query → 400.
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/find/symbol")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        // With a query → 200 empty (no LSP host yet).
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/find/symbol?query=main")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!([]));
     }
 
     #[tokio::test]
