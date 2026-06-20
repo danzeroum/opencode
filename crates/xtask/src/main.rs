@@ -55,6 +55,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/api/model",
     "/api/provider",
     "/api/provider/{providerID}",
+    "/api/integration",
     "/api/skill",
     "/api/command",
     "/api/reference",

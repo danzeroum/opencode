@@ -2627,6 +2627,32 @@ async fn v2_session_context(
     }))
 }
 
+/// `GET /api/integration` — list integrations (group `integration`). Matches the golden
+/// `v2.integration.list`: 200 `{ location, data }` + 400/401. Integrations (GitHub/GitLab/Slack …) are
+/// a greenfield Rust concern (Phase 3c); until that runtime lands the list is empty.
+#[utoipa::path(
+    get,
+    path = "/api/integration",
+    operation_id = "v2.integration.list",
+    params(("location" = Option<String>, Query, description = "Location context (deepObject)")),
+    responses(
+        (status = 200, description = "Integrations", body = opencode_proto::IntegrationListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "integration"
+)]
+async fn v2_integration_list(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::IntegrationListResponse>, ApiError> {
+    let location = resolve_location(&state, &params).await?;
+    Ok(Json(opencode_proto::IntegrationListResponse {
+        location,
+        data: Vec::new(),
+    }))
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2790,6 +2816,7 @@ async fn v2_provider_get(
         v2_fs_list,
         v2_fs_find,
         v2_fs_read,
+        v2_integration_list,
         v2_location_get,
         v2_provider_get
     ),
@@ -2959,6 +2986,13 @@ async fn v2_provider_get(
         opencode_proto::FsListResponse,
         opencode_proto::SessionContextResponse,
         opencode_proto::TaggedUnknownError,
+        opencode_proto::IntegrationWhen,
+        opencode_proto::IntegrationSelectOption,
+        opencode_proto::IntegrationPrompt,
+        opencode_proto::IntegrationMethod,
+        opencode_proto::ConnectionInfo,
+        opencode_proto::IntegrationInfo,
+        opencode_proto::IntegrationListResponse,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2980,7 +3014,8 @@ async fn v2_provider_get(
         (name = "commands", description = "Command catalog routes"),
         (name = "reference", description = "Reference catalog routes"),
         (name = "agent", description = "Agent catalog routes"),
-        (name = "fs", description = "Filesystem routes")
+        (name = "fs", description = "Filesystem routes"),
+        (name = "integration", description = "Integration routes")
     ),
     info(title = "opencode", version = VERSION)
 )]
@@ -3797,6 +3832,9 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/fs/list", get(v2_fs_list));
         router = router.route("/api/fs/find", get(v2_fs_find));
         router = router.route("/api/fs/read/{*path}", get(v2_fs_read));
+    }
+    if state.routes.handles("integration") {
+        router = router.route("/api/integration", get(v2_integration_list));
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
@@ -5011,6 +5049,39 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn v2_integration_list_is_empty() {
+        use tower::ServiceExt;
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        projects.insert(test_project_record("prj_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                projects,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("integration"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/integration?directory=/repo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.get("location").is_some());
         assert_eq!(v["data"], serde_json::json!([]));
     }
 
