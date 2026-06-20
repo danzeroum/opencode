@@ -545,6 +545,29 @@ fn question_to_v2(m: QuestionMeta) -> opencode_proto::QuestionV2Request {
     }
 }
 
+/// A [`QuestionAsker`](opencode_core::native_tools::QuestionAsker) backed by [`PendingQuestions`]: the
+/// `question` tool registers the model's questions and parks until `v2.session.question.reply`/`reject`
+/// resolves them (the question-flow analogue of [`StorePermissionGate`]).
+struct StoreQuestionAsker {
+    questions: Arc<PendingQuestions>,
+}
+
+#[async_trait]
+impl opencode_core::native_tools::QuestionAsker for StoreQuestionAsker {
+    async fn ask(
+        &self,
+        session_id: &str,
+        questions: Vec<opencode_proto::QuestionV2Info>,
+    ) -> Result<Vec<Vec<String>>, String> {
+        let (_id, rx) = self.questions.register(session_id, questions);
+        match rx.await {
+            Ok(QuestionResolution::Answered(answers)) => Ok(answers),
+            Ok(QuestionResolution::Rejected) => Err("question rejected by user".to_string()),
+            Err(_) => Err("question request dropped".to_string()),
+        }
+    }
+}
+
 /// Build the engine + native tools + persist-then-announce sink and drive one user turn to completion.
 /// Shared by the synchronous execute route and the background [`LiveTurnRunner`].
 #[allow(clippy::too_many_arguments)]
@@ -560,13 +583,20 @@ async fn drive_one_turn(
 ) -> Result<SessionRun, String> {
     let (provider, model_id) = split_model(model).map_err(|e| e.to_string())?;
     let engine = runner.engines.build(model).map_err(|e| e.to_string())?;
-    let tools: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(runner.root.clone()));
+    let asker: Arc<dyn opencode_core::native_tools::QuestionAsker> = Arc::new(StoreQuestionAsker {
+        questions: runner.questions.clone(),
+    });
+    let tools: Arc<dyn ToolBox> =
+        Arc::new(NativeToolBox::new(runner.root.clone()).with_question_asker(asker, session_id));
+    // Offer the `question` tool alongside the native tools (the toolbox handles it via the asker).
+    let mut tool_defs = native_tools::tool_definitions();
+    tool_defs.push(native_tools::question_tool_definition());
     let session = Session {
         id: session_id.to_string(),
         model: model_id.to_string(),
         provider: provider.as_str().to_string(),
         system,
-        tools: native_tools::tool_definitions(),
+        tools: tool_defs,
         generation: Generation::default(),
         step_limit,
     };

@@ -10,6 +10,7 @@
 //! run on `spawn_blocking`; `bash` is already async.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,10 +22,28 @@ use serde_json::{json, Value};
 
 use crate::session::ToolBox;
 
+/// Presents the model's questions to the user and returns their answers — the seam for the `question`
+/// tool (the question-flow analogue of [`PermissionGate`](crate::session::PermissionGate)). The server
+/// implements this over its pending-question store; without an asker the `question` tool isn't offered.
+#[async_trait]
+pub trait QuestionAsker: Send + Sync {
+    /// Present `questions` for `session_id`; return the per-question answers (each a list of selected
+    /// labels) or `Err` if the user dismissed them.
+    async fn ask(
+        &self,
+        session_id: &str,
+        questions: Vec<opencode_proto::QuestionV2Info>,
+    ) -> Result<Vec<Vec<String>>, String>;
+}
+
 /// A [`ToolBox`] backed by the native `opencode-tools` helpers, rooted at a working directory.
 pub struct NativeToolBox {
     root: PathBuf,
     shell_timeout: Duration,
+    /// Optional human-in-the-loop asker enabling the `question` tool (set per session by the runner).
+    asker: Option<Arc<dyn QuestionAsker>>,
+    /// The session the `question` tool asks within.
+    session_id: String,
 }
 
 impl NativeToolBox {
@@ -33,12 +52,25 @@ impl NativeToolBox {
         Self {
             root: root.into(),
             shell_timeout: Duration::from_secs(120),
+            asker: None,
+            session_id: String::new(),
         }
     }
 
     /// Override the `bash` shell timeout.
     pub fn with_shell_timeout(mut self, timeout: Duration) -> Self {
         self.shell_timeout = timeout;
+        self
+    }
+
+    /// Enable the `question` tool for `session_id`, routing the model's questions through `asker`.
+    pub fn with_question_asker(
+        mut self,
+        asker: Arc<dyn QuestionAsker>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.asker = Some(asker);
+        self.session_id = session_id.into();
         self
     }
 
@@ -222,8 +254,62 @@ impl ToolBox for NativeToolBox {
                     .map_err(|e| e.to_string())?;
                 Ok(format_shell(&out))
             }
+            "question" => {
+                let asker = self
+                    .asker
+                    .as_ref()
+                    .ok_or_else(|| "question tool is not available".to_string())?;
+                let questions: Vec<opencode_proto::QuestionV2Info> =
+                    serde_json::from_value(input.get("questions").cloned().unwrap_or(Value::Null))
+                        .map_err(|e| format!("invalid question input: {e}"))?;
+                let answers = asker.ask(&self.session_id, questions).await?;
+                serde_json::to_string(&json!({ "answers": answers })).map_err(|e| e.to_string())
+            }
             other => Err(format!("unknown tool: {other}")),
         }
+    }
+}
+
+/// The `question` [`ToolDefinition`] — offered only when a [`QuestionAsker`] is wired (the runner adds
+/// it per session). Lets the model ask the user one or more multiple-choice questions and receive their
+/// selected labels.
+pub fn question_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "question".to_string(),
+        description: Some(
+            "Ask the user one or more multiple-choice questions and wait for their answers."
+                .to_string(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" },
+                            "header": { "type": "string" },
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["label", "description"]
+                                }
+                            },
+                            "multiple": { "type": "boolean" },
+                            "custom": { "type": "boolean" }
+                        },
+                        "required": ["question", "header", "options"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
     }
 }
 
@@ -439,6 +525,41 @@ mod tests {
             names,
             vec!["read", "write", "edit", "ls", "glob", "grep", "bash"]
         );
+    }
+
+    #[tokio::test]
+    async fn question_tool_routes_through_the_asker() {
+        use crate::session::ToolBox;
+        struct StubAsker;
+        #[async_trait]
+        impl QuestionAsker for StubAsker {
+            async fn ask(
+                &self,
+                session_id: &str,
+                questions: Vec<opencode_proto::QuestionV2Info>,
+            ) -> Result<Vec<Vec<String>>, String> {
+                assert_eq!(session_id, "ses_1");
+                assert_eq!(questions.len(), 1);
+                Ok(vec![vec!["yes".to_string()]])
+            }
+        }
+        let tb = NativeToolBox::new(".").with_question_asker(Arc::new(StubAsker), "ses_1");
+        let input = json!({
+            "questions": [{
+                "question": "Proceed?",
+                "header": "Confirm",
+                "options": [{ "label": "yes", "description": "go" }]
+            }]
+        });
+        let out = tb.invoke("question", input).await.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["answers"][0][0], "yes");
+        // Without an asker the tool is unavailable.
+        let bare = NativeToolBox::new(".");
+        assert!(bare
+            .invoke("question", json!({ "questions": [] }))
+            .await
+            .is_err());
     }
 
     // The native toolbox drives a real tool through the session runner loop.
