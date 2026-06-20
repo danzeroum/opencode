@@ -2488,9 +2488,10 @@ async fn v2_provider_list(
 }
 
 /// `GET /api/skill` — list skills (group `skill`). Matches the golden `v2.skill.list`: 200
-/// `{ location, data }` + 400/401. Skills are loaded from built-ins + `.opencode/skills` (a loading
-/// epic, see PENDENCIAS #2); until that lands the list is empty — the same wired-empty stance as the
-/// V1 `app.agents`/`command.list`.
+/// `{ location, data }` + 400/401. Loads real skills from the global config dir's `{skill,skills}` and
+/// the project's `.opencode/{skill,skills}` (glob `{*.md, **/SKILL.md}`, project overrides global by
+/// name), parsing each file's frontmatter (`name`/`description`/`slash`) + body (mirrors the TS skill
+/// loader). URL skill sources and built-ins are a follow-up.
 #[utoipa::path(
     get,
     path = "/api/skill",
@@ -2508,10 +2509,8 @@ async fn v2_skill_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<opencode_proto::SkillListResponse>, ApiError> {
     let location = resolve_location(&state, &params).await?;
-    Ok(Json(opencode_proto::SkillListResponse {
-        location,
-        data: Vec::new(),
-    }))
+    let data = load_skills(&location.directory);
+    Ok(Json(opencode_proto::SkillListResponse { location, data }))
 }
 
 /// `GET /api/command` — list commands (group `command`). Matches the golden `v2.command.list`: 200
@@ -3918,6 +3917,69 @@ fn load_commands(directory: &str) -> Vec<opencode_proto::CommandV2Info> {
     }
     let project = std::path::Path::new(directory).join(".opencode");
     for info in load_commands_from_base(&project) {
+        by_name.insert(info.name.clone(), info);
+    }
+    by_name.into_values().collect()
+}
+
+/// Load skill definitions from `<base>/skill` and `<base>/skills`. Mirrors the TS skill loader's glob
+/// `{*.md, **/SKILL.md}`: a top-level `*.md` (named by frontmatter `name`, else its file stem) or a
+/// nested `SKILL.md` (named by frontmatter `name`, else skipped). `content` is the body; `location` is
+/// the absolute file path.
+fn load_skills_from_base(base: &std::path::Path) -> Vec<opencode_proto::SkillV2Info> {
+    let mut out = Vec::new();
+    for sub in ["skill", "skills"] {
+        let dir = base.join(sub);
+        let mut files = Vec::new();
+        collect_md_files(&dir, &mut files);
+        files.retain(|p| {
+            p.parent() == Some(dir.as_path())
+                || p.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
+        });
+        files.sort();
+        files.dedup();
+        for file in files {
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let (front, body) = parse_md_frontmatter(&content);
+            let top_level = file.parent() == Some(dir.as_path());
+            let name = match front.get("name") {
+                Some(n) => n.clone(),
+                None if top_level => file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                None => continue, // nested file without a frontmatter name is skipped
+            };
+            if name.is_empty() {
+                continue;
+            }
+            out.push(opencode_proto::SkillV2Info {
+                name,
+                description: front.get("description").cloned(),
+                slash: front.get("slash").map(|s| s == "true"),
+                location: file.display().to_string(),
+                content: body,
+            });
+        }
+    }
+    out
+}
+
+/// Load all skills for a resolved location: global config dir (lower precedence) then the project's
+/// `.opencode` (overrides by name). Returns them sorted by name.
+fn load_skills(directory: &str) -> Vec<opencode_proto::SkillV2Info> {
+    let mut by_name: std::collections::BTreeMap<String, opencode_proto::SkillV2Info> =
+        std::collections::BTreeMap::new();
+    if let Some(global) = config_dir() {
+        for info in load_skills_from_base(&global) {
+            by_name.insert(info.name.clone(), info);
+        }
+    }
+    let project = std::path::Path::new(directory).join(".opencode");
+    for info in load_skills_from_base(&project) {
         by_name.insert(info.name.clone(), info);
     }
     by_name.into_values().collect()
@@ -5838,6 +5900,37 @@ mod tests {
         assert!(nested.description.is_none());
     }
 
+    #[test]
+    fn load_skills_from_base_reads_top_level_and_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        // top-level *.md → name from file stem (no frontmatter name).
+        std::fs::create_dir_all(dir.path().join("skill")).unwrap();
+        std::fs::write(
+            dir.path().join("skill/quick.md"),
+            "---\ndescription: A quick skill\nslash: true\n---\nQuick body.",
+        )
+        .unwrap();
+        // nested dir/SKILL.md → name from frontmatter.
+        std::fs::create_dir_all(dir.path().join("skill/deep")).unwrap();
+        std::fs::write(
+            dir.path().join("skill/deep/SKILL.md"),
+            "---\nname: deepskill\ndescription: Nested\n---\nDeep body.",
+        )
+        .unwrap();
+        // nested non-SKILL.md without a name → skipped.
+        std::fs::write(dir.path().join("skill/deep/other.md"), "ignored").unwrap();
+        let skills = load_skills_from_base(dir.path());
+        let quick = skills.iter().find(|s| s.name == "quick").unwrap();
+        assert_eq!(quick.description.as_deref(), Some("A quick skill"));
+        assert_eq!(quick.slash, Some(true));
+        assert_eq!(quick.content, "Quick body.");
+        assert!(quick.location.ends_with("quick.md"));
+        let deep = skills.iter().find(|s| s.name == "deepskill").unwrap();
+        assert_eq!(deep.content, "Deep body.");
+        // The nested non-SKILL.md file is not loaded.
+        assert!(!skills.iter().any(|s| s.content == "ignored"));
+    }
+
     #[tokio::test]
     async fn v2_command_list_loads_project_commands() {
         use tower::ServiceExt;
@@ -5892,10 +5985,9 @@ mod tests {
     #[tokio::test]
     async fn v2_catalog_lists_are_empty_until_loading_lands() {
         use tower::ServiceExt;
-        // `command` loads real `.opencode/command/*.md` data (see v2_command_list_loads_project_commands);
-        // the rest remain wired-empty until their loaders land.
+        // `command`/`skill` load real `.opencode/**.md` data (see their dedicated tests); the rest
+        // remain wired-empty until their loaders land.
         for (group, uri) in [
-            ("skill", "/api/skill?directory=/repo"),
             ("reference", "/api/reference?directory=/repo"),
             ("agent", "/api/agent?directory=/repo"),
         ] {
