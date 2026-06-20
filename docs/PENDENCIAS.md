@@ -12,6 +12,8 @@ O design põe a **precedência (REMOTE…MANAGED) por campo** como núcleo do Ad
   1. Leaves simples: `ServerConfig`, `LogLevel`, `LayoutConfig`, `AttachmentConfig`/`ImageAttachmentConfig`, `ConfigV2ReferenceGit`/`Local`, `ConfigV2ExperimentalPolicy`, `PolicyEffect`.
   2. Médios: `AgentConfig` (15 props), `ProviderConfig` (9), `McpLocalConfig`/`RemoteConfig`/`OAuthConfig`, `PermissionConfig`/`RuleConfig`/`ActionConfig`/`ObjectConfig`.
   3. O struct `Config` (com os maps + uniões inline) + `config.get`/`update` (leitura/merge).
+- **✅ Simplificação-chave (de-risca o resto):** o normalizador do `openapi-diff` **descarta `additionalProperties`**, então qualquer **campo-map normaliza pra `{type:object}`** → modelo esses como `serde_json::Value` (`#[schema(value_type=Object)]`) em vez de portar a estrutura aninhada. Isso elimina o pior do `ProviderConfig` (o map `models` com config de modelo completa), `AgentConfig.tools`, e os maps do topo do `Config` (`command`/`provider`/`mcp`/`tools`/`references`). **Só as uniões inline** precisam de modelagem real: `autoupdate` (bool|"notify"), `formatter`/`lsp` (bool|obj), `mcp` value (Local|Remote|{enabled}), `plugin` item (string|[string,obj]), `oauth` (McpOAuthConfig|false), `timeout` (int|false), `PermissionConfig`/`PermissionRuleConfig`. Atenção: objetos com `properties` tipadas (ex.: `ProviderConfig.options`) **não** colapsam — esses precisam ser modelados.
+  - Sub-fatias 1 ✅ (#88 leaves). 2 (Permission* + Mcp* + AgentConfig + ProviderConfig.options) e 3 (struct `Config` + rota) seguem.
 
 ### #2 — Escrita de agents/commands — Fase 2
 Editar agents/commands = escrever arquivos `.opencode/agents/*.md` e de comandos. O contrato é **read-only** (não há `agent.update`/`command.update`).
