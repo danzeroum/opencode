@@ -550,16 +550,17 @@ pub struct SessionShare {
     pub url: String,
 }
 
-/// V1 session timestamps (`{ created, updated, compacting?, archived? }`).
+/// V1 session timestamps (`{ created, updated, compacting?, archived? }`). `created`/`updated`/
+/// `compacting` are `integer` ms in the contract; `archived` is `number`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct SessionV1Time {
     /// Creation time (ms).
-    pub created: f64,
+    pub created: i64,
     /// Last-updated time (ms).
-    pub updated: f64,
+    pub updated: i64,
     /// When a compaction is in progress, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compacting: Option<f64>,
+    pub compacting: Option<i64>,
     /// Archival time, if archived.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived: Option<f64>,
@@ -1829,8 +1830,8 @@ mod tests {
             version: "1.0".into(),
             metadata: None,
             time: SessionV1Time {
-                created: 100.0,
-                updated: 200.0,
+                created: 100,
+                updated: 200,
                 compacting: None,
                 archived: None,
             },
