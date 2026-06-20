@@ -3416,7 +3416,7 @@ async fn permission_respond(
     }
 }
 
-/// Request body for `v2.session.permission.reply`: `{ reply: once|always|reject, message? }`.
+/// Request body for the permission reply routes: `{ reply: once|always|reject, message? }`.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 struct PermissionReplyBody {
     /// The user's decision.
@@ -3424,6 +3424,44 @@ struct PermissionReplyBody {
     /// Optional message accompanying the decision.
     #[serde(default)]
     message: Option<String>,
+}
+
+/// `POST /permission/{requestID}/reply` — V1 reply to a pending permission (group `permission`). Matches
+/// the golden `permission.reply`: 200 `true`, 400 union, 404 `PermissionNotFoundError`. Same resolution
+/// as `permission.respond` (once/always → Allow, reject → Deny), keyed only by the request id.
+#[utoipa::path(
+    post,
+    path = "/permission/{requestID}/reply",
+    operation_id = "permission.reply",
+    params(("requestID" = String, Path, description = "Permission request id")),
+    request_body = PermissionReplyBody,
+    responses(
+        (status = 200, description = "Permission processed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::PermissionNotFoundError)
+    ),
+    tag = "permission"
+)]
+async fn permission_reply(
+    State(state): State<ServerState>,
+    axum::extract::Path(request_id): axum::extract::Path<String>,
+    body: Option<Json<PermissionReplyBody>>,
+) -> Result<Json<bool>, PermissionRespondFailure> {
+    let reply = body.map(|Json(b)| b.reply).unwrap_or_default();
+    let decision = match reply.as_str() {
+        "once" | "always" => Decision::Allow,
+        "reject" => Decision::Deny("rejected by user".to_string()),
+        other => {
+            return Err(PermissionRespondFailure::BadRequest(format!(
+                "invalid reply: {other} (expected once|always|reject)"
+            )))
+        }
+    };
+    if state.runner.pending.resolve(&request_id, decision) {
+        Ok(Json(true))
+    } else {
+        Err(PermissionRespondFailure::NotFound(request_id))
+    }
 }
 
 /// `POST /api/session/{sessionID}/permission/{requestID}/reply` — V2 reply to a pending permission
@@ -3620,6 +3658,60 @@ async fn v2_session_question_reject(
 ) -> Result<axum::http::StatusCode, QuestionNotFound> {
     if state.runner.questions.reject(&request_id) {
         Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(QuestionNotFound(request_id))
+    }
+}
+
+/// `POST /question/{requestID}/reply` — V1 answer a pending question (group `question`). Matches the
+/// golden `question.reply`: 200 `true`, 400 union, 404 `QuestionNotFoundError`. Keyed only by the
+/// request id (unlike the session-scoped V2 route).
+#[utoipa::path(
+    post,
+    path = "/question/{requestID}/reply",
+    operation_id = "question.reply",
+    params(("requestID" = String, Path, description = "Question request id")),
+    request_body = QuestionReplyBody,
+    responses(
+        (status = 200, description = "Answered", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::QuestionNotFoundError)
+    ),
+    tag = "question"
+)]
+async fn question_reply(
+    State(state): State<ServerState>,
+    axum::extract::Path(request_id): axum::extract::Path<String>,
+    body: Option<Json<QuestionReplyBody>>,
+) -> Result<Json<bool>, QuestionNotFound> {
+    let answers = body.map(|Json(b)| b.answers).unwrap_or_default();
+    if state.runner.questions.reply(&request_id, answers) {
+        Ok(Json(true))
+    } else {
+        Err(QuestionNotFound(request_id))
+    }
+}
+
+/// `POST /question/{requestID}/reject` — V1 dismiss a pending question (group `question`). Matches the
+/// golden `question.reject`: 200 `true`, 400 union, 404 `QuestionNotFoundError`.
+#[utoipa::path(
+    post,
+    path = "/question/{requestID}/reject",
+    operation_id = "question.reject",
+    params(("requestID" = String, Path, description = "Question request id")),
+    responses(
+        (status = 200, description = "Rejected", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::QuestionNotFoundError)
+    ),
+    tag = "question"
+)]
+async fn question_reject(
+    State(state): State<ServerState>,
+    axum::extract::Path(request_id): axum::extract::Path<String>,
+) -> Result<Json<bool>, QuestionNotFound> {
+    if state.runner.questions.reject(&request_id) {
+        Ok(Json(true))
     } else {
         Err(QuestionNotFound(request_id))
     }
@@ -3859,9 +3951,12 @@ async fn v2_provider_get(
         v2_permission_saved_list,
         v2_session_permission_list,
         permission_respond,
+        permission_reply,
         v2_session_permission_reply,
         v2_session_question_reply,
         v2_session_question_reject,
+        question_reply,
+        question_reject,
         v2_question_request_list,
         v2_session_question_list,
         v2_session_context,
@@ -5431,11 +5526,14 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("permission") {
         router = router.route("/permission", get(permission_list));
+        router = router.route("/permission/{requestID}/reply", post(permission_reply));
         router = router.route("/api/permission/request", get(v2_permission_request_list));
         router = router.route("/api/permission/saved", get(v2_permission_saved_list));
     }
     if state.routes.handles("question") {
         router = router.route("/question", get(question_list));
+        router = router.route("/question/{requestID}/reply", post(question_reply));
+        router = router.route("/question/{requestID}/reject", post(question_reject));
         router = router.route("/api/question/request", get(v2_question_request_list));
     }
     if state.routes.handles("mcp") {
@@ -6784,6 +6882,59 @@ mod tests {
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn v1_permission_and_question_reply_routes_resolve() {
+        use tower::ServiceExt;
+        let pending = Arc::new(PendingPermissions::default());
+        let questions = Arc::new(PendingQuestions::default());
+        let (perm_id, prx) = pending.register("ses_1", "bash", serde_json::json!({}));
+        let (q_id, qrx) = questions.register("ses_1", Vec::new());
+        let state = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("permission,question"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices {
+                pending: pending.clone(),
+                questions: questions.clone(),
+                ..RunnerServices::default()
+            },
+            coordinator: SessionCoordinator::default(),
+        };
+        let post = |uri: String, body: &'static str| {
+            build_router(state()).oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+        };
+        // permission.reply → 200 true + the parked run gets Allow.
+        let resp = post(
+            format!("/permission/{perm_id}/reply"),
+            r#"{"reply":"once"}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(prx.await.unwrap(), Decision::Allow);
+        // question.reply → 200 true + the producer gets the answers.
+        let resp = post(format!("/question/{q_id}/reply"), r#"{"answers":[["a"]]}"#)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            qrx.await.unwrap(),
+            QuestionResolution::Answered(vec![vec!["a".to_string()]])
+        );
+        // question.reject on an unknown id → 404.
+        let resp = post("/question/qst_missing/reject".to_string(), "")
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);

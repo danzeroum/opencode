@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 62 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#135. **Engine**: runner loop completo + permission gating (#129–#131) + question flow fim-a-fim (#133–#134) + `session.prompt_async` (#135). CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
+> **Rotas nativas contrato-enforçadas: 65 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#136. **Engine**: runner loop completo + permission gating (#129–#131) + question flow fim-a-fim (#133–#134) + `session.prompt_async` (#135) + HITL resolve V1 `permission.reply`/`question.reply`/`reject` (#136). CI `rust` verde (#119). **Loading real**: `command`/`skill`/`agent` lêem `.opencode/**.md`. **Escrita real**: session CRUD (`/session`, `/session/{id}`) persiste no DB (#125–#127). **Engine — permission gating completo**: gate bloqueante `StorePermissionGate` (write-class pede aprovação) + store de pendências + listas + `permission.respond` resolve e acorda o run (#129–#130).
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
