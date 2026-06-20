@@ -222,6 +222,73 @@ pub struct FileNode {
     pub ignored: bool,
 }
 
+/// One hunk of a unified diff (`FileContent.patch.hunks` item). Mirrors the golden hunk shape:
+/// `{ oldStart, oldLines, newStart, newLines, lines }`, all required.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FilePatchHunk {
+    /// Start line in the old file.
+    #[serde(rename = "oldStart")]
+    pub old_start: i64,
+    /// Line count in the old file.
+    #[serde(rename = "oldLines")]
+    pub old_lines: i64,
+    /// Start line in the new file.
+    #[serde(rename = "newStart")]
+    pub new_start: i64,
+    /// Line count in the new file.
+    #[serde(rename = "newLines")]
+    pub new_lines: i64,
+    /// The hunk's diff lines.
+    pub lines: Vec<String>,
+}
+
+/// A structured unified diff (`FileContent.patch`). Mirrors the golden patch shape:
+/// `{ oldFileName, newFileName, oldHeader?, newHeader?, hunks, index? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FilePatch {
+    /// Old file name.
+    #[serde(rename = "oldFileName")]
+    pub old_file_name: String,
+    /// New file name.
+    #[serde(rename = "newFileName")]
+    pub new_file_name: String,
+    /// Optional old-file header.
+    #[serde(rename = "oldHeader", skip_serializing_if = "Option::is_none")]
+    pub old_header: Option<String>,
+    /// Optional new-file header.
+    #[serde(rename = "newHeader", skip_serializing_if = "Option::is_none")]
+    pub new_header: Option<String>,
+    /// The diff hunks.
+    pub hunks: Vec<FilePatchHunk>,
+    /// Optional git index line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+}
+
+/// 200 body of `file.read` (GET /file/content). Mirrors the golden `FileContent`: `{ type, content,
+/// diff?, patch?, encoding?, mimeType? }` (`type` is `"text"` | `"binary"`; `encoding` is `"base64"`
+/// for binary content).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FileContent {
+    /// `"text"` or `"binary"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The file content (UTF-8 text, or base64 when `encoding` is set).
+    pub content: String,
+    /// Optional unified-diff text (when the file differs from its baseline).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// Optional structured diff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<FilePatch>,
+    /// Content encoding (`"base64"` for binary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+    /// Optional MIME type.
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
 /// A filesystem entry returned by the V2 fs routes (`v2.fs.list` / `v2.fs.find`). Mirrors the golden
 /// `FileSystemEntry`: `{ path, type, mime }`, all required (`type` is `"file"` | `"directory"`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
