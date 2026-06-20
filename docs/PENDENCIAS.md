@@ -36,6 +36,7 @@ Hoje a política é "TS migra, Rust verifica". Para **desligar o TS**, o Rust pr
 A web dispara LLM real via `session.prompt`. Há 5 protocolos nativos (anthropic, openai-chat, gemini, bedrock, openai-responses). O TS cobre a cauda longa via `@ai-sdk/*`.
 - **Decisão necessária:** quais providers você realmente vai usar? Isso define o quanto precisamos portar/cobrir nativamente antes do cutover.
 - **Status:** sigo com o write-path usando os protocolos nativos existentes; cobertura ampla fica para a Fase 4.
+- **✅ Credenciais por API key RESOLVIDAS (#141):** `OpencodeCredentials` lê o `auth.json` do `opencode auth login` (`{ [providerID]: {type, key} }`) + `OPENCODE_AUTH_CONTENT`, com fallback p/ env var — então as chaves que a CLI/GUI guardam já funcionam no backend Rust. **Pendente:** (a) só o `Provider::Anthropic` tem engine no registry Rust (os outros 4 protocolos existem em `opencode-llm` mas faltam arms no `DefaultRegistry` + variantes em `Provider`); (b) **OAuth** (`type:"oauth"`, refresh de token) não é suportado — entradas oauth são puladas (cai no fallback env); (c) o **credential store V2** (tabela `credential` no DB, keyed por integração) não é lido — só o `auth.json` clássico. Decidir o escopo de (a)/(b) conforme os providers que você usa.
 
 ### #6 — Write-path do runner (épico — o linchpin do chat real)
 A rota `v2.session.messages` lê `session_message`, mas **nada grava ali ainda**: o runner Phase 4 é spike puro (sem persistência). Para o chat funcionar de verdade, falta o caminho de escrita:

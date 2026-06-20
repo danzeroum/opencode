@@ -21,7 +21,8 @@ use axum::{
 };
 use opencode_core::native_tools::{self, NativeToolBox};
 use opencode_core::provider::{
-    split_model, DefaultRegistry, EngineError, EngineSettings, EnvCredentials, ProviderRegistry,
+    split_model, DefaultRegistry, EngineError, EngineSettings, OpencodeCredentials,
+    ProviderRegistry,
 };
 use opencode_core::runner::SessionOutcome;
 use opencode_core::session::{
@@ -106,7 +107,9 @@ pub(crate) struct EnvEngineFactory {
 
 impl EngineFactory for EnvEngineFactory {
     fn build(&self, model: &str) -> Result<Arc<dyn LlmEngine>, EngineError> {
-        let settings = EngineSettings::resolve(model, self.endpoint.clone(), &EnvCredentials)?;
+        // Fresh per build so a mid-session `opencode auth login` is picked up; env-var fallback applies.
+        let settings =
+            EngineSettings::resolve(model, self.endpoint.clone(), &OpencodeCredentials::load())?;
         self.registry.engine(&settings)
     }
 }
