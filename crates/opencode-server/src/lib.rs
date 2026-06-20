@@ -3732,8 +3732,9 @@ async fn vcs_get(
 }
 
 /// `GET /agent` — list available agents (group `instance`). Matches the golden `app.agents`: 200
-/// `[Agent]`, 400 `BadRequestError`. Agent *loading* (built-in defaults + `.opencode/agents/*.md`) is a
-/// follow-up; until then this is empty.
+/// `[Agent]`, 400 `BadRequestError`. Loads the same `.opencode` agent markdown as `v2.agent.list` and
+/// maps each to the V1 `Agent` shape (config-permission ruleset + the V1-only `topP`/`temperature`/
+/// `native` fields are follow-ups, defaulted).
 #[utoipa::path(
     get,
     path = "/agent",
@@ -3748,13 +3749,17 @@ async fn vcs_get(
     ),
     tag = "instance"
 )]
-async fn app_agents(State(_state): State<ServerState>) -> Json<Vec<opencode_proto::Agent>> {
-    Json(Vec::new())
+async fn app_agents(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<opencode_proto::Agent>> {
+    let dir = v1_load_dir(&params);
+    Json(load_agents(&dir).into_iter().map(agent_v2_to_v1).collect())
 }
 
 /// `GET /command` — list available commands (group `instance`). Matches the golden `command.list`: 200
-/// `[Command]`, 400 `BadRequestError`. Command *loading* (built-in + `.opencode/command/*.md` + MCP/
-/// skills) is a follow-up; until then this is empty.
+/// `[Command]`, 400 `BadRequestError`. Loads the same `.opencode` command markdown as `v2.command.list`
+/// and maps each to the V1 `Command` shape (`source: "command"`; MCP/skill-sourced commands and
+/// argument `hints` are follow-ups).
 #[utoipa::path(
     get,
     path = "/command",
@@ -3769,8 +3774,16 @@ async fn app_agents(State(_state): State<ServerState>) -> Json<Vec<opencode_prot
     ),
     tag = "instance"
 )]
-async fn command_list(State(_state): State<ServerState>) -> Json<Vec<opencode_proto::Command>> {
-    Json(Vec::new())
+async fn command_list(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<opencode_proto::Command>> {
+    let dir = v1_load_dir(&params);
+    Json(
+        load_commands(&dir)
+            .into_iter()
+            .map(command_v2_to_v1)
+            .collect(),
+    )
 }
 
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
@@ -4087,6 +4100,68 @@ fn load_agents(directory: &str) -> Vec<opencode_proto::AgentV2Info> {
         by_id.insert(info.id.clone(), info);
     }
     by_id.into_values().collect()
+}
+
+/// The directory to load `.opencode/*` from for the V1 (`app.agents`/`command.list`) routes: the
+/// `directory` query param, else the server's cwd. (Unlike the V2 routes, these don't resolve a
+/// project — the markdown loaders only need a base path.)
+fn v1_load_dir(params: &std::collections::HashMap<String, String>) -> String {
+    params
+        .get("directory")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        })
+}
+
+/// Map a loaded V2 agent to the V1 `Agent` wire shape (`app.agents`). The config-permission ruleset and
+/// the V1-only `topP`/`temperature`/`native` fields aren't captured by the markdown loader, so they
+/// default (`permission: []`, `options: {}`).
+fn agent_v2_to_v1(a: opencode_proto::AgentV2Info) -> opencode_proto::Agent {
+    let mode = match a.mode {
+        opencode_proto::AgentMode::Subagent => "subagent",
+        opencode_proto::AgentMode::Primary => "primary",
+        opencode_proto::AgentMode::All => "all",
+    }
+    .to_string();
+    let variant = a.model.as_ref().and_then(|m| m.variant.clone());
+    opencode_proto::Agent {
+        name: a.id,
+        description: a.description,
+        mode,
+        native: None,
+        hidden: Some(a.hidden),
+        top_p: None,
+        temperature: None,
+        color: a.color,
+        permission: Vec::new(),
+        model: a.model.map(|m| opencode_proto::AgentModel {
+            model_id: m.id,
+            provider_id: m.provider_id,
+        }),
+        variant,
+        prompt: a.system,
+        options: serde_json::json!({}),
+        steps: a.steps.map(|s| s as f64),
+    }
+}
+
+/// Map a loaded V2 command to the V1 `Command` wire shape (`command.list`). `model` is rendered back to
+/// the `provider/model` string form; `hints` defaults to `[]` (argument hints aren't parsed yet).
+fn command_v2_to_v1(c: opencode_proto::CommandV2Info) -> opencode_proto::Command {
+    opencode_proto::Command {
+        name: c.name,
+        description: c.description,
+        agent: c.agent,
+        model: c.model.map(|m| format!("{}/{}", m.provider_id, m.id)),
+        source: Some("command".to_string()),
+        template: c.template,
+        subtask: c.subtask,
+        hints: Vec::new(),
+    }
 }
 
 /// Recursively merge `overlay` into `base`: objects merge key-by-key, everything else (scalars/arrays)
@@ -5546,9 +5621,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_and_command_lists_are_empty_until_loading_lands() {
+    async fn v1_agent_and_command_lists_load_from_opencode_dir() {
         use tower::ServiceExt;
-        for uri in ["/agent", "/command"] {
+        // A temp project dir with one agent + one command under `.opencode`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode/agent")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode/command")).unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/agent/helper.md"),
+            "---\ndescription: A helper\nmodel: anthropic/claude-x\n---\nBe helpful.",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/command/ship.md"),
+            "---\ndescription: Ship it\n---\nShip the change.",
+        )
+        .unwrap();
+        for (uri, want_name) in [("/agent", "helper"), ("/command", "ship")] {
             let state = ServerState {
                 ctx: AppContext::in_memory(),
                 routes: RouteTable::parse("instance"),
@@ -5556,10 +5645,11 @@ mod tests {
                 runner: RunnerServices::default(),
                 coordinator: SessionCoordinator::default(),
             };
+            let full = format!("{uri}?directory={}", dir.path().display());
             let resp = build_router(state)
                 .oneshot(
                     axum::extract::Request::builder()
-                        .uri(uri)
+                        .uri(&full)
                         .body(axum::body::Body::empty())
                         .unwrap(),
                 )
@@ -5570,7 +5660,10 @@ mod tests {
                 .await
                 .unwrap();
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(v, serde_json::json!([]), "{uri}");
+            assert!(
+                v.as_array().unwrap().iter().any(|x| x["name"] == want_name),
+                "{uri} should contain {want_name}: {v}"
+            );
         }
     }
 
