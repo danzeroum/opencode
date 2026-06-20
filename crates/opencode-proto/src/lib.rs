@@ -30,6 +30,14 @@ pub struct Health {
     pub version: String,
 }
 
+/// 200 body of `v2.health.get` (GET /api/health): `{ healthy: true }`. (The golden constrains
+/// `healthy` to the literal `true`; the contract normalizer drops the enum, so a `bool` matches.)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct HealthV2 {
+    /// Always `true` while the server is responding.
+    pub healthy: bool,
+}
+
 /// Tagged error envelope mirroring Effect `Schema.TaggedError` serialization (`_tag` + message).
 ///
 /// Rust libraries return their own `thiserror` enums; at the HTTP edge they are serialized

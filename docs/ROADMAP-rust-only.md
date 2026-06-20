@@ -4,7 +4,7 @@
 >
 > **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
 >
-> **Rotas nativas contrato-enforçadas: 37 paths** · PRs desta rodada autônoma: #69–#102.
+> **Rotas nativas contrato-enforçadas: 38 paths** · PRs desta rodada autônoma: #69–#103.
 
 ## Como trabalho
 - Uma **fatia por PR**, contrato-enforçado (`xtask openapi-diff`), `cargo test` + `fmt` + `clippy -D warnings` verdes antes de mergear.
@@ -26,6 +26,7 @@
 - ⏳ **Schema ownership**: Rust passa a **aplicar** migrações (hoje só verifica). Bloqueador pra desligar o TS. (ver PENDENCIAS #4)
 
 ## Fase 1 — Session core (chat) 🔄
+- ✅ 1u — `v2.health.get` (`GET /api/health`, `{ healthy: true }`, #103) — liveness V2 do GUI
 - ✅ 1a — proto `SessionMessage` (união 8 variantes + content + tool-state) — **#69**
 - ✅ 1b — read-store `session_message` (seq-window + cursor) — **#70**
 - ✅ 1c — rota `GET /api/session/{id}/message` (cursor, 404, reconstrução) — **#71**

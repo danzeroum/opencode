@@ -2429,6 +2429,24 @@ async fn v2_agent_list(
     }))
 }
 
+/// `GET /api/health` — V2 liveness (group `health`). Matches the golden `v2.health.get`: 200
+/// `{ healthy: true }` + 400/401. The Rust server is serving by definition when it answers, so this
+/// always reports `healthy: true`.
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    operation_id = "v2.health.get",
+    responses(
+        (status = 200, description = "Health", body = opencode_proto::HealthV2),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "health"
+)]
+async fn v2_health_get() -> Json<opencode_proto::HealthV2> {
+    Json(opencode_proto::HealthV2 { healthy: true })
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2582,11 +2600,13 @@ async fn v2_provider_get(
         v2_command_list,
         v2_reference_list,
         v2_agent_list,
+        v2_health_get,
         v2_location_get,
         v2_provider_get
     ),
     components(schemas(
         opencode_proto::Health,
+        opencode_proto::HealthV2,
         opencode_proto::ErrorEnvelope,
         opencode_proto::BadRequestError,
         opencode_proto::BadRequestData,
@@ -3280,6 +3300,7 @@ pub fn build_router(state: ServerState) -> Router {
     // Native contract routes are enabled here as they are cut over, gated by the route table.
     if state.routes.handles("health") {
         router = router.route("/health", get(health));
+        router = router.route("/api/health", get(v2_health_get));
     }
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
@@ -4447,6 +4468,33 @@ mod tests {
             .unwrap(),
             serde_json::json!({ "status": "needs_client_registration", "error": "boom" })
         );
+    }
+
+    #[tokio::test]
+    async fn v2_health_reports_healthy() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("health"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!({ "healthy": true }));
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 /// `openapi-diff` then fails if its generated shape diverges from the golden contract.
 const CUTOVER_PATHS: &[&str] = &[
     "/global/health",
+    "/api/health",
     "/path",
     "/find/file",
     "/find",
