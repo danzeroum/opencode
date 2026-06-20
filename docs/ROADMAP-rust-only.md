@@ -43,7 +43,7 @@
 - ✅ 1s — `permission.list` + `question.list` (vazios até a engine) — **#77**
 - ✅ 1t — `vcs.get` (`GET /vcs`, branch/default_branch via git best-effort) — **#78**
 - ⏳ 1p — `session.status` / `session.diff` — **dependem da engine de execução** (estado live / snapshots), não enxutas
-- ⏳ 1q — `session.update` / `revert` / `share` / `command` / `summarize` — **dependem do write-path** (PENDENCIAS #6)
+- 🔄 1q — mutações `update`/`revert`/`unrevert`/`share`/`unshare` — **tipo `Session` v1 pronto (#83)**. Próximo passo: leitura/escrita da projeção da sessão. **Nota de design:** o `SessionRecord` (v2) não lê os campos v1 (slug, version, share, summary, metadata, permission, revert, compacting) → ou estender o `SessionRecord` compartilhado (churn em ~7 sites + path v2) **ou** adicionar `SessionStore::get_full` + `update` com um `SessionV1Record` (Memory best-effort nos testes). Recomendo o segundo (aditivo, menor blast radius). `command`/`summarize` usam a execução (write-path pronto).
 - 🔄 1m — `permission.list` ✅ (#77, vazio até a engine produzir) · `permission.respond` ⏳ (precisa engine)
 - 🔄 1n — `question.list` ✅ (#77, idem) · `question.reply`/`reject` ⏳ (precisa engine)
 
