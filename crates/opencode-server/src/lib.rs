@@ -2590,6 +2590,43 @@ async fn v2_session_question_list(
     }))
 }
 
+/// `GET /api/session/{sessionID}/context` — a session's prepared context (group `session`). Matches the
+/// golden `v2.session.context`: 200 `{ data: [SessionMessage] }`, 400/401, 404 `SessionNotFoundError`,
+/// 500 `UnknownError1`. The "context" is the timeline the runner prepares for the next turn; until that
+/// engine exists this is empty (404s an unknown session).
+#[utoipa::path(
+    get,
+    path = "/api/session/{sessionID}/context",
+    operation_id = "v2.session.context",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "Session context", body = opencode_proto::SessionContextResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError),
+        (status = 500, description = "Unknown error", body = opencode_proto::TaggedUnknownError)
+    ),
+    tag = "sessions"
+)]
+async fn v2_session_context(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::SessionContextResponse>, SessionGetError> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| SessionGetError::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(SessionGetError::NotFound(session_id));
+    }
+    Ok(Json(opencode_proto::SessionContextResponse {
+        data: Vec::new(),
+    }))
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -2749,6 +2786,7 @@ async fn v2_provider_get(
         v2_session_permission_list,
         v2_question_request_list,
         v2_session_question_list,
+        v2_session_context,
         v2_fs_list,
         v2_fs_find,
         v2_fs_read,
@@ -2919,6 +2957,8 @@ async fn v2_provider_get(
         opencode_proto::SessionQuestionListResponse,
         opencode_proto::FileSystemEntry,
         opencode_proto::FsListResponse,
+        opencode_proto::SessionContextResponse,
+        opencode_proto::TaggedUnknownError,
         SessionUpdateBody,
         RevertBody
     )),
@@ -3721,6 +3761,7 @@ pub fn build_router(state: ServerState) -> Router {
             "/api/session/{sessionID}/question",
             get(v2_session_question_list),
         );
+        router = router.route("/api/session/{sessionID}/context", get(v2_session_context));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}", patch(session_update));
         router = router.route("/session/{sessionID}/revert", post(session_revert));
@@ -4919,6 +4960,58 @@ mod tests {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["_tag"], "SessionNotFoundError", "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn v2_session_context_404s_unknown_and_is_empty_for_known() {
+        use tower::ServiceExt;
+        // Unknown session → 404 SessionNotFoundError.
+        let empty = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(empty)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_missing/context")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // Known session → 200 with an empty data array.
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/session/ses_1/context")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"], serde_json::json!([]));
     }
 
     #[tokio::test]
