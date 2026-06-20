@@ -353,6 +353,77 @@ pub struct AgentConfig {
     pub permission: Option<PermissionConfig>,
 }
 
+/// A request timeout (ms), or `false` to disable it (`anyOf[integer, false]`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum TimeoutConfig {
+    /// Timeout in milliseconds.
+    Ms(i64),
+    /// `false` — no timeout.
+    Disabled(bool),
+}
+
+/// SDK options for a provider (`ProviderConfig.options`). A typed object (not a bare map), so it's
+/// modeled explicitly; the `timeout`/`headerTimeout` fields are `int | false`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderOptionsConfig {
+    /// API key.
+    #[serde(rename = "apiKey", skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Base URL override.
+    #[serde(rename = "baseURL", skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Enterprise URL.
+    #[serde(rename = "enterpriseUrl", skip_serializing_if = "Option::is_none")]
+    pub enterprise_url: Option<String>,
+    /// Whether to set a cache key.
+    #[serde(rename = "setCacheKey", skip_serializing_if = "Option::is_none")]
+    pub set_cache_key: Option<bool>,
+    /// Full-request timeout (`int | false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutConfig>,
+    /// Response-headers timeout (`int | false`).
+    #[serde(rename = "headerTimeout", skip_serializing_if = "Option::is_none")]
+    pub header_timeout: Option<TimeoutConfig>,
+    /// Per-chunk timeout (ms).
+    #[serde(rename = "chunkTimeout", skip_serializing_if = "Option::is_none")]
+    pub chunk_timeout: Option<i64>,
+}
+
+/// A provider override in config (`config.provider[*]`). All fields optional; `models` is a map of
+/// model overrides → `Value` (the normalizer drops the nested structure).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderConfig {
+    /// API style override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    /// Display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Env vars that supply the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<String>>,
+    /// Provider id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// npm package (for AI-SDK providers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm: Option<String>,
+    /// Model-id allowlist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whitelist: Option<Vec<String>>,
+    /// Model-id blocklist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blacklist: Option<Vec<String>>,
+    /// SDK options.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<ProviderOptionsConfig>,
+    /// Per-model overrides (map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub models: Option<serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +562,26 @@ mod tests {
         let back: AgentConfig =
             serde_json::from_value(serde_json::to_value(&agent).unwrap()).unwrap();
         assert_eq!(back, agent);
+    }
+
+    #[test]
+    fn provider_config_with_timeout_union_round_trips() {
+        let p: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "name": "Anthropic",
+            "env": ["ANTHROPIC_API_KEY"],
+            "options": { "apiKey": "sk-x", "timeout": 30000, "headerTimeout": false },
+            "models": { "claude": { "id": "claude" } }
+        }))
+        .unwrap();
+        assert_eq!(p.name.as_deref(), Some("Anthropic"));
+        let opts = p.options.as_ref().unwrap();
+        assert_eq!(opts.api_key.as_deref(), Some("sk-x"));
+        assert_eq!(opts.timeout, Some(TimeoutConfig::Ms(30000)));
+        assert_eq!(opts.header_timeout, Some(TimeoutConfig::Disabled(false)));
+        // The nested model map is preserved as free JSON.
+        assert_eq!(p.models.as_ref().unwrap()["claude"]["id"], "claude");
+        let back: ProviderConfig =
+            serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 }
