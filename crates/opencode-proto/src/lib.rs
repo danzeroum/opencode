@@ -655,6 +655,89 @@ pub struct Session {
     pub revert: Option<SessionRevert>,
 }
 
+/// An agent's model pin (`{ modelID, providerID }`) — note `modelID`, distinct from [`ModelRef`]'s `id`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AgentModel {
+    /// Model id.
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+    /// Provider id.
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+}
+
+/// A resolved agent (`app.agents`) — `packages/core/src/agent`. Required: `name`, `mode`,
+/// `permission`, `options`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct Agent {
+    /// Agent name.
+    pub name: String,
+    /// Description, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `subagent` | `primary` | `all`.
+    pub mode: String,
+    /// Whether this is a built-in (native) agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native: Option<bool>,
+    /// Hidden from the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// Nucleus-sampling top-p.
+    #[serde(rename = "topP", skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Sampling temperature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Display color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Permission ruleset (`[PermissionRule]`).
+    pub permission: Vec<PermissionRule>,
+    /// Pinned model, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentModel>,
+    /// Experimental-mode variant, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    /// System prompt, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Provider/AI-SDK options (free-form).
+    #[schema(value_type = Object)]
+    pub options: serde_json::Value,
+    /// Max steps per turn, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<f64>,
+}
+
+/// A resolved command (`command.list`) — `packages/core/src/command`. Required: `name`, `template`,
+/// `hints`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Command {
+    /// Command name (the `/name`).
+    pub name: String,
+    /// Description, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Agent that runs it, if pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Model override, if pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `command` | `mcp` | `skill`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The prompt template.
+    pub template: String,
+    /// Whether it runs as a subtask.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtask: Option<bool>,
+    /// Argument hints.
+    pub hints: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Project read contract (`project.list` — GET /project). `Project` mirrors
 // `packages/core/src/project/sql.ts`; the `icon_*` columns fold into `icon`.

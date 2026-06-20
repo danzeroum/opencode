@@ -55,8 +55,8 @@
 - ⏳ 2a — `config.get` / `config.update`
 - ⏳ 2b — **config com proveniência** (cascata 7 níveis) — capacidade nova (ver PENDENCIAS #1)
 - ⏳ 2c — `provider.list` admin + `provider.auth` (escrita de credencial) + teste de conexão
-- ⏳ 2d — agents: `app.agents` (list) + **escrita** `.opencode/agents/*.md` (ver PENDENCIAS #2)
-- ⏳ 2e — commands: `command.list` + escrita
+- 🔄 2d — agents: `app.agents` rota wirada + tipos `Agent`/`AgentModel` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/agents/*.md`) + escrita (PENDENCIAS #2)
+- 🔄 2e — commands: `command.list` rota wirada + tipo `Command` (#87, retorna `[]`); falta **loading** (built-in + `.opencode/command/*.md` + MCP/skills) + escrita
 - ⏳ 2f — políticas (permission rules)
 - ⏳ 2g — snapshots timeline (`session.revert` ligado à UI)
 - ⏳ 2h — shared list

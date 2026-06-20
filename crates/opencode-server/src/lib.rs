@@ -2450,6 +2450,8 @@ async fn v2_provider_get(
         session_update,
         session_revert,
         session_unrevert,
+        app_agents,
+        command_list,
         global_dispose,
         instance_dispose,
         file_list,
@@ -2560,6 +2562,9 @@ async fn v2_provider_get(
         opencode_proto::PermissionRule,
         opencode_proto::PermissionAction,
         opencode_proto::SessionBusyError,
+        opencode_proto::Agent,
+        opencode_proto::AgentModel,
+        opencode_proto::Command,
         SessionUpdateBody,
         RevertBody
     )),
@@ -2735,6 +2740,48 @@ async fn vcs_get(
     })
 }
 
+/// `GET /agent` — list available agents (group `instance`). Matches the golden `app.agents`: 200
+/// `[Agent]`, 400 `BadRequestError`. Agent *loading* (built-in defaults + `.opencode/agents/*.md`) is a
+/// follow-up; until then this is empty.
+#[utoipa::path(
+    get,
+    path = "/agent",
+    operation_id = "app.agents",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "List of agents", body = Vec<opencode_proto::Agent>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn app_agents(State(_state): State<ServerState>) -> Json<Vec<opencode_proto::Agent>> {
+    Json(Vec::new())
+}
+
+/// `GET /command` — list available commands (group `instance`). Matches the golden `command.list`: 200
+/// `[Command]`, 400 `BadRequestError`. Command *loading* (built-in + `.opencode/command/*.md` + MCP/
+/// skills) is a follow-up; until then this is empty.
+#[utoipa::path(
+    get,
+    path = "/command",
+    operation_id = "command.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "List of commands", body = Vec<opencode_proto::Command>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn command_list(State(_state): State<ServerState>) -> Json<Vec<opencode_proto::Command>> {
+    Json(Vec::new())
+}
+
 /// `GET /permission` — pending permission requests (group `permission`). Matches the golden
 /// `permission.list`: 200 `[PermissionRequest]`, 400 `BadRequestError`. Pending requests are ephemeral
 /// execution state; until the native runner produces them this is empty (no in-flight approvals).
@@ -2837,6 +2884,8 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/{sessionID}/abort", post(session_abort));
         router = router.route("/instance/dispose", post(instance_dispose));
         router = router.route("/vcs", get(vcs_get));
+        router = router.route("/agent", get(app_agents));
+        router = router.route("/command", get(command_list));
     }
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
@@ -3786,6 +3835,35 @@ mod tests {
         // No repo → both fields omitted (object present, branch absent).
         assert!(v.is_object());
         assert!(v.get("branch").is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_and_command_lists_are_empty_until_loading_lands() {
+        use tower::ServiceExt;
+        for uri in ["/agent", "/command"] {
+            let state = ServerState {
+                ctx: AppContext::in_memory(),
+                routes: RouteTable::parse("instance"),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v, serde_json::json!([]), "{uri}");
+        }
     }
 
     #[tokio::test]
