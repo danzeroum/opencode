@@ -18,7 +18,8 @@ O design põe a **precedência (REMOTE…MANAGED) por campo** como núcleo do Ad
 ### #2 — Escrita de agents/commands — Fase 2
 Editar agents/commands = escrever arquivos `.opencode/agents/*.md` e de comandos. O contrato é **read-only** (não há `agent.update`/`command.update`).
 - **Decisão necessária:** criar endpoints de escrita nativos (eu proponho o shape) OU um endpoint genérico de file-write. Recomendo endpoints dedicados.
-- **Status:** farei list/leitura primeiro; escrita aguarda decisão.
+- **✅ Leitura RESOLVIDA (#120–#123):** `command`/`skill`/`agent` (V2 `/api/*` e V1 `/agent`,`/command`) agora **carregam dados reais** de `{command,commands,skill,skills,agent,agents,mode,modes}/**/*.md` (global config dir + projeto `.opencode`, projeto sobrescreve), com parser de frontmatter próprio (sem dep YAML). **Só a escrita aguarda esta decisão.**
+- **Lacunas de leitura conhecidas (não bloqueiam):** expansão `permission`→ruleset (hoje `[]`), built-ins (`init`/`review`, agentes default), comandos via MCP/skills, `hints`/`topP`/`temperature`/`native` (campos V1), e `v2.reference.list` (git refs precisam de clone).
 
 ### #3 — Local do frontend
 O README do handoff cita `packages/console/app` (SolidJS), mas esse diretório está **vazio**; a GUI web real é `packages/app` (+ `ui`). 
