@@ -2635,6 +2635,93 @@ async fn session_prompt_async(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Request body for `session.init`: `{ providerID, modelID, messageID }` (lenient; `messageID` is
+/// accepted but ignored for now via serde's default unknown-field handling).
+#[derive(Default, serde::Deserialize, utoipa::ToSchema)]
+struct SessionInitBody {
+    #[serde(rename = "providerID", default)]
+    provider_id: Option<String>,
+    #[serde(rename = "modelID", default)]
+    model_id: Option<String>,
+}
+
+/// The prompt the `session.init` turn runs — sets up an `AGENTS.md` for the project (the native
+/// equivalent of the built-in `init` command's bundled instruction).
+const INIT_PROMPT: &str =
+    "Analyze this codebase and create (or update) an `AGENTS.md` file at the \
+    project root. Document: the build, test, and lint commands; the code style and conventions in \
+    use; and the high-level project structure. Inspect existing config and source to be accurate, \
+    and keep it concise.";
+
+/// `POST /session/{sessionID}/init` — run the project-init turn (group `session`). Matches the golden
+/// `session.init`: 200 `true`, 400 union, 404 `NotFoundError`. Admits the AGENTS.md-setup prompt to the
+/// session (background drive, like `prompt_async`) and acknowledges with `true`.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/init",
+    operation_id = "session.init",
+    params(("sessionID" = String, Path, description = "Session id")),
+    request_body = SessionInitBody,
+    responses(
+        (status = 200, description = "Initialized", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_init(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    body: Option<Json<SessionInitBody>>,
+) -> Result<Json<bool>, PromptAsyncFailure> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let record = state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| PromptAsyncFailure::BadRequest(e.to_string()))?
+        .ok_or_else(|| PromptAsyncFailure::NotFound(session_id.clone()))?;
+    // Model: the body selector, else the session's pinned `{ id, providerID }`.
+    let model = match (&body.provider_id, &body.model_id) {
+        (Some(p), Some(m)) => format!("{p}/{m}"),
+        _ => record
+            .model
+            .as_ref()
+            .and_then(|m| {
+                let provider = m.get("providerID").and_then(|v| v.as_str())?;
+                let id = m.get("id").and_then(|v| v.as_str())?;
+                Some(format!("{provider}/{id}"))
+            })
+            .ok_or_else(|| {
+                PromptAsyncFailure::BadRequest(
+                    "no model: provide providerID+modelID or pin one on the session".to_string(),
+                )
+            })?,
+    };
+    if split_model(&model).is_err() {
+        return Err(PromptAsyncFailure::BadRequest(format!(
+            "invalid model: {model}"
+        )));
+    }
+    state.ctx.metrics().record_prompt();
+    let live: Arc<dyn TurnRunner> = Arc::new(LiveTurnRunner {
+        ctx: state.ctx.clone(),
+        runner: state.runner.clone(),
+    });
+    state.coordinator.admit(
+        live,
+        session_id,
+        AdmittedPrompt {
+            model,
+            prompt: INIT_PROMPT.to_string(),
+            system: Vec::new(),
+            step_limit: default_step_limit(),
+        },
+    );
+    Ok(Json(true))
+}
+
 /// Error responder for `session.update`: 404 `NotFoundError`, or a generic 500. The declared 400 union
 /// covers a malformed body (axum rejects it before the handler).
 pub enum SessionMutateFailure {
@@ -3914,6 +4001,7 @@ async fn v2_provider_get(
         session_get_v1,
         session_delete,
         session_prompt_async,
+        session_init,
         session_update,
         session_revert,
         session_unrevert,
@@ -4165,6 +4253,7 @@ async fn v2_provider_get(
         SessionCreateBody,
         PromptAsyncBody,
         ModelSelector,
+        SessionInitBody,
         RevertBody
     )),
     tags(
@@ -5584,6 +5673,7 @@ pub fn build_router(state: ServerState) -> Router {
             "/session/{sessionID}/prompt_async",
             post(session_prompt_async),
         );
+        router = router.route("/session/{sessionID}/init", post(session_init));
         router = router.route(
             "/session/{sessionID}/permissions/{permissionID}",
             post(permission_respond),
@@ -7289,6 +7379,60 @@ mod tests {
                     .uri("/session/ses_missing/prompt_async")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"parts":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn session_init_admits_and_404s_unknown() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let state = || ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions: sessions.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        // Known session + explicit model → 200 true + a drain task spawned.
+        let st = state();
+        let coordinator = st.coordinator.clone();
+        let resp = build_router(st)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_1/init")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"providerID":"anthropic","modelID":"claude-x","messageID":"msg_1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"true");
+        assert!(coordinator.spawn_count() >= 1);
+        // Unknown session → 404.
+        let resp = build_router(state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_missing/init")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"providerID":"anthropic","modelID":"claude-x","messageID":"msg_1"}"#,
+                    ))
                     .unwrap(),
             )
             .await
