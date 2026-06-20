@@ -157,6 +157,111 @@ pub fn project_turn(
     out
 }
 
+/// The parsed `input` arguments a stored tool state carries (the running/completed/error states keep
+/// the parsed object; a still-pending call has only the raw string, so `{}`).
+fn tool_state_input(state: &SessionMessageToolState) -> serde_json::Value {
+    match state {
+        SessionMessageToolState::Pending { .. } => serde_json::json!({}),
+        SessionMessageToolState::Running { input, .. }
+        | SessionMessageToolState::Completed { input, .. }
+        | SessionMessageToolState::Error { input, .. } => input.clone(),
+    }
+}
+
+/// The result payload a stored tool state should feed back to the model, if it finished: the original
+/// `result` value when captured, else the output content as text; an errored call feeds its message.
+fn tool_state_result(state: &SessionMessageToolState) -> Option<serde_json::Value> {
+    match state {
+        SessionMessageToolState::Completed {
+            result, content, ..
+        } => Some(
+            result
+                .clone()
+                .unwrap_or_else(|| serde_json::Value::String(tool_output_text(content))),
+        ),
+        SessionMessageToolState::Error { error, .. } => {
+            Some(serde_json::Value::String(error.message.clone()))
+        }
+        SessionMessageToolState::Pending { .. } | SessionMessageToolState::Running { .. } => None,
+    }
+}
+
+/// Concatenate a tool state's output content blocks into text (fallback when no `result` was stored).
+fn tool_output_text(content: &[ToolContent]) -> String {
+    let mut out = String::new();
+    for block in content {
+        if let ToolContent::Text { text } = block {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+/// Rebuild the LLM conversation from the stored timeline, so a new turn can be **seeded with prior
+/// history** (the model sees the whole conversation, not just the latest prompt). The inverse direction
+/// of [`project_turn`]:
+/// - `user`/`synthetic` → a `user` [`Message`] with the text.
+/// - `assistant` → an `assistant` message whose text blocks become `Text` parts and tool blocks become
+///   `ToolCall` parts, followed (when any tool finished) by a `tool` message carrying the `ToolResult`s
+///   correlated by call id — the shape `project_turn` expects on the next round.
+/// - reasoning blocks and marker/shell/compaction entries are not replayed into the model context.
+pub fn timeline_to_llm(timeline: &[SessionMessage]) -> Vec<Message> {
+    let mut out = Vec::new();
+    for entry in timeline {
+        match entry {
+            SessionMessage::User { text, .. } | SessionMessage::Synthetic { text, .. } => {
+                out.push(Message {
+                    role: Role::User,
+                    content: vec![ContentPart::Text(text.clone())],
+                });
+            }
+            SessionMessage::Assistant { content, .. } => {
+                let mut assistant = Vec::new();
+                let mut results = Vec::new();
+                for block in content {
+                    match block {
+                        SessionMessageAssistantContent::Text { text, .. } => {
+                            assistant.push(ContentPart::Text(text.clone()));
+                        }
+                        SessionMessageAssistantContent::Reasoning { .. } => {}
+                        SessionMessageAssistantContent::Tool {
+                            id, name, state, ..
+                        } => {
+                            assistant.push(ContentPart::ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input: tool_state_input(state),
+                            });
+                            if let Some(result) = tool_state_result(state) {
+                                results.push(ContentPart::ToolResult {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    result,
+                                });
+                            }
+                        }
+                    }
+                }
+                if !assistant.is_empty() {
+                    out.push(Message {
+                        role: Role::Assistant,
+                        content: assistant,
+                    });
+                }
+                if !results.is_empty() {
+                    out.push(Message {
+                        role: Role::Tool,
+                        content: results,
+                    });
+                }
+            }
+            // Marker/shell/compaction entries aren't replayed into the model context.
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +406,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn timeline_to_llm_rebuilds_conversation_for_reseeding() {
+        // Project a turn with a completed tool call, then rebuild the LLM conversation from it.
+        let messages = vec![
+            Message::user_text("read it"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentPart::Text("looking".into()),
+                    ContentPart::ToolCall {
+                        id: "call_1".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({ "path": "a.rs" }),
+                    },
+                ],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentPart::ToolResult {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    result: serde_json::json!("file contents"),
+                }],
+            },
+        ];
+        let timeline = project_turn(
+            "build",
+            &model(),
+            &messages,
+            &Usage::default(),
+            1.0,
+            counter(),
+        );
+        let rebuilt = timeline_to_llm(&timeline);
+        // user, assistant (text + tool call), tool (result).
+        assert_eq!(rebuilt.len(), 3);
+        assert_eq!(rebuilt[0].role, Role::User);
+        assert!(matches!(&rebuilt[0].content[0], ContentPart::Text(t) if t == "read it"));
+        assert_eq!(rebuilt[1].role, Role::Assistant);
+        assert!(matches!(&rebuilt[1].content[0], ContentPart::Text(t) if t == "looking"));
+        match &rebuilt[1].content[1] {
+            ContentPart::ToolCall { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "read");
+                assert_eq!(input, &serde_json::json!({ "path": "a.rs" }));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        assert_eq!(rebuilt[2].role, Role::Tool);
+        match &rebuilt[2].content[0] {
+            ContentPart::ToolResult { id, result, .. } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(result, &serde_json::json!("file contents"));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
     }
 
     #[test]
