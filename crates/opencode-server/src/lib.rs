@@ -2820,9 +2820,67 @@ async fn command_list(State(_state): State<ServerState>) -> Json<Vec<opencode_pr
     Json(Vec::new())
 }
 
-/// `GET /config` — the merged opencode configuration (group `config`). Matches the golden `config.get`:
-/// 200 `Config`, 400 `BadRequestError`. Config *loading* (the 7-level merge of `opencode.json` etc.) is
-/// a follow-up (PENDENCIAS #1); until then this returns the empty/default config.
+/// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
+fn config_dir() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Some(std::path::PathBuf::from(xdg).join("opencode"));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| std::path::PathBuf::from(h).join(".config/opencode"))
+}
+
+/// Read + parse an `opencode.json` at `path` to a JSON value (None if missing/unparseable).
+fn read_config_json(path: &std::path::Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Recursively merge `overlay` into `base`: objects merge key-by-key, everything else (scalars/arrays)
+/// is overridden by `overlay` (the higher-precedence level).
+fn deep_merge(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                match b.get_mut(&k) {
+                    Some(existing) => deep_merge(existing, v),
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+/// The global `opencode.json` config value (`{}` if absent).
+fn global_config_value() -> serde_json::Value {
+    config_dir()
+        .and_then(|d| read_config_json(&d.join("opencode.json")))
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Resolve the effective config: global `opencode.json` overlaid by the project `opencode.json` (cwd).
+/// A first, faithful-for-the-common-case loader — the remaining levels (remote/custom/`.opencode`/
+/// inline/managed), `.jsonc`, and per-field provenance are follow-ups (PENDENCIAS #1).
+fn resolved_config_value() -> serde_json::Value {
+    let mut merged = global_config_value();
+    if let Some(project) = std::env::current_dir()
+        .ok()
+        .and_then(|d| read_config_json(&d.join("opencode.json")))
+    {
+        deep_merge(&mut merged, project);
+    }
+    merged
+}
+
+/// `GET /config` — the resolved opencode configuration (group `config`). Matches the golden `config.get`:
+/// 200 `Config`, 400 `BadRequestError`. Reads global + project `opencode.json` (deep-merged); the full
+/// 7-level merge + `.jsonc` + provenance are follow-ups (PENDENCIAS #1). Parse failures degrade to the
+/// default config.
 #[utoipa::path(
     get,
     path = "/config",
@@ -2834,11 +2892,11 @@ async fn command_list(State(_state): State<ServerState>) -> Json<Vec<opencode_pr
     tag = "config"
 )]
 async fn config_get(State(_state): State<ServerState>) -> Json<opencode_proto::Config> {
-    Json(opencode_proto::Config::default())
+    Json(serde_json::from_value(resolved_config_value()).unwrap_or_default())
 }
 
 /// `GET /global/config` — the global configuration (group `global`). Matches the golden
-/// `global.config.get`: 200 `Config`, 400 `BadRequestError`. Loading is a follow-up (PENDENCIAS #1).
+/// `global.config.get`: 200 `Config`, 400 `BadRequestError`. Reads the global `opencode.json` only.
 #[utoipa::path(
     get,
     path = "/global/config",
@@ -2850,7 +2908,7 @@ async fn config_get(State(_state): State<ServerState>) -> Json<opencode_proto::C
     tag = "global"
 )]
 async fn global_config_get(State(_state): State<ServerState>) -> Json<opencode_proto::Config> {
-    Json(opencode_proto::Config::default())
+    Json(serde_json::from_value(global_config_value()).unwrap_or_default())
 }
 
 /// `GET /permission` — pending permission requests (group `permission`). Matches the golden
@@ -3910,6 +3968,28 @@ mod tests {
         // No repo → both fields omitted (object present, branch absent).
         assert!(v.is_object());
         assert!(v.get("branch").is_none());
+    }
+
+    #[test]
+    fn deep_merge_overlays_objects_and_overrides_scalars() {
+        let mut base = serde_json::json!({
+            "model": "global/model",
+            "server": { "port": 1, "hostname": "a" },
+            "instructions": ["g"]
+        });
+        deep_merge(
+            &mut base,
+            serde_json::json!({
+                "model": "project/model",
+                "server": { "port": 2 },
+                "instructions": ["p"]
+            }),
+        );
+        // Scalars + arrays are overridden by the overlay; nested objects merge key-by-key.
+        assert_eq!(base["model"], "project/model");
+        assert_eq!(base["server"]["port"], 2);
+        assert_eq!(base["server"]["hostname"], "a");
+        assert_eq!(base["instructions"], serde_json::json!(["p"]));
     }
 
     #[tokio::test]
