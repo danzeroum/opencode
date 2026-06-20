@@ -2203,6 +2203,46 @@ async fn session_children(
     Ok(Json(Vec::new()))
 }
 
+/// `GET /session/{sessionID}/message/{messageID}` — a single V1 message with its parts (group
+/// `session`). Matches the golden `session.message`: 200 `{ info: Message, parts: [Part] }`, 400 union,
+/// 404 `NotFoundError`. This wires the V1 `Message`/`Part` contract; the runner currently projects the
+/// conversation into the V2 `session_message` timeline, so until a V1 message projection lands a known
+/// session 404s the message (an unknown session 404s the session). Reuses [`TodoFailure`] for the
+/// shared NotFoundError/500 responder.
+#[utoipa::path(
+    get,
+    path = "/session/{sessionID}/message/{messageID}",
+    operation_id = "session.message",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("messageID" = String, Path, description = "Message id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Message", body = opencode_proto::MessageWithParts),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_message(
+    State(state): State<ServerState>,
+    axum::extract::Path((session_id, message_id)): axum::extract::Path<(String, String)>,
+) -> Result<Json<opencode_proto::MessageWithParts>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    Err(TodoFailure::NotFound(message_id))
+}
+
 /// `GET /session/status` — live status of all sessions (group `session`). Matches the golden
 /// `session.status`: 200 `{ [sessionID]: SessionStatus }`, 400 union. Session status (idle/retry/busy)
 /// is live execution state produced by the runner; until that engine exists this is an empty map.
@@ -3995,6 +4035,7 @@ async fn v2_provider_get(
         v2_session_prompt,
         session_todo,
         session_children,
+        session_message,
         session_status,
         session_create,
         session_list,
@@ -5661,6 +5702,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
+        router = router.route(
+            "/session/{sessionID}/message/{messageID}",
+            get(session_message),
+        );
         router = router.route(
             "/session/{sessionID}",
             get(session_get_v1)

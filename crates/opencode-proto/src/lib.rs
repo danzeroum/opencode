@@ -14,11 +14,13 @@ mod config;
 mod integration;
 mod lsp;
 mod mcp;
+mod message;
 mod session_message;
 pub use config::*;
 pub use integration::*;
 pub use lsp::*;
 pub use mcp::*;
+pub use message::*;
 pub use session_message::*;
 
 /// Response of `GET /health` — the first contract route cut over to Rust (Phase 1).
