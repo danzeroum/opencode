@@ -107,9 +107,17 @@ pub(crate) struct EnvEngineFactory {
 
 impl EngineFactory for EnvEngineFactory {
     fn build(&self, model: &str) -> Result<Arc<dyn LlmEngine>, EngineError> {
+        let (provider_id, _) = split_model(model)?;
+        // Base URL: an explicit factory override (tests), else a per-provider env override
+        // (`OPENCODE_<ID>_BASE_URL` — how an external Ollama or a custom host is pointed), else the
+        // built-in default in `resolve`. (Catalog `api` lookup is a follow-up.)
+        let base_url = self.endpoint.clone().or_else(|| {
+            std::env::var(format!("OPENCODE_{}_BASE_URL", provider_id.to_uppercase()))
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
         // Fresh per build so a mid-session `opencode auth login` is picked up; env-var fallback applies.
-        let settings =
-            EngineSettings::resolve(model, self.endpoint.clone(), &OpencodeCredentials::load())?;
+        let settings = EngineSettings::resolve(model, base_url, &[], &OpencodeCredentials::load())?;
         self.registry.engine(&settings)
     }
 }
@@ -625,7 +633,7 @@ async fn drive_one_turn(
     let session = Session {
         id: session_id.to_string(),
         model: model_id.to_string(),
-        provider: provider.as_str().to_string(),
+        provider: provider.to_string(),
         system,
         tools: tool_defs,
         generation: Generation::default(),
@@ -669,15 +677,7 @@ async fn drive_one_turn(
             // returns real data (the native write path; see `persist_timeline`). Only the *new* tail is
             // persisted — `run.messages` is seeded with prior history, which is already stored.
             let tail = run.messages.get(history_len..).unwrap_or(&[]);
-            persist_timeline(
-                ctx,
-                session_id,
-                provider.as_str(),
-                model_id,
-                tail,
-                &run.usage,
-            )
-            .await;
+            persist_timeline(ctx, session_id, provider, model_id, tail, &run.usage).await;
         }
         Err(_) => ctx.metrics().record_error(),
     }
