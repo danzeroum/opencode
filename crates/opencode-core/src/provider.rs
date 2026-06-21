@@ -6,10 +6,10 @@
 //! (the `provider/model` string), resolve its credentials from the environment, and send each turn
 //! over the real [`transport`](opencode_llm::transport). The pieces:
 //!
-//! - [`Provider`] — the provider families. Only [`Anthropic`](Provider::Anthropic) has an engine
-//!   today; the other ported protocols (openai-chat, gemini, bedrock-converse, openai-responses)
-//!   slot in as new variants + [`ProviderRegistry`] arms **without touching the runner** (which only
-//!   ever sees `&dyn LlmEngine`).
+//! - [`ProtocolKind`] — the wire protocol. `anthropic` speaks Messages; every other provider in scope
+//!   (deepseek, zhipuai/GLM, ollama, openai, groq, …) is OpenAI Chat Completions-compatible and shares
+//!   the [`OpenAiCompatibleEngine`]. Gemini/bedrock slot in as further variants + [`ProviderRegistry`]
+//!   arms **without touching the runner** (which only ever sees `&dyn LlmEngine`).
 //! - [`EngineSettings`] — a resolved, validated `(provider, model id, api key, endpoint)`, produced
 //!   by [`EngineSettings::resolve`] from the config string + a [`Credentials`] source. All failures
 //!   surface *before* any network call (no model / not `provider/model` / unknown provider / missing
@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use opencode_llm::anthropic::AnthropicMessages;
+use opencode_llm::openai_chat::OpenAiChat;
 use opencode_llm::transport;
 use opencode_llm::{LlmError, LlmEvent, LlmRequest};
 
@@ -53,72 +54,119 @@ pub enum EngineError {
     /// The provider prefix names a provider that has no engine here yet.
     #[error("unknown provider {0:?}")]
     UnknownProvider(String),
-    /// The selected provider has no API key (its environment variable is unset or empty).
+    /// The selected provider has no resolvable base URL (no override, catalog `api`, or built-in
+    /// default) — e.g. a self-hosted provider without a configured `baseURL`.
+    #[error(
+        "missing base URL for provider {provider:?}: set OPENCODE_{upper}_BASE_URL or configure it"
+    )]
+    MissingBaseUrl {
+        /// The selected provider's id.
+        provider: String,
+        /// The provider id upper-cased (the env-var infix).
+        upper: String,
+    },
+    /// The selected provider has no API key (no stored credential and its environment variable is unset
+    /// or empty).
     #[error("missing API key for provider {provider}: set {env}")]
     MissingApiKey {
         /// The selected provider's id.
-        provider: &'static str,
+        provider: String,
         /// The environment variable that must hold the key.
-        env: &'static str,
+        env: String,
     },
     /// The underlying HTTP client could not be built.
     #[error(transparent)]
     Client(#[from] LlmError),
 }
 
-/// A provider family. Only [`Anthropic`](Provider::Anthropic) is wired to an engine today; the other
-/// ported protocols become new variants (and one [`ProviderRegistry`] arm each) as follow-ups.
+/// The wire protocol an engine speaks. `anthropic` uses the Messages protocol; every other provider in
+/// scope today (deepseek, zhipuai/GLM, ollama, openai, groq, …) is **OpenAI Chat Completions**-compatible
+/// and shares one engine. New native protocols (gemini, bedrock) become further variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provider {
-    /// Anthropic Messages (`anthropic-messages`).
+pub enum ProtocolKind {
+    /// `anthropic-messages`.
     Anthropic,
+    /// OpenAI Chat Completions (and any API compatible with it).
+    OpenAiCompatible,
 }
 
-impl Provider {
-    /// The provider's id — the segment before `/` in a `provider/model` string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Provider::Anthropic => "anthropic",
+impl ProtocolKind {
+    /// The protocol a provider id speaks. `anthropic` is the Messages protocol; everything else is
+    /// treated as OpenAI-compatible (the common case for self-hosted and third-party providers).
+    pub fn for_provider(provider_id: &str) -> Self {
+        match provider_id {
+            "anthropic" => ProtocolKind::Anthropic,
+            _ => ProtocolKind::OpenAiCompatible,
         }
     }
 
-    /// The environment variable that holds this provider's API key.
-    pub fn api_key_env(self) -> &'static str {
-        match self {
-            Provider::Anthropic => "ANTHROPIC_API_KEY",
-        }
-    }
-
-    /// The provider's default API endpoint (overridable in [`EngineSettings::resolve`]).
-    pub fn default_endpoint(self) -> &'static str {
-        match self {
-            Provider::Anthropic => "https://api.anthropic.com/v1/messages",
-        }
-    }
-
-    /// Parse a provider id (the segment before `/`).
-    pub fn parse(name: &str) -> Result<Self, EngineError> {
-        match name {
-            "anthropic" => Ok(Provider::Anthropic),
-            other => Err(EngineError::UnknownProvider(other.to_string())),
+    /// Turn a provider base URL into the full request endpoint, appending the protocol's path unless the
+    /// base already carries it (so a `baseURL` that already ends in `/chat/completions` is left alone).
+    pub fn endpoint_for(self, base: &str) -> String {
+        let base = base.trim_end_matches('/');
+        let path = match self {
+            ProtocolKind::Anthropic => "/v1/messages",
+            ProtocolKind::OpenAiCompatible => "/chat/completions",
+        };
+        if base.ends_with(path.trim_start_matches('/')) {
+            base.to_string()
+        } else {
+            format!("{base}{path}")
         }
     }
 }
 
-/// Split a `provider/model` id into its [`Provider`] and the bare, provider-native model id (what the
+/// A built-in base URL for a well-known provider id, when one is widely standard. Used as the fallback
+/// after an explicit override (`OPENCODE_<ID>_BASE_URL` / config) and the models.dev catalog `api`.
+pub fn builtin_base_url(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "anthropic" => Some("https://api.anthropic.com"),
+        "openai" => Some("https://api.openai.com/v1"),
+        "deepseek" => Some("https://api.deepseek.com"),
+        // Zhipu AI's GLM models (China endpoint); the international z.ai endpoint can be set via override.
+        "zhipuai" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4"),
+        "groq" => Some("https://api.groq.com/openai/v1"),
+        // Local Ollama default; an external host is set via `OPENCODE_OLLAMA_BASE_URL` / config.
+        "ollama" => Some("http://localhost:11434/v1"),
+        _ => None,
+    }
+}
+
+/// The built-in environment variable that may hold a provider's API key (the fallback after a stored
+/// `auth.json` credential and any catalog-declared env vars). `None` for keyless providers.
+pub fn builtin_api_key_env(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "openai" => Some("OPENAI_API_KEY"),
+        "deepseek" => Some("DEEPSEEK_API_KEY"),
+        "zhipuai" | "glm" => Some("ZHIPUAI_API_KEY"),
+        "groq" => Some("GROQ_API_KEY"),
+        _ => None,
+    }
+}
+
+/// Whether a provider needs no API key — a locally-hosted, keyless provider (ollama/lmstudio/localai) or
+/// any endpoint pointed at localhost. Such providers get an empty key instead of a `MissingApiKey` error.
+pub fn is_keyless(provider_id: &str, endpoint: &str) -> bool {
+    matches!(provider_id, "ollama" | "lmstudio" | "localai")
+        || endpoint.contains("localhost")
+        || endpoint.contains("127.0.0.1")
+}
+
+/// Split a `provider/model` id into the provider id and the bare, provider-native model id (what the
 /// request carries). Only the first `/` is the provider boundary, so model ids may themselves contain
-/// `/`.
-pub fn split_model(model: &str) -> Result<(Provider, &str), EngineError> {
+/// `/`. Any provider id is accepted syntactically — resolution decides whether it can be served.
+pub fn split_model(model: &str) -> Result<(&str, &str), EngineError> {
     if model.is_empty() {
         return Err(EngineError::NoModel);
     }
     let (provider, id) = model
         .split_once('/')
         .ok_or_else(|| EngineError::InvalidModel(model.to_string()))?;
-    if id.is_empty() {
+    if provider.is_empty() || id.is_empty() {
         return Err(EngineError::InvalidModel(model.to_string()));
     }
-    Provider::parse(provider).map(|provider| (provider, id))
+    Ok((provider, id))
 }
 
 /// A source of provider credentials — the seam between [`EngineSettings::resolve`] and the process
@@ -215,47 +263,84 @@ impl Credentials for OpencodeCredentials {
     }
 }
 
-/// A resolved, validated engine configuration: the [`Provider`], the bare model id, the API key, and
-/// the endpoint. Produced by [`resolve`](EngineSettings::resolve); the [`provider`](Self::provider) /
+/// A resolved, validated engine configuration: the protocol, the bare model id, the API key, and the
+/// endpoint. Produced by [`resolve`](EngineSettings::resolve); [`protocol`](Self::protocol) /
 /// [`api_key`](Self::api_key) / [`endpoint`](Self::endpoint) drive a [`ProviderRegistry`], and
 /// [`model`](Self::model) is what the caller puts in its [`Session`](crate::session::Session).
 #[derive(Debug, Clone)]
 pub struct EngineSettings {
-    /// The selected provider.
-    pub provider: Provider,
+    /// The wire protocol the engine speaks.
+    pub protocol: ProtocolKind,
     /// The bare, provider-native model id (the part after `provider/`) — sent on every turn.
     pub model: String,
-    /// The provider API key.
+    /// The provider API key (empty for keyless local providers like ollama).
     pub api_key: String,
-    /// The provider endpoint (a resolved override, else [`Provider::default_endpoint`]).
+    /// The full request endpoint.
     pub endpoint: String,
 }
 
 impl EngineSettings {
-    /// Resolve settings from the config `model` string (`provider/model`) and a [`Credentials`]
-    /// source, validating everything **before** any network call: the model must be present and in
-    /// `provider/model` form, the provider must be known, and its API key must be set and non-empty.
-    /// `endpoint` overrides the provider default when `Some` (e.g. a config `baseURL`); `None` uses
-    /// [`Provider::default_endpoint`].
+    /// Resolve settings from the config `model` string (`provider/model`) and a [`Credentials`] source,
+    /// validating everything **before** any network call. `base_url` is the caller-resolved provider base
+    /// (an `OPENCODE_<ID>_BASE_URL` / config override, else the catalog `api`); when `None` a built-in
+    /// default is used, else resolution fails with [`EngineError::MissingBaseUrl`]. `env_names` are extra
+    /// API-key env vars (e.g. catalog-declared) tried after the stored credential and before the built-in
+    /// default; keyless local providers (ollama/localhost) resolve to an empty key instead of erroring.
     pub fn resolve(
         model: &str,
-        endpoint: Option<String>,
+        base_url: Option<String>,
+        env_names: &[String],
         creds: &dyn Credentials,
     ) -> Result<Self, EngineError> {
-        let (provider, model_id) = split_model(model)?;
-        let env = provider.api_key_env();
-        let api_key = creds
-            .api_key(provider.as_str(), env)
-            .filter(|key| !key.is_empty())
-            .ok_or(EngineError::MissingApiKey {
-                provider: provider.as_str(),
-                env,
+        let (provider_id, model_id) = split_model(model)?;
+        let protocol = ProtocolKind::for_provider(provider_id);
+        let base = base_url
+            .filter(|s| !s.is_empty())
+            .or_else(|| builtin_base_url(provider_id).map(String::from))
+            .ok_or_else(|| EngineError::MissingBaseUrl {
+                provider: provider_id.to_string(),
+                upper: provider_id.to_uppercase(),
             })?;
+        let endpoint = protocol.endpoint_for(&base);
+        // API key: a stored credential (auth.json) or the primary env var; then any extra env names; then
+        // the built-in default env. Keyless local providers fall back to an empty key.
+        let primary_env = env_names
+            .first()
+            .map(String::as_str)
+            .or_else(|| builtin_api_key_env(provider_id))
+            .unwrap_or("");
+        let api_key = creds
+            .api_key(provider_id, primary_env)
+            .filter(|k| !k.is_empty())
+            .or_else(|| {
+                env_names
+                    .iter()
+                    .skip(1)
+                    .find_map(|name| creds.get(name).filter(|k| !k.is_empty()))
+            })
+            .or_else(|| {
+                builtin_api_key_env(provider_id)
+                    .and_then(|env| creds.get(env))
+                    .filter(|k| !k.is_empty())
+            });
+        let api_key = match api_key {
+            Some(key) => key,
+            None if is_keyless(provider_id, &endpoint) => String::new(),
+            None => {
+                return Err(EngineError::MissingApiKey {
+                    provider: provider_id.to_string(),
+                    env: builtin_api_key_env(provider_id)
+                        .or_else(|| env_names.first().map(String::as_str))
+                        .unwrap_or("the provider's API key env var")
+                        .to_string(),
+                })
+            }
+        };
         Ok(Self {
-            provider,
+            protocol,
             model: model_id.to_string(),
             api_key,
-            endpoint: endpoint.unwrap_or_else(|| provider.default_endpoint().to_string()),
+            endpoint,
         })
     }
 }
@@ -268,8 +353,8 @@ pub trait ProviderRegistry: Send + Sync {
 }
 
 /// The default registry — one shared [`reqwest::Client`] reused across the engines it builds (so the
-/// connection pool is shared). Only [`Provider::Anthropic`] is implemented; each other provider is a
-/// follow-up match arm.
+/// connection pool is shared). Builds an [`AnthropicEngine`] or an [`OpenAiCompatibleEngine`] per the
+/// resolved [`ProtocolKind`].
 pub struct DefaultRegistry {
     client: reqwest::Client,
 }
@@ -292,8 +377,13 @@ impl DefaultRegistry {
 
 impl ProviderRegistry for DefaultRegistry {
     fn engine(&self, settings: &EngineSettings) -> Result<Arc<dyn LlmEngine>, EngineError> {
-        match settings.provider {
-            Provider::Anthropic => Ok(Arc::new(AnthropicEngine::new(
+        match settings.protocol {
+            ProtocolKind::Anthropic => Ok(Arc::new(AnthropicEngine::new(
+                self.client.clone(),
+                settings.endpoint.clone(),
+                settings.api_key.clone(),
+            ))),
+            ProtocolKind::OpenAiCompatible => Ok(Arc::new(OpenAiCompatibleEngine::new(
                 self.client.clone(),
                 settings.endpoint.clone(),
                 settings.api_key.clone(),
@@ -335,6 +425,39 @@ impl LlmEngine for AnthropicEngine {
             request,
         )
         .await
+    }
+}
+
+/// The OpenAI Chat Completions [`LlmEngine`] — serves every OpenAI-compatible provider (DeepSeek,
+/// Zhipu/GLM, Ollama, OpenAI, Groq, …). Each turn lowers via [`OpenAiChat`] and POSTs to the resolved
+/// `endpoint` with a `Bearer` token (omitted when the key is empty, e.g. a keyless local Ollama).
+pub struct OpenAiCompatibleEngine {
+    client: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+}
+
+impl OpenAiCompatibleEngine {
+    /// An engine over `client`, posting to `endpoint` authenticated with `api_key` (empty ⇒ no auth
+    /// header, for keyless local providers).
+    pub fn new(client: reqwest::Client, endpoint: String, api_key: String) -> Self {
+        Self {
+            client,
+            endpoint,
+            api_key,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmEngine for OpenAiCompatibleEngine {
+    async fn complete(&self, request: &LlmRequest) -> Result<Vec<LlmEvent>, LlmError> {
+        let bearer = format!("Bearer {}", self.api_key);
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if !self.api_key.is_empty() {
+            headers.push(("authorization", bearer.as_str()));
+        }
+        transport::complete(&self.client, &self.endpoint, &headers, &OpenAiChat, request).await
     }
 }
 
@@ -416,20 +539,63 @@ mod tests {
 
     #[test]
     fn resolve_parses_provider_model_and_defaults_the_endpoint() {
-        let settings =
-            EngineSettings::resolve("anthropic/claude-haiku-4-5-20251001", None, &with_key())
-                .unwrap();
-        assert_eq!(settings.provider, Provider::Anthropic);
+        let settings = EngineSettings::resolve(
+            "anthropic/claude-haiku-4-5-20251001",
+            None,
+            &[],
+            &with_key(),
+        )
+        .unwrap();
+        assert_eq!(settings.protocol, ProtocolKind::Anthropic);
         assert_eq!(settings.model, "claude-haiku-4-5-20251001");
         assert_eq!(settings.api_key, "sk-ant-test");
         assert_eq!(settings.endpoint, "https://api.anthropic.com/v1/messages");
     }
 
     #[test]
-    fn resolve_honors_an_endpoint_override() {
+    fn resolve_deepseek_uses_openai_protocol_builtin_base_and_stored_key() {
+        // DeepSeek is OpenAI-compatible: openai-chat protocol, built-in base + `/chat/completions`.
+        let settings = EngineSettings::resolve(
+            "deepseek/deepseek-chat",
+            None,
+            &[],
+            &creds(&[("DEEPSEEK_API_KEY", "sk-deep")]),
+        )
+        .unwrap();
+        assert_eq!(settings.protocol, ProtocolKind::OpenAiCompatible);
+        assert_eq!(settings.model, "deepseek-chat");
+        assert_eq!(settings.api_key, "sk-deep");
+        assert_eq!(
+            settings.endpoint,
+            "https://api.deepseek.com/chat/completions"
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_is_keyless_and_takes_a_base_override() {
+        // An external Ollama: base-URL override, no API key required.
+        let settings = EngineSettings::resolve(
+            "ollama/llama3",
+            Some("http://gpu-box:11434/v1".to_string()),
+            &[],
+            &creds(&[]),
+        )
+        .unwrap();
+        assert_eq!(settings.protocol, ProtocolKind::OpenAiCompatible);
+        assert_eq!(settings.api_key, "");
+        assert_eq!(
+            settings.endpoint,
+            "http://gpu-box:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn resolve_honors_a_base_url_override() {
+        // A bare base gets the protocol path appended.
         let settings = EngineSettings::resolve(
             "anthropic/claude-x",
-            Some("http://localhost:1234/v1/messages".to_string()),
+            Some("http://localhost:1234".to_string()),
+            &[],
             &with_key(),
         )
         .unwrap();
@@ -439,7 +605,7 @@ mod tests {
     #[test]
     fn resolve_rejects_an_empty_model() {
         assert!(matches!(
-            EngineSettings::resolve("", None, &with_key()).unwrap_err(),
+            EngineSettings::resolve("", None, &[], &with_key()).unwrap_err(),
             EngineError::NoModel
         ));
     }
@@ -448,26 +614,27 @@ mod tests {
     fn resolve_requires_provider_model_form() {
         // No `/` separator, and a trailing-slash (empty model id) are both invalid.
         assert!(matches!(
-            EngineSettings::resolve("claude-haiku", None, &with_key()).unwrap_err(),
+            EngineSettings::resolve("claude-haiku", None, &[], &with_key()).unwrap_err(),
             EngineError::InvalidModel(_)
         ));
         assert!(matches!(
-            EngineSettings::resolve("anthropic/", None, &with_key()).unwrap_err(),
+            EngineSettings::resolve("anthropic/", None, &[], &with_key()).unwrap_err(),
             EngineError::InvalidModel(_)
         ));
     }
 
     #[test]
-    fn resolve_rejects_an_unknown_provider() {
-        match EngineSettings::resolve("bogus/model", None, &with_key()).unwrap_err() {
-            EngineError::UnknownProvider(name) => assert_eq!(name, "bogus"),
-            other => panic!("expected UnknownProvider, got {other:?}"),
+    fn resolve_reports_a_missing_base_url_for_an_unknown_provider() {
+        // An unknown provider with no override / catalog `api` / built-in default can't be served.
+        match EngineSettings::resolve("bogus/model", None, &[], &with_key()).unwrap_err() {
+            EngineError::MissingBaseUrl { provider, .. } => assert_eq!(provider, "bogus"),
+            other => panic!("expected MissingBaseUrl, got {other:?}"),
         }
     }
 
     #[test]
     fn resolve_reports_a_missing_key_without_calling_out() {
-        match EngineSettings::resolve("anthropic/claude-x", None, &creds(&[])).unwrap_err() {
+        match EngineSettings::resolve("anthropic/claude-x", None, &[], &creds(&[])).unwrap_err() {
             EngineError::MissingApiKey { provider, env } => {
                 assert_eq!(provider, "anthropic");
                 assert_eq!(env, "ANTHROPIC_API_KEY");
@@ -482,6 +649,7 @@ mod tests {
             EngineSettings::resolve(
                 "anthropic/claude-x",
                 None,
+                &[],
                 &creds(&[("ANTHROPIC_API_KEY", "")])
             )
             .unwrap_err(),
@@ -490,10 +658,19 @@ mod tests {
     }
 
     #[test]
-    fn registry_builds_an_engine_for_resolved_settings() {
+    fn registry_builds_engines_for_both_protocols() {
         let registry = DefaultRegistry::with_client(reqwest::Client::new());
-        let settings = EngineSettings::resolve("anthropic/claude-x", None, &with_key()).unwrap();
-        assert!(registry.engine(&settings).is_ok());
+        let anthropic =
+            EngineSettings::resolve("anthropic/claude-x", None, &[], &with_key()).unwrap();
+        assert!(registry.engine(&anthropic).is_ok());
+        let openai = EngineSettings::resolve(
+            "deepseek/deepseek-chat",
+            None,
+            &[],
+            &creds(&[("DEEPSEEK_API_KEY", "sk-deep")]),
+        )
+        .unwrap();
+        assert!(registry.engine(&openai).is_ok());
     }
 
     // ---- End-to-end over the real HTTP transport (in-test axum server, no network/TLS) ----
@@ -553,6 +730,7 @@ mod tests {
         let settings = EngineSettings::resolve(
             "anthropic/claude-haiku-4-5-20251001",
             Some(url),
+            &[],
             &with_key(),
         )
         .unwrap();
@@ -584,6 +762,7 @@ mod tests {
         let settings = EngineSettings::resolve(
             "anthropic/claude-haiku-4-5-20251001",
             Some(url),
+            &[],
             &with_key(),
         )
         .unwrap();
