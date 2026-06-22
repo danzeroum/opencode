@@ -81,6 +81,8 @@ const CUTOVER_PATHS: &[&str] = &[
     "/api/reference",
     "/api/agent",
     "/api/location",
+    "/experimental/tool",
+    "/experimental/tool/ids",
 ];
 
 #[derive(Parser)]
