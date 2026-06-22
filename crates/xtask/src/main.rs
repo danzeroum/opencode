@@ -93,6 +93,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/project/{projectID}",
     "/project/git/init",
     "/session/{sessionID}/message/{messageID}/part/{partID}",
+    "/api/session/{sessionID}/wait",
 ];
 
 #[derive(Parser)]

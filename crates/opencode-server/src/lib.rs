@@ -2688,6 +2688,187 @@ async fn session_create(
     Ok(Json(session_v1_from_record(record)))
 }
 
+/// Body of `v2.session.create` (`{ id?, agent?, model?, location? }`).
+#[derive(serde::Deserialize, utoipa::ToSchema, Default)]
+struct V2SessionCreateBody {
+    id: Option<String>,
+    agent: Option<String>,
+    model: Option<opencode_proto::ModelRef>,
+    location: Option<V2LocationRefBody>,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct V2LocationRefBody {
+    directory: String,
+    #[serde(rename = "workspaceID")]
+    workspace_id: Option<String>,
+}
+
+/// `v2.session.create` responder: 400 `InvalidRequestError` (else the declared 401 is unreachable here).
+pub struct V2CreateFailure(String);
+
+impl axum::response::IntoResponse for V2CreateFailure {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(opencode_proto::InvalidRequestError {
+                tag: "InvalidRequestError".to_string(),
+                message: self.0,
+                kind: None,
+                field: None,
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// `POST /api/session` — create a session (group `session`). Matches the golden `v2.session.create`:
+/// 200 `{ data: SessionV2Info }`, 400 `InvalidRequestError`, 401 `UnauthorizedError`. Resolves the
+/// project from the body `location`, persists a new session row, and returns its V2 info.
+#[utoipa::path(
+    post,
+    path = "/api/session",
+    operation_id = "v2.session.create",
+    responses(
+        (status = 200, description = "Created session", body = opencode_proto::SessionGetResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "session"
+)]
+async fn v2_session_create(
+    State(state): State<ServerState>,
+    body: Option<Json<V2SessionCreateBody>>,
+) -> Result<Json<opencode_proto::SessionGetResponse>, V2CreateFailure> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let mut params = std::collections::HashMap::new();
+    if let Some(loc) = &body.location {
+        params.insert("directory".to_string(), loc.directory.clone());
+        if let Some(w) = &loc.workspace_id {
+            params.insert("workspace".to_string(), w.clone());
+        }
+    }
+    let location = resolve_location(&state, &params)
+        .await
+        .map_err(|e| V2CreateFailure(e.0.to_string()))?;
+    let id = body
+        .id
+        .unwrap_or_else(|| format!("ses_{}", ulid::Ulid::new()));
+    let slug = id.trim_start_matches("ses_").to_ascii_lowercase();
+    let now = now_ms() as i64;
+    let model = body.model.and_then(|m| serde_json::to_value(m).ok());
+    let record = opencode_db::SessionV1Record {
+        id: id.clone(),
+        slug,
+        project_id: location.project.id.clone(),
+        workspace_id: location.workspace_id.clone(),
+        directory: location.directory.clone(),
+        path: None,
+        parent_id: None,
+        summary: None,
+        summary_diffs: None,
+        cost: 0.0,
+        tokens: (0, 0, 0, 0, 0),
+        share_url: None,
+        title: String::new(),
+        agent: body.agent,
+        model,
+        version: VERSION.to_string(),
+        metadata: None,
+        time_created: now,
+        time_updated: now,
+        time_compacting: None,
+        time_archived: None,
+        permission: None,
+        revert: None,
+    };
+    state
+        .ctx
+        .sessions()
+        .create(&record)
+        .await
+        .map_err(|e| V2CreateFailure(e.to_string()))?;
+    let stored = state
+        .ctx
+        .sessions()
+        .get(&id)
+        .await
+        .map_err(|e| V2CreateFailure(e.to_string()))?
+        .ok_or_else(|| V2CreateFailure("created session not found".to_string()))?;
+    Ok(Json(opencode_proto::SessionGetResponse {
+        data: session_record_to_info(stored),
+    }))
+}
+
+/// `v2.session.wait` responder: 404 `SessionNotFoundError`, else 500.
+pub enum V2WaitFailure {
+    /// No such session (404).
+    NotFound(String),
+    /// Store failure (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for V2WaitFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            V2WaitFailure::NotFound(id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::SessionNotFoundError {
+                    tag: "SessionNotFoundError".to_string(),
+                    session_id: id.clone(),
+                    message: format!("Session not found: {id}"),
+                }),
+            )
+                .into_response(),
+            V2WaitFailure::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::UnknownError {
+                    tag: "UnknownError".to_string(),
+                    message,
+                    reference: None,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `POST /api/session/{sessionID}/wait` — wait for a session to become idle (group `session`). Matches
+/// the golden `v2.session.wait`: 204, 400, 401, 404 `SessionNotFoundError`, 503. The native runner drives
+/// turns to completion in the background, so once the session exists this returns 204 (idle); 404s an
+/// unknown session. (Live "block until the in-flight turn ends" is a follow-up; the coordinator tracks
+/// per-session drains.)
+#[utoipa::path(
+    post,
+    path = "/api/session/{sessionID}/wait",
+    operation_id = "v2.session.wait",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 204, description = "Idle"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError),
+        (status = 503, description = "Unavailable", body = opencode_proto::ServiceUnavailableError)
+    ),
+    tag = "session"
+)]
+async fn v2_session_wait(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, V2WaitFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| V2WaitFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(V2WaitFailure::NotFound(session_id));
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// `GET /session` — list sessions as V1 `Session` objects (group `session`). Matches the golden
 /// `session.list`: 200 `[Session]`, 400 `BadRequestError`. Applies the `directory`/`workspace`/`project`/
 /// `search`/`limit` filters (most-recent first); the advanced `scope`/`roots`/`path`/`start` filters are
@@ -4454,6 +4635,8 @@ async fn v2_provider_get(
         app_log,
         v2_session_get,
         v2_session_list,
+        v2_session_create,
+        v2_session_wait,
         v2_session_messages,
         v2_session_prompt,
         session_todo,
@@ -6463,8 +6646,9 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/lsp", get(lsp_status));
     }
     if state.routes.handles("session") {
-        router = router.route("/api/session", get(v2_session_list));
+        router = router.route("/api/session", get(v2_session_list).post(v2_session_create));
         router = router.route("/api/session/{sessionID}", get(v2_session_get));
+        router = router.route("/api/session/{sessionID}/wait", post(v2_session_wait));
         router = router.route("/api/session/{sessionID}/message", get(v2_session_messages));
         router = router.route("/api/session/{sessionID}/prompt", post(v2_session_prompt));
         router = router.route(
