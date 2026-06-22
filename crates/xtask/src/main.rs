@@ -92,6 +92,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/vcs/apply",
     "/project/{projectID}",
     "/project/git/init",
+    "/session/{sessionID}/message/{messageID}/part/{partID}",
 ];
 
 #[derive(Parser)]

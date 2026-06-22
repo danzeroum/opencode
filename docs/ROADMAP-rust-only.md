@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **84/168 (50%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **87/168 (52%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -19,7 +19,7 @@
 
 **Tier 3 — CRUD sobre stores existentes:**
 - ✅ T3.1 `project.update` (PATCH project) + `project.initGit` (`git init` + marca initialized) — **#146**. `ProjectStore` ganhou `get`/`put`.
-- ⏳ T3.2 `session.deleteMessage`, `part.update`, `part.delete` (mutações no `session_message`)
+- ✅ T3.2 `session.deleteMessage` (real — `SessionMessageStore::delete`) + `part.update`/`part.delete` (wired-404: parts são projetados read-time, sem store V1 dedicado — ver PENDENCIAS #7) — **#147**
 - ⏳ T3.3 `v2.session.create`, `v2.session.wait`
 
 **Tier 4 — Ações de sessão na engine (reusa Message/Part + `drive_one_turn`):**

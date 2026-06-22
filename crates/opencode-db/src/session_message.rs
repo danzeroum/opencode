@@ -97,6 +97,9 @@ pub trait SessionMessageStore: Send + Sync {
         kind: &str,
         data: Value,
     ) -> Result<i64, DbError>;
+
+    /// Delete a timeline row by id. Returns `true` if a row was removed. Backs `session.deleteMessage`.
+    async fn delete(&self, session_id: &str, id: &str) -> Result<bool, DbError>;
 }
 
 /// Wall-clock milliseconds since the epoch (the `time_created`/`time_updated` columns).
@@ -204,6 +207,15 @@ impl SessionMessageStore for SqlxSessionMessageStore {
         tx.commit().await?;
         Ok(next)
     }
+
+    async fn delete(&self, session_id: &str, id: &str) -> Result<bool, DbError> {
+        let result = sqlx::query("DELETE FROM session_message WHERE session_id = ? AND id = ?")
+            .bind(session_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 /// In-memory [`SessionMessageStore`] — test double / the backing for `AppServices::default()`.
@@ -293,6 +305,16 @@ impl SessionMessageStore for MemorySessionMessageStore {
             data,
         });
         Ok(next)
+    }
+
+    async fn delete(&self, session_id: &str, id: &str) -> Result<bool, DbError> {
+        let mut rows = self
+            .rows
+            .lock()
+            .expect("session_message store mutex poisoned");
+        let before = rows.len();
+        rows.retain(|r| !(r.session_id == session_id && r.id == id));
+        Ok(rows.len() != before)
     }
 }
 
