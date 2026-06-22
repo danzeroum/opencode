@@ -2381,6 +2381,136 @@ async fn session_message(
         .ok_or(TodoFailure::NotFound(message_id))
 }
 
+/// `DELETE /session/{sessionID}/message/{messageID}` — delete a message (group `session`). Matches the
+/// golden `session.deleteMessage`: 200 `true`, 400 union, 404 `NotFoundError`, 409 `SessionBusyError`.
+/// Removes the row from the `session_message` timeline (the V1/V2 source); 404s an unknown session or
+/// message. (The 409 busy case is declared for contract parity; the native delete has no busy guard
+/// yet — see PENDENCIAS.)
+#[utoipa::path(
+    delete,
+    path = "/session/{sessionID}/message/{messageID}",
+    operation_id = "session.deleteMessage",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("messageID" = String, Path, description = "Message id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Deleted", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError),
+        (status = 409, description = "Session busy", body = opencode_proto::SessionBusyError)
+    ),
+    tag = "session"
+)]
+async fn session_delete_message(
+    State(state): State<ServerState>,
+    axum::extract::Path((session_id, message_id)): axum::extract::Path<(String, String)>,
+) -> Result<Json<bool>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    let deleted = state
+        .ctx
+        .session_messages()
+        .delete(&session_id, &message_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?;
+    if !deleted {
+        return Err(TodoFailure::NotFound(message_id));
+    }
+    Ok(Json(true))
+}
+
+/// `PATCH /session/{sessionID}/message/{messageID}/part/{partID}` — update a part (group `session`).
+/// Matches the golden `part.update`: 200 `Part`, 400 union, 404 `NotFoundError`. Parts are projected
+/// read-time from the V2 timeline (no dedicated V1 part store), so an individual part isn't addressable
+/// for mutation yet — 404s the part (a real part store is a follow-up; see PENDENCIAS).
+#[utoipa::path(
+    patch,
+    path = "/session/{sessionID}/message/{messageID}/part/{partID}",
+    operation_id = "part.update",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("messageID" = String, Path, description = "Message id"),
+        ("partID" = String, Path, description = "Part id")
+    ),
+    responses(
+        (status = 200, description = "Updated part", body = opencode_proto::Part),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn part_update(
+    State(state): State<ServerState>,
+    axum::extract::Path((session_id, _message_id, part_id)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+) -> Result<Json<opencode_proto::Part>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    Err(TodoFailure::NotFound(part_id))
+}
+
+/// `DELETE /session/{sessionID}/message/{messageID}/part/{partID}` — delete a part (group `session`).
+/// Matches the golden `part.delete`: 200 `true`, 400 union, 404 `NotFoundError`. As with `part.update`,
+/// parts aren't individually addressable in the projection model yet, so this 404s the part.
+#[utoipa::path(
+    delete,
+    path = "/session/{sessionID}/message/{messageID}/part/{partID}",
+    operation_id = "part.delete",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("messageID" = String, Path, description = "Message id"),
+        ("partID" = String, Path, description = "Part id")
+    ),
+    responses(
+        (status = 200, description = "Deleted", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn part_delete(
+    State(state): State<ServerState>,
+    axum::extract::Path((session_id, _message_id, part_id)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+) -> Result<Json<bool>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    Err(TodoFailure::NotFound(part_id))
+}
+
 /// `GET /session/status` — live status of all sessions (group `session`). Matches the golden
 /// `session.status`: 200 `{ [sessionID]: SessionStatus }`, 400 union. Session status (idle/retry/busy)
 /// is live execution state produced by the runner; until that engine exists this is an empty map.
@@ -4330,6 +4460,9 @@ async fn v2_provider_get(
         session_children,
         session_messages,
         session_message,
+        session_delete_message,
+        part_update,
+        part_delete,
         session_status,
         session_create,
         session_list,
@@ -6362,7 +6495,11 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/{sessionID}/message", get(session_messages));
         router = router.route(
             "/session/{sessionID}/message/{messageID}",
-            get(session_message),
+            get(session_message).delete(session_delete_message),
+        );
+        router = router.route(
+            "/session/{sessionID}/message/{messageID}/part/{partID}",
+            patch(part_update).delete(part_delete),
         );
         router = router.route(
             "/session/{sessionID}",
