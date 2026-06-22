@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     response::Json,
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use opencode_core::native_tools::{self, NativeToolBox};
@@ -3240,6 +3240,161 @@ async fn project_directories(
     Ok(Json(dirs))
 }
 
+/// Request body of `project.update` — patch a project's `name`/`icon`/`commands` (each optional).
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct ProjectUpdateBody {
+    name: Option<String>,
+    icon: Option<ProjectIconBody>,
+    commands: Option<ProjectCommandsBody>,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct ProjectIconBody {
+    url: Option<String>,
+    #[serde(rename = "override")]
+    override_: Option<String>,
+    color: Option<String>,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct ProjectCommandsBody {
+    start: Option<String>,
+}
+
+/// `project.update` responder: 404 `ProjectNotFoundError`, else a generic 500.
+pub enum ProjectUpdateFailure {
+    /// No such project (404).
+    NotFound(String),
+    /// Store failure (500).
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for ProjectUpdateFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            ProjectUpdateFailure::NotFound(id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::ProjectNotFoundError {
+                    tag: "ProjectNotFoundError".to_string(),
+                    project_id: id.clone(),
+                    message: format!("Project not found: {id}"),
+                }),
+            )
+                .into_response(),
+            ProjectUpdateFailure::Internal(message) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::ErrorEnvelope {
+                    tag: "InternalError".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `PATCH /project/{projectID}` — update a project's name/icon/commands (group `project`). Matches the
+/// golden `project.update`: 200 `Project`, 400 union, 404 `ProjectNotFoundError`. Patches only the
+/// provided fields and bumps `time_updated`.
+#[utoipa::path(
+    patch,
+    path = "/project/{projectID}",
+    operation_id = "project.update",
+    params(("projectID" = String, Path, description = "Project id")),
+    responses(
+        (status = 200, description = "Updated project", body = opencode_proto::Project),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Project not found", body = opencode_proto::ProjectNotFoundError)
+    ),
+    tag = "project"
+)]
+async fn project_update(
+    State(state): State<ServerState>,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(body): Json<ProjectUpdateBody>,
+) -> Result<Json<opencode_proto::Project>, ProjectUpdateFailure> {
+    let mut record = state
+        .ctx
+        .projects()
+        .get(&project_id)
+        .await
+        .map_err(|e| ProjectUpdateFailure::Internal(e.to_string()))?
+        .ok_or_else(|| ProjectUpdateFailure::NotFound(project_id.clone()))?;
+    if let Some(name) = body.name {
+        record.name = Some(name);
+    }
+    if let Some(icon) = body.icon {
+        record.icon_url = icon.url;
+        record.icon_url_override = icon.override_;
+        record.icon_color = icon.color;
+    }
+    if let Some(commands) = body.commands {
+        record.commands = Some(serde_json::json!({ "start": commands.start }));
+    }
+    record.time_updated = now_ms() as i64;
+    state
+        .ctx
+        .projects()
+        .put(&record)
+        .await
+        .map_err(|e| ProjectUpdateFailure::Internal(e.to_string()))?;
+    Ok(Json(project_record_to_info(record)))
+}
+
+/// `POST /project/git/init` — initialize git for the current project (group `project`). Matches the
+/// golden `project.initGit`: 200 `Project`, 400 `BadRequestError`. Runs `git init` in the resolved
+/// worktree, marks the project initialized, and returns it; 400s when no project exists for the
+/// directory.
+#[utoipa::path(
+    post,
+    path = "/project/git/init",
+    operation_id = "project.initGit",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Initialized project", body = opencode_proto::Project),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "project"
+)]
+async fn project_init_git(
+    State(state): State<ServerState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<opencode_proto::Project>, ApiBadRequest> {
+    let directory = vcs_dir(&params);
+    let worktree = opencode_tools::git::root(std::path::Path::new(&directory))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| directory.clone());
+    // Initialize a git repository in the worktree (idempotent: `git init` on an existing repo is a no-op).
+    opencode_tools::git::git(std::path::Path::new(&worktree), &["init"])
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    let mut record = state
+        .ctx
+        .projects()
+        .get_by_worktree(&worktree)
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?
+        .ok_or_else(|| bad_request(format!("no project for worktree: {worktree}"), "Unknown"))?;
+    if record.time_initialized.is_none() {
+        record.time_initialized = Some(now_ms() as i64);
+    }
+    record.vcs = Some("git".to_string());
+    record.time_updated = now_ms() as i64;
+    state
+        .ctx
+        .projects()
+        .put(&record)
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    Ok(Json(project_record_to_info(record)))
+}
+
 /// Resolve the request `location` (the `Location.response` wrapper's `location` field) from the query.
 /// Mirrors the TS location middleware's `ref()` (query `location[directory]` / `location[workspace]`,
 /// else cwd), then resolves the project from the shared `project` store by worktree. Find-or-create and
@@ -4215,6 +4370,8 @@ async fn v2_provider_get(
         project_list,
         project_current,
         project_directories,
+        project_update,
+        project_init_git,
         v2_event_subscribe,
         session_abort,
         v2_model_list,
@@ -6232,7 +6389,9 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("project") {
         router = router.route("/project", get(project_list));
         router = router.route("/project/current", get(project_current));
+        router = router.route("/project/git/init", post(project_init_git));
         router = router.route("/project/{projectID}/directories", get(project_directories));
+        router = router.route("/project/{projectID}", patch(project_update));
     }
     if state.routes.handles("model") {
         router = router.route("/api/model", get(v2_model_list));

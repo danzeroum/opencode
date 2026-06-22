@@ -91,6 +91,13 @@ pub trait ProjectStore: Send + Sync {
 
     /// Fetch the project whose `worktree` equals `worktree` (a non-PK lookup), or `None`.
     async fn get_by_worktree(&self, worktree: &str) -> Result<Option<ProjectRecord>, DbError>;
+
+    /// Fetch a project by id, or `None`.
+    async fn get(&self, id: &str) -> Result<Option<ProjectRecord>, DbError>;
+
+    /// Replace a project's mutable columns (name/icon/commands/time_updated/time_initialized) by id.
+    /// Returns `false` if no such project. Backs `project.update`/`project.initGit`.
+    async fn put(&self, record: &ProjectRecord) -> Result<bool, DbError>;
 }
 
 /// SQLite-backed [`ProjectStore`] over the shared pool.
@@ -124,6 +131,34 @@ impl ProjectStore for SqlxProjectStore {
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(record_from_row).transpose()
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<ProjectRecord>, DbError> {
+        let row = sqlx::query(&format!(
+            "SELECT {PROJECT_COLS} FROM project WHERE id = ? LIMIT 1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(record_from_row).transpose()
+    }
+
+    async fn put(&self, r: &ProjectRecord) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE project SET name = ?, icon_url = ?, icon_url_override = ?, icon_color = ?, \
+             time_updated = ?, time_initialized = ?, commands = ? WHERE id = ?",
+        )
+        .bind(&r.name)
+        .bind(&r.icon_url)
+        .bind(&r.icon_url_override)
+        .bind(&r.icon_color)
+        .bind(r.time_updated)
+        .bind(r.time_initialized)
+        .bind(r.commands.as_ref().map(|c| c.to_string()))
+        .bind(&r.id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -169,6 +204,27 @@ impl ProjectStore for MemoryProjectStore {
             .iter()
             .find(|r| r.worktree == worktree)
             .cloned())
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<ProjectRecord>, DbError> {
+        Ok(self
+            .rows
+            .lock()
+            .expect("project store mutex poisoned")
+            .iter()
+            .find(|r| r.id == id)
+            .cloned())
+    }
+
+    async fn put(&self, record: &ProjectRecord) -> Result<bool, DbError> {
+        let mut rows = self.rows.lock().expect("project store mutex poisoned");
+        match rows.iter_mut().find(|r| r.id == record.id) {
+            Some(slot) => {
+                *slot = record.clone();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 
