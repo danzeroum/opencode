@@ -1127,6 +1127,19 @@ pub struct ProjectTime {
     pub initialized: Option<i64>,
 }
 
+/// 404 body of `project.update` (`{ _tag: "ProjectNotFoundError", projectID, message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectNotFoundError {
+    /// Always `"ProjectNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The project id that wasn't found.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
 /// `Project` — an entry of `project.list`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct Project {
