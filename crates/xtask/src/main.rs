@@ -86,6 +86,10 @@ const CUTOVER_PATHS: &[&str] = &[
     "/skill",
     "/formatter",
     "/event",
+    "/vcs/status",
+    "/vcs/diff",
+    "/vcs/diff/raw",
+    "/vcs/apply",
 ];
 
 #[derive(Parser)]

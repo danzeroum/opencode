@@ -378,6 +378,71 @@ pub struct VcsInfo {
     pub default_branch: Option<String>,
 }
 
+/// A changed file's summary (`vcs.status`): `{ file, additions, deletions, status }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct VcsFileStatus {
+    /// File path (repo-relative).
+    pub file: String,
+    /// Lines added.
+    pub additions: f64,
+    /// Lines deleted.
+    pub deletions: f64,
+    /// `added` | `deleted` | `modified`.
+    pub status: String,
+}
+
+/// A changed file's diff (`vcs.diff`): `{ file, patch?, additions, deletions, status? }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct VcsFileDiff {
+    /// File path (repo-relative).
+    pub file: String,
+    /// Unified diff for the file, if computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+    /// Lines added.
+    pub additions: f64,
+    /// Lines deleted.
+    pub deletions: f64,
+    /// `added` | `deleted` | `modified`, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// 200 body of `vcs.apply` (`{ applied }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VcsApplyResult {
+    /// Whether the patch applied cleanly.
+    pub applied: bool,
+}
+
+/// `{ message, reason }` payload of [`VcsApplyError`] — `reason` is `non-git` | `not-clean`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VcsApplyErrorData {
+    /// Human-readable message.
+    pub message: String,
+    /// Why the apply failed (`non-git` = not a repo; `not-clean` = the patch didn't apply).
+    pub reason: String,
+}
+
+/// The `vcs.apply` typed failure (`{ name: "VcsApplyError", data }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VcsApplyError {
+    /// Always `"VcsApplyError"`.
+    pub name: String,
+    /// Error payload.
+    pub data: VcsApplyErrorData,
+}
+
+/// The `vcs.apply` 400 union: `anyOf[VcsApplyError, InvalidRequestError]`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum VcsApplyRequestError {
+    /// The patch could not be applied.
+    Apply(VcsApplyError),
+    /// The request was otherwise invalid.
+    Invalid(InvalidRequestError),
+}
+
 /// The tool call a [`PermissionRequest`] is gating (`{ messageID, callID }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PermissionRequestTool {

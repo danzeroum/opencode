@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **78/168 (46%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **82/168 (49%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -14,8 +14,8 @@
 - ✅ T1.2 `app.skills` (`/skill`), `formatter.status` (`/formatter`, vazio até config de formatters), `event.subscribe` (V1 `/event`, SSE reusa o bus) — **#144**
 - ⏳ T1.3 `provider.list` (`/provider`) + `provider.auth` (`/provider/auth`) — precisam do fecho `Model` (catálogo) + `ProviderAuthMethod` (união de prompts); movido p/ junto do épico de providers
 
-**Tier 2 — Git/VCS (fundação `gix`/git-tool compartilhada):**
-- ⏳ T2 `vcs.status`/`vcs.diff`/`vcs.diff.raw`/`vcs.apply` + `project.initGit`
+**Tier 2 — Git/VCS (git via binário, reusa `git_raw`/`parse_file_status`):**
+- ✅ T2 `vcs.status`/`vcs.diff`/`vcs.diff.raw`/`vcs.apply` (status/numstat→`VcsFileStatus`, per-file patch→`VcsFileDiff`, raw `git diff` SSE-like, `git apply` stdin) — **#145**. `project.initGit` → junto de `project.update` (T3.1, grupo project).
 
 **Tier 3 — CRUD sobre stores existentes:**
 - ⏳ T3.1 `project.update` (PATCH project)

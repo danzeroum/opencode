@@ -4190,6 +4190,10 @@ async fn v2_provider_get(
         app_skills,
         formatter_status,
         v1_event,
+        vcs_status,
+        vcs_diff,
+        vcs_diff_raw,
+        vcs_apply,
         tool_list,
         tool_ids,
         config_get,
@@ -4989,6 +4993,223 @@ async fn vcs_get(
         branch,
         default_branch,
     })
+}
+
+/// Resolve the working directory for a VCS request from the `directory` query param, else the process
+/// cwd (mirrors [`vcs_get`]).
+fn vcs_dir(params: &std::collections::HashMap<String, String>) -> String {
+    params
+        .get("directory")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        })
+}
+
+/// `git -C dir apply` the `patch` over stdin; `true` if it applied cleanly.
+async fn git_apply(dir: &str, patch: &str) -> bool {
+    use tokio::io::AsyncWriteExt;
+    let mut child = match tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["apply", "--whitespace=nowarn"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(patch.as_bytes()).await.is_err() {
+            return false;
+        }
+        let _ = stdin.shutdown().await;
+    }
+    child.wait().await.map(|s| s.success()).unwrap_or(false)
+}
+
+/// `GET /vcs/status` — changed files vs HEAD (group `vcs`). Matches the golden `vcs.status`: 200
+/// `[VcsFileStatus]`, 400 `BadRequestError`. Reuses [`parse_file_status`] (porcelain + numstat); empty
+/// outside a repo.
+#[utoipa::path(
+    get,
+    path = "/vcs/status",
+    operation_id = "vcs.status",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "VCS status", body = Vec<opencode_proto::VcsFileStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "vcs"
+)]
+async fn vcs_status(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<opencode_proto::VcsFileStatus>> {
+    let dir = vcs_dir(&params);
+    let porcelain = git_raw(&dir, &["status", "--porcelain"])
+        .await
+        .unwrap_or_default();
+    let numstat = git_raw(&dir, &["diff", "--numstat", "HEAD"])
+        .await
+        .unwrap_or_default();
+    Json(
+        parse_file_status(&porcelain, &numstat)
+            .into_iter()
+            .map(|f| opencode_proto::VcsFileStatus {
+                file: f.path,
+                additions: f.added as f64,
+                deletions: f.removed as f64,
+                status: f.status,
+            })
+            .collect(),
+    )
+}
+
+/// `GET /vcs/diff` — per-file diffs vs HEAD (group `vcs`). Matches the golden `vcs.diff`: 200
+/// `[VcsFileDiff]`, 400 `BadRequestError`. The change set from [`parse_file_status`] plus each file's
+/// unified patch (`git diff HEAD -- <file>`).
+#[utoipa::path(
+    get,
+    path = "/vcs/diff",
+    operation_id = "vcs.diff",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "VCS diff", body = Vec<opencode_proto::VcsFileDiff>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "vcs"
+)]
+async fn vcs_diff(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<opencode_proto::VcsFileDiff>> {
+    let dir = vcs_dir(&params);
+    let porcelain = git_raw(&dir, &["status", "--porcelain"])
+        .await
+        .unwrap_or_default();
+    let numstat = git_raw(&dir, &["diff", "--numstat", "HEAD"])
+        .await
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for f in parse_file_status(&porcelain, &numstat) {
+        let patch = git_raw(&dir, &["diff", "HEAD", "--", &f.path])
+            .await
+            .filter(|s| !s.is_empty());
+        out.push(opencode_proto::VcsFileDiff {
+            file: f.path,
+            patch,
+            additions: f.added as f64,
+            deletions: f.removed as f64,
+            status: Some(f.status),
+        });
+    }
+    Json(out)
+}
+
+/// `GET /vcs/diff/raw` — the raw unified diff vs HEAD (group `vcs`). Matches the golden `vcs.diff.raw`:
+/// 200 `text/x-diff`, 400 `BadRequestError`. (Non-JSON body — the OpenAPI diff doesn't compare it.)
+#[utoipa::path(
+    get,
+    path = "/vcs/diff/raw",
+    operation_id = "vcs.diff.raw",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Raw diff", content_type = "text/x-diff; charset=utf-8", body = String),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "vcs"
+)]
+async fn vcs_diff_raw(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let dir = vcs_dir(&params);
+    let body = git_raw(&dir, &["diff", "HEAD"]).await.unwrap_or_default();
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/x-diff; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+/// Request body of `vcs.apply` (`{ patch }`).
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct VcsApplyBody {
+    patch: String,
+}
+
+/// `vcs.apply` 400 responder — the typed `VcsApplyError` (`non-git` | `not-clean`).
+pub struct VcsApplyFailure(opencode_proto::VcsApplyErrorData);
+
+impl axum::response::IntoResponse for VcsApplyFailure {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(opencode_proto::VcsApplyError {
+                name: "VcsApplyError".to_string(),
+                data: self.0,
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// `POST /vcs/apply` — apply a unified-diff patch to the working tree (group `vcs`). Matches the golden
+/// `vcs.apply`: 200 `{ applied }`, 400 union (`VcsApplyError` / `InvalidRequestError`). 400s `non-git`
+/// outside a repo and `not-clean` when the patch doesn't apply.
+#[utoipa::path(
+    post,
+    path = "/vcs/apply",
+    operation_id = "vcs.apply",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Applied", body = opencode_proto::VcsApplyResult),
+        (status = 400, description = "Bad request", body = opencode_proto::VcsApplyRequestError)
+    ),
+    tag = "vcs"
+)]
+async fn vcs_apply(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<VcsApplyBody>,
+) -> Result<Json<opencode_proto::VcsApplyResult>, VcsApplyFailure> {
+    let dir = vcs_dir(&params);
+    if git_field(&dir, &["rev-parse", "--is-inside-work-tree"])
+        .await
+        .as_deref()
+        != Some("true")
+    {
+        return Err(VcsApplyFailure(opencode_proto::VcsApplyErrorData {
+            message: "not a git repository".to_string(),
+            reason: "non-git".to_string(),
+        }));
+    }
+    if git_apply(&dir, &body.patch).await {
+        Ok(Json(opencode_proto::VcsApplyResult { applied: true }))
+    } else {
+        Err(VcsApplyFailure(opencode_proto::VcsApplyErrorData {
+            message: "patch did not apply cleanly".to_string(),
+            reason: "not-clean".to_string(),
+        }))
+    }
 }
 
 /// `GET /agent` — list available agents (group `instance`). Matches the golden `app.agents`: 200
@@ -5913,6 +6134,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/{sessionID}/abort", post(session_abort));
         router = router.route("/instance/dispose", post(instance_dispose));
         router = router.route("/vcs", get(vcs_get));
+        router = router.route("/vcs/status", get(vcs_status));
+        router = router.route("/vcs/diff", get(vcs_diff));
+        router = router.route("/vcs/diff/raw", get(vcs_diff_raw));
+        router = router.route("/vcs/apply", post(vcs_apply));
         router = router.route("/agent", get(app_agents));
         router = router.route("/command", get(command_list));
         router = router.route("/skill", get(app_skills));
