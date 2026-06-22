@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **75/168 (45%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **78/168 (46%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -11,7 +11,8 @@
 
 **Tier 1 — Reads triviais (dado já existe, sem subsistema novo):**
 - ✅ T1.1 `tool.list` + `tool.ids` (`/experimental/tool[/ids]`, reusa `tool_definitions()`) — **#143**
-- ⏳ T1.2 `app.skills` (`/skill`), `provider.list` (`/provider`), `provider.auth` (`/provider/auth`), `formatter.status` (`/formatter`), `event.subscribe` (V1 `/event`)
+- ✅ T1.2 `app.skills` (`/skill`), `formatter.status` (`/formatter`, vazio até config de formatters), `event.subscribe` (V1 `/event`, SSE reusa o bus) — **#144**
+- ⏳ T1.3 `provider.list` (`/provider`) + `provider.auth` (`/provider/auth`) — precisam do fecho `Model` (catálogo) + `ProviderAuthMethod` (união de prompts); movido p/ junto do épico de providers
 
 **Tier 2 — Git/VCS (fundação `gix`/git-tool compartilhada):**
 - ⏳ T2 `vcs.status`/`vcs.diff`/`vcs.diff.raw`/`vcs.apply` + `project.initGit`

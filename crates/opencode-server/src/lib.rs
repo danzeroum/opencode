@@ -4187,6 +4187,9 @@ async fn v2_provider_get(
         session_unrevert,
         app_agents,
         command_list,
+        app_skills,
+        formatter_status,
+        v1_event,
         tool_list,
         tool_ids,
         config_get,
@@ -5043,6 +5046,90 @@ async fn command_list(
     )
 }
 
+/// `GET /skill` — list available skills (group `instance`). Matches the golden `app.skills`: 200
+/// `[{ name, description?, location, content }]`, 400 `BadRequestError`. Loads the same `.opencode`
+/// skill markdown as `v2.skill.list` and maps each to the V1 [`SkillInfo`] shape (no `slash` flag).
+#[utoipa::path(
+    get,
+    path = "/skill",
+    operation_id = "app.skills",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "List of skills", body = Vec<opencode_proto::SkillInfo>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn app_skills(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<opencode_proto::SkillInfo>> {
+    let dir = v1_load_dir(&params);
+    Json(
+        load_skills(&dir)
+            .into_iter()
+            .map(|s| opencode_proto::SkillInfo {
+                name: s.name,
+                description: s.description,
+                location: s.location,
+                content: s.content,
+            })
+            .collect(),
+    )
+}
+
+/// `GET /formatter` — configured code formatters (group `instance`). Matches the golden
+/// `formatter.status`: 200 `[FormatterStatus]`, 400 `BadRequestError`. Formatters are config-driven and
+/// the native config doesn't model them yet, so this is an empty list until that lands (a fresh install
+/// has no formatters configured).
+#[utoipa::path(
+    get,
+    path = "/formatter",
+    operation_id = "formatter.status",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Formatter status", body = Vec<opencode_proto::FormatterStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "instance"
+)]
+async fn formatter_status() -> Json<Vec<opencode_proto::FormatterStatus>> {
+    Json(Vec::new())
+}
+
+/// `GET /event` — the V1 event stream (group `event`). Matches the golden `event.subscribe`: a
+/// `text/event-stream` (200). Shares the in-process event bus with `v2.event.subscribe`/`global.event`
+/// (the SSE body isn't compared by the OpenAPI diff — only `application/json` schemas).
+#[utoipa::path(
+    get,
+    path = "/event",
+    operation_id = "event.subscribe",
+    responses(
+        (status = 200, description = "Event stream", content_type = "text/event-stream", body = String)
+    ),
+    tag = "event"
+)]
+async fn v1_event(
+    State(state): State<ServerState>,
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use futures::StreamExt;
+    let stream = state.ctx.event_bus().subscribe().map(|event| {
+        let data = serde_json::to_string(&contract_event_payload(&event))
+            .unwrap_or_else(|_| "{}".to_string());
+        Ok(axum::response::sse::Event::default()
+            .event("message")
+            .data(data))
+    });
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 /// `GET /experimental/tool` — list the agent's callable tools (group `experimental`). Matches the golden
 /// `tool.list`: 200 `[ToolListItem]` (`{ id, description, parameters }`), 400 union. Lists the native
 /// tool definitions plus the `question` tool the runner offers; `parameters` is each tool's JSON Schema.
@@ -5828,6 +5915,8 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/vcs", get(vcs_get));
         router = router.route("/agent", get(app_agents));
         router = router.route("/command", get(command_list));
+        router = router.route("/skill", get(app_skills));
+        router = router.route("/formatter", get(formatter_status));
     }
     if state.routes.handles("file") {
         router = router.route("/find/file", get(find_files));
@@ -5913,6 +6002,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("event") {
         router = router.route("/api/event", get(v2_event_subscribe));
+        router = router.route("/event", get(v1_event));
     }
     if state.routes.handles("project") {
         router = router.route("/project", get(project_list));

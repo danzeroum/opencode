@@ -1696,6 +1696,33 @@ pub struct SkillV2Info {
     pub content: String,
 }
 
+/// One entry of `app.skills` (`GET /skill`, the V1 instance route): `{ name, description?, location,
+/// content }`. Like [`SkillV2Info`] but without the `slash` flag (the V1 shape doesn't carry it).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SkillInfo {
+    /// Skill name.
+    pub name: String,
+    /// Optional description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Source location (path or origin id).
+    pub location: String,
+    /// Skill body/content.
+    pub content: String,
+}
+
+/// One entry of `formatter.status` (`GET /formatter`): a configured code formatter and whether it's
+/// enabled (`{ name, extensions, enabled }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct FormatterStatus {
+    /// Formatter name.
+    pub name: String,
+    /// File extensions it handles.
+    pub extensions: Vec<String>,
+    /// Whether it is enabled (its command resolved).
+    pub enabled: bool,
+}
+
 /// One entry of `tool.list` (`GET /experimental/tool`): a tool's id, description, and JSON-Schema
 /// parameters. `parameters` is a free-form JSON value (the golden schema is the empty/any schema `{}`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
