@@ -1696,8 +1696,17 @@ pub struct SkillV2Info {
     pub content: String,
 }
 
-/// 200 body of `v2.skill.list` (GET /api/skill): the `Location.response` wrapper `{ location, data }`
-/// around the skill list.
+/// One entry of `tool.list` (`GET /experimental/tool`): a tool's id, description, and JSON-Schema
+/// parameters. `parameters` is a free-form JSON value (the golden schema is the empty/any schema `{}`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ToolListItem {
+    /// The tool id (its name).
+    pub id: String,
+    /// Human/model-facing description.
+    pub description: String,
+    /// JSON Schema for the tool's arguments.
+    pub parameters: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct SkillListResponse {
     /// The resolved request location.

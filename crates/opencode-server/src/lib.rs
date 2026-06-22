@@ -4187,6 +4187,8 @@ async fn v2_provider_get(
         session_unrevert,
         app_agents,
         command_list,
+        tool_list,
+        tool_ids,
         config_get,
         config_update,
         config_providers,
@@ -5041,6 +5043,51 @@ async fn command_list(
     )
 }
 
+/// `GET /experimental/tool` — list the agent's callable tools (group `experimental`). Matches the golden
+/// `tool.list`: 200 `[ToolListItem]` (`{ id, description, parameters }`), 400 union. Lists the native
+/// tool definitions plus the `question` tool the runner offers; `parameters` is each tool's JSON Schema.
+#[utoipa::path(
+    get,
+    path = "/experimental/tool",
+    operation_id = "tool.list",
+    responses(
+        (status = 200, description = "Tools", body = Vec<opencode_proto::ToolListItem>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "experimental"
+)]
+async fn tool_list() -> Json<Vec<opencode_proto::ToolListItem>> {
+    let mut defs = native_tools::tool_definitions();
+    defs.push(native_tools::question_tool_definition());
+    Json(
+        defs.into_iter()
+            .map(|t| opencode_proto::ToolListItem {
+                id: t.name,
+                description: t.description.unwrap_or_default(),
+                parameters: t.input_schema,
+            })
+            .collect(),
+    )
+}
+
+/// `GET /experimental/tool/ids` — the ids of the agent's callable tools (group `experimental`). Matches
+/// the golden `tool.ids`: 200 `[string]`, 400 union.
+#[utoipa::path(
+    get,
+    path = "/experimental/tool/ids",
+    operation_id = "tool.ids",
+    responses(
+        (status = 200, description = "Tool ids", body = Vec<String>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "experimental"
+)]
+async fn tool_ids() -> Json<Vec<String>> {
+    let mut defs = native_tools::tool_definitions();
+    defs.push(native_tools::question_tool_definition());
+    Json(defs.into_iter().map(|t| t.name).collect())
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -5890,6 +5937,10 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("agent") {
         router = router.route("/api/agent", get(v2_agent_list));
+    }
+    if state.routes.handles("experimental") {
+        router = router.route("/experimental/tool", get(tool_list));
+        router = router.route("/experimental/tool/ids", get(tool_ids));
     }
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));

@@ -2,8 +2,52 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-20 · **Foco atual:** superfície de **leitura lean coberta** (rotas GET sobre dado existente) + Admin config CRUD; restam **épicos** (ver "Estado & próximos épicos").
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **75/168 (45%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
+
+## Plano de cutover total (alvo B) — ordem de execução
+
+> Ordenado por facilidade de desenvolvimento + dependências (fundações antes de dependentes, p/ não retrabalhar). ~95 ops em ~20 fatias batched. Marco a cada PR mergeado.
+
+**Tier 1 — Reads triviais (dado já existe, sem subsistema novo):**
+- ✅ T1.1 `tool.list` + `tool.ids` (`/experimental/tool[/ids]`, reusa `tool_definitions()`) — **#143**
+- ⏳ T1.2 `app.skills` (`/skill`), `provider.list` (`/provider`), `provider.auth` (`/provider/auth`), `formatter.status` (`/formatter`), `event.subscribe` (V1 `/event`)
+
+**Tier 2 — Git/VCS (fundação `gix`/git-tool compartilhada):**
+- ⏳ T2 `vcs.status`/`vcs.diff`/`vcs.diff.raw`/`vcs.apply` + `project.initGit`
+
+**Tier 3 — CRUD sobre stores existentes:**
+- ⏳ T3.1 `project.update` (PATCH project)
+- ⏳ T3.2 `session.deleteMessage`, `part.update`, `part.delete` (mutações no `session_message`)
+- ⏳ T3.3 `v2.session.create`, `v2.session.wait`
+
+**Tier 4 — Ações de sessão na engine (reusa Message/Part + `drive_one_turn`):**
+- ⏳ T4.1 `session.prompt` (V1 sync), `session.command`, `session.shell`
+- ⏳ T4.2 `session.diff`, `session.fork`
+- ⏳ T4.3 `session.summarize`, `v2.session.compact`
+
+**Tier 5 — Auth/credenciais/integrações (épico OAuth):**
+- ⏳ T5.1 `auth.set`/`auth.remove` (escreve `auth.json`)
+- ⏳ T5.2 `v2.credential.*` (tabela `credential`)
+- ⏳ T5.3 `provider.oauth.*`, `v2.integration.*`, `v2.permission.saved.remove`
+
+**Tier 6 — Subsistemas novos:**
+- ⏳ T6.1 MCP runtime (`rmcp`): `mcp.add/connect/disconnect` + `mcp.auth.*`
+- ⏳ T6.2 PTY (`portable-pty`): `pty.*`
+- ⏳ T6.3 LSP runtime (`lsp.status` real)
+
+**Tier 7 — TUI + sync + experimental:**
+- ⏳ T7.1 `tui.*` (13)
+- ⏳ T7.2 `sync.*` (4)
+- ⏳ T7.3 `worktree.*`, `experimental.workspace/console/controlPlane/session/resource.*`, `v2.projectCopy.*`, `global.upgrade`
+
+**Tier 8 — Cutover (Fase 6):**
+- ⏳ T8.1 Schema ownership (Rust aplica a migração consolidada)
+- ⏳ T8.2 Remover `proxy::proxy_handler` fallback + habilitar todos os grupos
+- ⏳ T8.3 Release: `cargo-dist` + reapontar wrapper npm `opencode-ai`; parar de publicar `core/server/llm`; CI TS off
+- ⏳ T8.4 Host de plugins JS de terceiros (se necessário)
+
+---
 > **Rotas nativas contrato-enforçadas: 68 paths** (várias com múltiplos métodos) · PRs desta rodada autônoma: #69–#139. **Engine**: runner loop + permission gating (#129–#131) + question flow fim-a-fim (#133–#134) + `prompt_async` (#135) + HITL V1 (#136) + `session.init` (#137). **Fundação V1 `Message`/`Part`** (40 tipos) + `session.message` (#138). **Histórico de chat V1 real** — `session.messages`/`session.message` projetam o timeline V2 → V1 `{info,parts}` (é o endpoint que a GUI web usa) (#139). **Continuidade de contexto** — o runner semeia cada turno com o histórico da conversa (o modelo lembra dos turnos anteriores; antes via só o prompt novo) (#140). **Credenciais reais** — `OpencodeCredentials` lê `auth.json`/`OPENCODE_AUTH_CONTENT` (chaves do `opencode auth login`, keyed por providerID) com fallback p/ env, então o LLM real funciona com as chaves que a CLI/GUI já guardam (#141). **Multi-provider OpenAI-compatible** — `ProtocolKind` + `OpenAiCompatibleEngine` servem deepseek/glm/ollama/openai/groq/… (não só Anthropic) (#142). CI `rust` verde (#119).
 
 ## Como configurar providers (deepseek, glm, ollama, …)
