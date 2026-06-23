@@ -2,7 +2,9 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **89/168 (53%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **91/168 (54%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+>
+> ⚠️ **Nota de ferramentas (2026-06-22):** o MCP do GitHub caiu — os slices a partir do T4.2 estão sendo **commitados e enviados** para `claude/affectionate-davinci-05ifmg` (verificados local: build/clippy/test/`openapi-diff`), mas a **abertura/merge de PR fica pendente** até o MCP voltar. Os commits empilham na branch, prontos pra um PR.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -24,7 +26,7 @@
 
 **Tier 4 — Ações de sessão na engine (reusa Message/Part + `drive_one_turn`):**
 - ⏳ T4.1 `session.prompt` (V1 sync), `session.command`, `session.shell`
-- ⏳ T4.2 `session.diff`, `session.fork`
+- ✅ T4.2 `session.fork` (cria sessão + copia timeline, trunca em `messageID?`) + `session.diff` (working-tree dir diff → `SnapshotFileDiff`, reusa VCS) — **commit (PR pendente MCP)**
 - ⏳ T4.3 `session.summarize`, `v2.session.compact`
 
 **Tier 5 — Auth/credenciais/integrações (épico OAuth):**
