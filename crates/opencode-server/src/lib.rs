@@ -2241,6 +2241,155 @@ async fn session_children(
     Ok(Json(Vec::new()))
 }
 
+/// Body of `session.fork` (`{ messageID? }` — truncate the copied history at this message).
+#[derive(serde::Deserialize, utoipa::ToSchema, Default)]
+struct SessionForkBody {
+    #[serde(rename = "messageID", default)]
+    message_id: Option<String>,
+}
+
+/// `POST /session/{sessionID}/fork` — fork a session (group `session`). Matches the golden
+/// `session.fork`: 200 `Session`, 400 union, 404 `NotFoundError`. Creates a new session copying the
+/// source's project/dir/agent/model and its timeline (optionally truncated at `messageID`); returns the
+/// new V1 `Session`.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/fork",
+    operation_id = "session.fork",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Forked session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_fork(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    body: Option<Json<SessionForkBody>>,
+) -> Result<Json<opencode_proto::Session>, TodoFailure> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let source = state
+        .ctx
+        .sessions()
+        .get_full(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .ok_or_else(|| TodoFailure::NotFound(session_id.clone()))?;
+    let new_id = format!("ses_{}", ulid::Ulid::new());
+    let now = now_ms() as i64;
+    let mut record = source.clone();
+    record.id = new_id.clone();
+    record.slug = new_id.trim_start_matches("ses_").to_ascii_lowercase();
+    record.parent_id = Some(session_id.clone());
+    record.time_created = now;
+    record.time_updated = now;
+    record.time_archived = None;
+    state
+        .ctx
+        .sessions()
+        .create(&record)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?;
+    // Copy the timeline (optionally up to `messageID`).
+    let cutoff = match &body.message_id {
+        Some(mid) => state
+            .ctx
+            .session_messages()
+            .seq_of(&session_id, mid)
+            .await
+            .map_err(|e| TodoFailure::Internal(e.to_string()))?,
+        None => None,
+    };
+    let rows = state
+        .ctx
+        .session_messages()
+        .list(
+            &session_id,
+            None,
+            None,
+            opencode_db::MessageOrder::Asc,
+            None,
+        )
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?;
+    for row in rows {
+        if let Some(max_seq) = cutoff {
+            if row.seq > max_seq {
+                continue;
+            }
+        }
+        state
+            .ctx
+            .session_messages()
+            .append(&new_id, &row.id, &row.kind, row.data)
+            .await
+            .map_err(|e| TodoFailure::Internal(e.to_string()))?;
+    }
+    Ok(Json(session_v1_from_record(record)))
+}
+
+/// `GET /session/{sessionID}/diff` — the session's working-tree changes (group `session`). Matches the
+/// golden `session.diff`: 200 `[SnapshotFileDiff]`, 400 `BadRequestError`. Best-effort: the change set of
+/// the session's directory vs HEAD (per-file numstat + patch), reusing the VCS helpers. (Per-session
+/// snapshot attribution — only the files this session touched — is a follow-up; the contract has no 404,
+/// so an unknown session is an empty diff.)
+#[utoipa::path(
+    get,
+    path = "/session/{sessionID}/diff",
+    operation_id = "session.diff",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Session diff", body = Vec<opencode_proto::SnapshotFileDiff>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "session"
+)]
+async fn session_diff(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<opencode_proto::SnapshotFileDiff>>, ApiBadRequest> {
+    let Some(session) = state
+        .ctx
+        .sessions()
+        .get_full(&session_id)
+        .await
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?
+    else {
+        return Ok(Json(Vec::new()));
+    };
+    let dir = session.directory;
+    let porcelain = git_raw(&dir, &["status", "--porcelain"])
+        .await
+        .unwrap_or_default();
+    let numstat = git_raw(&dir, &["diff", "--numstat", "HEAD"])
+        .await
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for f in parse_file_status(&porcelain, &numstat) {
+        let patch = git_raw(&dir, &["diff", "HEAD", "--", &f.path])
+            .await
+            .filter(|s| !s.is_empty());
+        out.push(opencode_proto::SnapshotFileDiff {
+            file: Some(f.path),
+            patch,
+            additions: f.added as f64,
+            deletions: f.removed as f64,
+            status: Some(f.status),
+        });
+    }
+    Ok(Json(out))
+}
+
 /// The id of a V1 [`opencode_proto::Message`] (user or assistant), for `before`-anchor / single lookup.
 fn v1_message_id(message: &opencode_proto::Message) -> &str {
     match message {
@@ -4641,6 +4790,8 @@ async fn v2_provider_get(
         v2_session_prompt,
         session_todo,
         session_children,
+        session_fork,
+        session_diff,
         session_messages,
         session_message,
         session_delete_message,
@@ -6676,6 +6827,8 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/status", get(session_status));
         router = router.route("/session/{sessionID}/todo", get(session_todo));
         router = router.route("/session/{sessionID}/children", get(session_children));
+        router = router.route("/session/{sessionID}/fork", post(session_fork));
+        router = router.route("/session/{sessionID}/diff", get(session_diff));
         router = router.route("/session/{sessionID}/message", get(session_messages));
         router = router.route(
             "/session/{sessionID}/message/{messageID}",
