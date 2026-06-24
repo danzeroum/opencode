@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **95/168 (57%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo. (MCP do GitHub voltou — fluxo normal de PR/merge retomado.)
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **96/168 (57%)** — **Tier 4 completo**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -25,7 +25,7 @@
 **Tier 4 — Ações de sessão na engine (reusa Message/Part + `drive_one_turn`):**
 - ✅ T4.2 `session.fork` (cria sessão + copia timeline, trunca em `messageID?`) + `session.diff` (working-tree dir diff → `SnapshotFileDiff`, reusa VCS) — **#149**
 - ✅ T4.1/4.3 `session.command`/`session.shell` (404/400 — stub na referência; novo wrapper `AssistantMessageWithParts`), `session.summarize` (404/200 false), `v2.session.compact` (404/503) — fiação fiel de contrato — **#150**
-- ⏳ T4.4 `session.prompt` (V1 sync, POST /session/{id}/message) — **real**: run síncrono + projeção do último assistant → `{info: AssistantMessage, parts}` (não é stub na referência; próximo)
+- ✅ T4.4 `session.prompt` (V1 sync, POST /session/{id}/message) — **real**: resolve modelo → `drive_one_turn` (history-seeded, persiste) → projeta o último assistant → `{info: AssistantMessage, parts}` — **#151**. **Tier 4 completo.**
 
 **Tier 5 — Auth/credenciais/integrações (épico OAuth):**
 - ⏳ T5.1 `auth.set`/`auth.remove` (escreve `auth.json`)
