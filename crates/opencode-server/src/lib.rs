@@ -2390,6 +2390,222 @@ async fn session_diff(
     Ok(Json(out))
 }
 
+/// Responder for the engine-action stubs (`session.command`/`shell`): 404 `NotFoundError` for an
+/// unknown session, else 400 `InvalidRequestError` (a valid arm of the golden 400 union) for an action
+/// the native runner doesn't drive synchronously yet.
+pub enum EngineActionFailure {
+    /// No such session (404).
+    NotFound(String),
+    /// The action isn't available natively yet (400).
+    Unavailable(String),
+}
+
+impl axum::response::IntoResponse for EngineActionFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            EngineActionFailure::NotFound(id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::NotFoundError {
+                    name: "NotFoundError".to_string(),
+                    data: opencode_proto::NotFoundData {
+                        message: format!("Session not found: {id}"),
+                    },
+                }),
+            )
+                .into_response(),
+            EngineActionFailure::Unavailable(message) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message,
+                    kind: None,
+                    field: None,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `404` for an unknown session, else the `Unavailable(message)` stub error (the native runner doesn't
+/// drive a synchronous command/shell turn yet — the reference stubs these too).
+async fn engine_action_unavailable(
+    state: &ServerState,
+    session_id: String,
+    message: &str,
+) -> EngineActionFailure {
+    match state.ctx.sessions().get(&session_id).await {
+        Ok(Some(_)) => EngineActionFailure::Unavailable(message.to_string()),
+        Ok(None) => EngineActionFailure::NotFound(session_id),
+        Err(e) => EngineActionFailure::Unavailable(e.to_string()),
+    }
+}
+
+/// `POST /session/{sessionID}/command` — run a slash-command turn (group `session`). Matches the golden
+/// `session.command`: 200 `{ info: AssistantMessage, parts }`, 400 union, 404 `NotFoundError`. The native
+/// runner doesn't drive a synchronous command turn yet (the reference stubs this too), so a known session
+/// 400s "unavailable"; an unknown session 404s. The 200 type is declared so the contract is verified.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/command",
+    operation_id = "session.command",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Command result", body = opencode_proto::AssistantMessageWithParts),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_command(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::AssistantMessageWithParts>, EngineActionFailure> {
+    Err(engine_action_unavailable(
+        &state,
+        session_id,
+        "synchronous command execution is not available natively yet",
+    )
+    .await)
+}
+
+/// `POST /session/{sessionID}/shell` — run a shell command inline (group `session`). Matches the golden
+/// `session.shell`: 200 `{ info: Message, parts }`, 400 union, 404 `NotFoundError`, 409 `SessionBusyError`.
+/// Stubbed in the reference (`OperationUnavailableError`); a known session 400s "unavailable", unknown
+/// 404s. The 200/409 types are declared for contract parity.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/shell",
+    operation_id = "session.shell",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Shell result", body = opencode_proto::MessageWithParts),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError),
+        (status = 409, description = "Session busy", body = opencode_proto::SessionBusyError)
+    ),
+    tag = "session"
+)]
+async fn session_shell(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::MessageWithParts>, EngineActionFailure> {
+    Err(engine_action_unavailable(
+        &state,
+        session_id,
+        "inline shell execution is not available natively yet",
+    )
+    .await)
+}
+
+/// `POST /session/{sessionID}/summarize` — summarize/compact the session (group `session`). Matches the
+/// golden `session.summarize`: 200 `boolean`, 400 union, 404 `NotFoundError`. Compaction isn't ported
+/// yet (the reference stubs it), so a known session returns `false` (nothing summarized); unknown 404s.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/summarize",
+    operation_id = "session.summarize",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Summarized", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_summarize(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<bool>, TodoFailure> {
+    if state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| TodoFailure::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(TodoFailure::NotFound(session_id));
+    }
+    Ok(Json(false))
+}
+
+/// `v2.session.compact` responder: 404 `SessionNotFoundError`, else 503 `ServiceUnavailableError`.
+pub enum V2CompactFailure {
+    /// No such session (404).
+    NotFound(String),
+    /// Compaction isn't available natively yet (503).
+    Unavailable(String),
+}
+
+impl axum::response::IntoResponse for V2CompactFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            V2CompactFailure::NotFound(id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::SessionNotFoundError {
+                    tag: "SessionNotFoundError".to_string(),
+                    session_id: id.clone(),
+                    message: format!("Session not found: {id}"),
+                }),
+            )
+                .into_response(),
+            V2CompactFailure::Unavailable(message) => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(opencode_proto::ServiceUnavailableError {
+                    tag: "ServiceUnavailableError".to_string(),
+                    message,
+                    service: None,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `POST /api/session/{sessionID}/compact` — compact the session context (group `session`). Matches the
+/// golden `v2.session.compact`: 204, 400, 401, 404 `SessionNotFoundError`, 503 `ServiceUnavailableError`.
+/// Compaction isn't ported yet (the reference stubs it as unavailable), so a known session 503s; unknown
+/// 404s.
+#[utoipa::path(
+    post,
+    path = "/api/session/{sessionID}/compact",
+    operation_id = "v2.session.compact",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses(
+        (status = 204, description = "Compacted"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError),
+        (status = 404, description = "Session not found", body = opencode_proto::SessionNotFoundError),
+        (status = 503, description = "Unavailable", body = opencode_proto::ServiceUnavailableError)
+    ),
+    tag = "session"
+)]
+async fn v2_session_compact(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, V2CompactFailure> {
+    match state.ctx.sessions().get(&session_id).await {
+        Ok(Some(_)) => Err(V2CompactFailure::Unavailable(
+            "context compaction is not available natively yet".to_string(),
+        )),
+        Ok(None) => Err(V2CompactFailure::NotFound(session_id)),
+        Err(e) => Err(V2CompactFailure::Unavailable(e.to_string())),
+    }
+}
+
 /// The id of a V1 [`opencode_proto::Message`] (user or assistant), for `before`-anchor / single lookup.
 fn v1_message_id(message: &opencode_proto::Message) -> &str {
     match message {
@@ -4792,6 +5008,10 @@ async fn v2_provider_get(
         session_children,
         session_fork,
         session_diff,
+        session_command,
+        session_shell,
+        session_summarize,
+        v2_session_compact,
         session_messages,
         session_message,
         session_delete_message,
@@ -6829,6 +7049,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/{sessionID}/children", get(session_children));
         router = router.route("/session/{sessionID}/fork", post(session_fork));
         router = router.route("/session/{sessionID}/diff", get(session_diff));
+        router = router.route("/session/{sessionID}/command", post(session_command));
+        router = router.route("/session/{sessionID}/shell", post(session_shell));
+        router = router.route("/session/{sessionID}/summarize", post(session_summarize));
+        router = router.route("/api/session/{sessionID}/compact", post(v2_session_compact));
         router = router.route("/session/{sessionID}/message", get(session_messages));
         router = router.route(
             "/session/{sessionID}/message/{messageID}",

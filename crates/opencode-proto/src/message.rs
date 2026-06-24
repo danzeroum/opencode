@@ -933,3 +933,13 @@ pub struct MessageWithParts {
     /// Its content parts.
     pub parts: Vec<Part>,
 }
+
+/// An assistant message together with its parts (`{ info, parts }`) — the unit returned by
+/// `session.command`/`session.prompt` (V1), where `info` is specifically an [`AssistantMessage`].
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AssistantMessageWithParts {
+    /// The assistant message envelope.
+    pub info: AssistantMessage,
+    /// Its content parts.
+    pub parts: Vec<Part>,
+}
