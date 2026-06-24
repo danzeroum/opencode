@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **96/168 (57%)** — **Tier 4 completo**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **98/168 (58%)** — Tier 4 completo, Tier 5 em andamento. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -28,7 +28,7 @@
 - ✅ T4.4 `session.prompt` (V1 sync, POST /session/{id}/message) — **real**: resolve modelo → `drive_one_turn` (history-seeded, persiste) → projeta o último assistant → `{info: AssistantMessage, parts}` — **#151**. **Tier 4 completo.**
 
 **Tier 5 — Auth/credenciais/integrações (épico OAuth):**
-- ⏳ T5.1 `auth.set`/`auth.remove` (escreve `auth.json`)
+- ✅ T5.1 `auth.set`/`auth.remove` (escreve/remove no `auth.json` — inverso do reader do #141; `provider::{set,remove}_auth_entry`) — **#152**
 - ⏳ T5.2 `v2.credential.*` (tabela `credential`)
 - ⏳ T5.3 `provider.oauth.*`, `v2.integration.*`, `v2.permission.saved.remove`
 
