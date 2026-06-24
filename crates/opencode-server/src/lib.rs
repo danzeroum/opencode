@@ -5133,6 +5133,8 @@ async fn v2_provider_get(
         vcs_apply,
         tool_list,
         tool_ids,
+        auth_set,
+        auth_remove,
         config_get,
         config_update,
         config_providers,
@@ -6335,6 +6337,50 @@ async fn tool_ids() -> Json<Vec<String>> {
     Json(defs.into_iter().map(|t| t.name).collect())
 }
 
+/// `PUT /auth/{providerID}` — store a provider's auth credential (group `control`). Matches the golden
+/// `auth.set`: 200 `true`, 400 union. Writes the `Auth` value (`{ type, key, … }`) into `auth.json`
+/// (the same file `OpencodeCredentials` reads), so a key set here is immediately usable by the runner.
+#[utoipa::path(
+    put,
+    path = "/auth/{providerID}",
+    operation_id = "auth.set",
+    params(("providerID" = String, Path, description = "Provider id")),
+    responses(
+        (status = 200, description = "Stored", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "control"
+)]
+async fn auth_set(
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+    Json(entry): Json<serde_json::Value>,
+) -> Result<Json<bool>, ApiBadRequest> {
+    opencode_core::provider::set_auth_entry(&provider_id, entry)
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    Ok(Json(true))
+}
+
+/// `DELETE /auth/{providerID}` — remove a provider's stored auth (group `control`). Matches the golden
+/// `auth.remove`: 200 `true`, 400 union. Deletes the `auth.json` entry (idempotent).
+#[utoipa::path(
+    delete,
+    path = "/auth/{providerID}",
+    operation_id = "auth.remove",
+    params(("providerID" = String, Path, description = "Provider id")),
+    responses(
+        (status = 200, description = "Removed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "control"
+)]
+async fn auth_remove(
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+) -> Result<Json<bool>, ApiBadRequest> {
+    opencode_core::provider::remove_auth_entry(&provider_id)
+        .map_err(|e| bad_request(e.to_string(), "Unknown"))?;
+    Ok(Json(true))
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7092,6 +7138,10 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("control") {
         router = router.route("/log", post(app_log));
+        router = router.route(
+            "/auth/{providerID}",
+            axum::routing::put(auth_set).delete(auth_remove),
+        );
     }
     if state.routes.handles("permission") {
         router = router.route("/permission", get(permission_list));

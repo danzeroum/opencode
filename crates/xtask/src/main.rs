@@ -100,6 +100,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/session/{sessionID}/shell",
     "/session/{sessionID}/summarize",
     "/api/session/{sessionID}/compact",
+    "/auth/{providerID}",
 ];
 
 #[derive(Parser)]

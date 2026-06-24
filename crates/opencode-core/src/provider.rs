@@ -206,6 +206,47 @@ fn opencode_data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".local/share/opencode")
 }
 
+/// The path to opencode's `auth.json` (`{data_dir}/auth.json`).
+pub fn auth_json_path() -> std::path::PathBuf {
+    opencode_data_dir().join("auth.json")
+}
+
+/// Read the full `auth.json` map (the file only — for read-modify-write); empty if missing/unparseable.
+fn load_auth_file() -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(auth_json_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// Write the `auth.json` map back (pretty-printed), creating the data dir if needed.
+fn write_auth_file(map: &serde_json::Map<String, serde_json::Value>) -> std::io::Result<()> {
+    let path = auth_json_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))
+        .unwrap_or_else(|_| "{}".to_string());
+    std::fs::write(&path, body)
+}
+
+/// Set a provider's stored auth entry (`auth.set`). `entry` is the raw `Auth` value
+/// (`{ type, key, … }`); it replaces any existing entry for `provider_id`.
+pub fn set_auth_entry(provider_id: &str, entry: serde_json::Value) -> std::io::Result<()> {
+    let mut map = load_auth_file();
+    map.insert(provider_id.to_string(), entry);
+    write_auth_file(&map)
+}
+
+/// Remove a provider's stored auth entry (`auth.remove`). Returns whether an entry existed.
+pub fn remove_auth_entry(provider_id: &str) -> std::io::Result<bool> {
+    let mut map = load_auth_file();
+    let existed = map.remove(provider_id).is_some();
+    write_auth_file(&map)?;
+    Ok(existed)
+}
+
 /// Reads opencode's `auth.json` — what `opencode auth login` writes — so the backend finds API keys
 /// stored by the CLI/GUI, falling back to the process environment. The file is a
 /// `{ [providerID]: { type, key?, … } }` map (mirroring the TS `Auth` service); `OPENCODE_AUTH_CONTENT`
