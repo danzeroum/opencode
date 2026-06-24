@@ -1201,6 +1201,18 @@ pub struct Provider {
     pub models: serde_json::Value,
 }
 
+/// 200 body of `provider.list` (`GET /provider`): `{ all, default, connected }` — all known providers,
+/// a `{ [providerID]: defaultModelID }` map, and the ids of providers with resolved credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ProviderListV1Response {
+    /// Every known provider.
+    pub all: Vec<Provider>,
+    /// Default model per provider (`{ [providerID]: modelID }`).
+    pub default: std::collections::HashMap<String, String>,
+    /// Provider ids that have a resolved credential (env or stored).
+    pub connected: Vec<String>,
+}
+
 /// 200 body of `config.providers` (GET /config/providers): `{ providers, default }` — the resolved
 /// provider list plus a `{ [providerID]: defaultModelID }` map.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
