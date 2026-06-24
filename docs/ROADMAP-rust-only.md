@@ -2,9 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **91/168 (54%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
->
-> ⚠️ **Nota de ferramentas (2026-06-22):** o MCP do GitHub caiu — os slices a partir do T4.2 estão sendo **commitados e enviados** para `claude/affectionate-davinci-05ifmg` (verificados local: build/clippy/test/`openapi-diff`), mas a **abertura/merge de PR fica pendente** até o MCP voltar. Os commits empilham na branch, prontos pra um PR.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **95/168 (57%)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo. (MCP do GitHub voltou — fluxo normal de PR/merge retomado.)
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -25,9 +23,9 @@
 - ✅ T3.3 `v2.session.create` (POST /api/session → `{data: SessionV2Info}`, reusa store create + `session_record_to_info`) + `v2.session.wait` (204 idle / 404; stub na referência) — **#148**. **Tier 3 completo.**
 
 **Tier 4 — Ações de sessão na engine (reusa Message/Part + `drive_one_turn`):**
-- ⏳ T4.1 `session.prompt` (V1 sync), `session.command`, `session.shell`
-- ✅ T4.2 `session.fork` (cria sessão + copia timeline, trunca em `messageID?`) + `session.diff` (working-tree dir diff → `SnapshotFileDiff`, reusa VCS) — **commit (PR pendente MCP)**
-- ⏳ T4.3 `session.summarize`, `v2.session.compact`
+- ✅ T4.2 `session.fork` (cria sessão + copia timeline, trunca em `messageID?`) + `session.diff` (working-tree dir diff → `SnapshotFileDiff`, reusa VCS) — **#149**
+- ✅ T4.1/4.3 `session.command`/`session.shell` (404/400 — stub na referência; novo wrapper `AssistantMessageWithParts`), `session.summarize` (404/200 false), `v2.session.compact` (404/503) — fiação fiel de contrato — **#150**
+- ⏳ T4.4 `session.prompt` (V1 sync, POST /session/{id}/message) — **real**: run síncrono + projeção do último assistant → `{info: AssistantMessage, parts}` (não é stub na referência; próximo)
 
 **Tier 5 — Auth/credenciais/integrações (épico OAuth):**
 - ⏳ T5.1 `auth.set`/`auth.remove` (escreve `auth.json`)
