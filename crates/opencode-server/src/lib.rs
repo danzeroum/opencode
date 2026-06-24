@@ -3489,6 +3489,100 @@ async fn session_prompt_async(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// `POST /session/{sessionID}/message` — synchronous prompt (group `session`). Matches the golden
+/// `session.prompt`: 200 `{ info: AssistantMessage, parts }`, 400 union, 404 `NotFoundError`. Unlike
+/// `prompt_async` (which admits + returns), this **drives the turn to completion** and returns the
+/// resulting assistant message: it resolves the model (body selector → the session's pinned model),
+/// runs `drive_one_turn` (history-seeded, persisted), then projects the latest assistant message + parts.
+#[utoipa::path(
+    post,
+    path = "/session/{sessionID}/message",
+    operation_id = "session.prompt",
+    params(
+        ("sessionID" = String, Path, description = "Session id"),
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    request_body = PromptAsyncBody,
+    responses(
+        (status = 200, description = "Assistant reply", body = opencode_proto::AssistantMessageWithParts),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "session"
+)]
+async fn session_prompt_v1(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    body: Option<Json<PromptAsyncBody>>,
+) -> Result<Json<opencode_proto::AssistantMessageWithParts>, PromptAsyncFailure> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let record = state
+        .ctx
+        .sessions()
+        .get(&session_id)
+        .await
+        .map_err(|e| PromptAsyncFailure::BadRequest(e.to_string()))?
+        .ok_or_else(|| PromptAsyncFailure::NotFound(session_id.clone()))?;
+    let model = match &body.model {
+        Some(m) => format!("{}/{}", m.provider_id, m.model_id),
+        None => record
+            .model
+            .as_ref()
+            .and_then(|m| {
+                let provider = m.get("providerID").and_then(|v| v.as_str())?;
+                let id = m.get("id").and_then(|v| v.as_str())?;
+                Some(format!("{provider}/{id}"))
+            })
+            .ok_or_else(|| {
+                PromptAsyncFailure::BadRequest(
+                    "no model: provide `model` or pin one on the session".to_string(),
+                )
+            })?,
+    };
+    if split_model(&model).is_err() {
+        return Err(PromptAsyncFailure::BadRequest(format!(
+            "invalid model: {model}"
+        )));
+    }
+    state.ctx.metrics().record_prompt();
+    let prompt = prompt_text_from_parts(&body.parts);
+    let system = body.system.into_iter().collect();
+    drive_one_turn(
+        &state.ctx,
+        &state.runner,
+        &session_id,
+        &model,
+        prompt,
+        system,
+        default_step_limit(),
+        None,
+    )
+    .await
+    .map_err(PromptAsyncFailure::BadRequest)?;
+    // The turn persisted its timeline; return the latest assistant message + its parts.
+    let messages = load_v1_messages(&state, &session_id)
+        .await
+        .map_err(|e| match e {
+            TodoFailure::NotFound(id) => PromptAsyncFailure::NotFound(id),
+            TodoFailure::Internal(message) => PromptAsyncFailure::BadRequest(message),
+        })?;
+    messages
+        .into_iter()
+        .rev()
+        .find_map(|m| match m.info {
+            opencode_proto::Message::Assistant(info) => {
+                Some(opencode_proto::AssistantMessageWithParts {
+                    info,
+                    parts: m.parts,
+                })
+            }
+            opencode_proto::Message::User(_) => None,
+        })
+        .map(Json)
+        .ok_or_else(|| PromptAsyncFailure::BadRequest("no assistant message produced".to_string()))
+}
+
 /// Request body for `session.init`: `{ providerID, modelID, messageID }` (lenient; `messageID` is
 /// accepted but ignored for now via serde's default unknown-field handling).
 #[derive(Default, serde::Deserialize, utoipa::ToSchema)]
@@ -5013,6 +5107,7 @@ async fn v2_provider_get(
         session_summarize,
         v2_session_compact,
         session_messages,
+        session_prompt_v1,
         session_message,
         session_delete_message,
         part_update,
@@ -7053,7 +7148,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/{sessionID}/shell", post(session_shell));
         router = router.route("/session/{sessionID}/summarize", post(session_summarize));
         router = router.route("/api/session/{sessionID}/compact", post(v2_session_compact));
-        router = router.route("/session/{sessionID}/message", get(session_messages));
+        router = router.route(
+            "/session/{sessionID}/message",
+            get(session_messages).post(session_prompt_v1),
+        );
         router = router.route(
             "/session/{sessionID}/message/{messageID}",
             get(session_message).delete(session_delete_message),
