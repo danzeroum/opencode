@@ -4302,6 +4302,68 @@ async fn v2_provider_list(
     }))
 }
 
+/// `GET /provider` — list providers, V1 shape (group `provider`). Matches the golden `provider.list`:
+/// 200 `{ all, default, connected }`, 400 `BadRequestError`. Builds each provider from the in-memory
+/// catalog (models grouped under `models`), and `connected` from the same enable logic as
+/// `v2.provider.list` (a stored credential or a set env key). `key` is omitted (never expose secrets in
+/// a list); `default` is the per-provider default model (empty until config defaults are wired).
+#[utoipa::path(
+    get,
+    path = "/provider",
+    operation_id = "provider.list",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Providers", body = opencode_proto::ProviderListV1Response),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "provider"
+)]
+async fn provider_list(
+    State(state): State<ServerState>,
+) -> Json<opencode_proto::ProviderListV1Response> {
+    let credentials = credential_map(&state).await;
+    let catalog = state.ctx.catalog();
+    let connected: Vec<String> =
+        opencode_core::catalog_v2::available_providers(&catalog, &env_present, &credentials)
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+    // Group every catalog model under its provider id as a `{ [modelID]: Model }` JSON object.
+    let mut by_provider: std::collections::HashMap<
+        String,
+        serde_json::Map<String, serde_json::Value>,
+    > = std::collections::HashMap::new();
+    for model in opencode_core::catalog_v2::models(&catalog) {
+        let id = model.id.clone();
+        if let Ok(value) = serde_json::to_value(&model) {
+            by_provider
+                .entry(model.provider_id.clone())
+                .or_default()
+                .insert(id, value);
+        }
+    }
+    let all = catalog
+        .iter()
+        .map(|(id, provider)| opencode_proto::Provider {
+            id: id.clone(),
+            name: provider.name.clone(),
+            source: "api".to_string(),
+            env: provider.env.clone(),
+            key: None,
+            options: serde_json::json!({}),
+            models: serde_json::Value::Object(by_provider.remove(id).unwrap_or_default()),
+        })
+        .collect();
+    Json(opencode_proto::ProviderListV1Response {
+        all,
+        default: std::collections::HashMap::new(),
+        connected,
+    })
+}
+
 /// `GET /api/skill` — list skills (group `skill`). Matches the golden `v2.skill.list`: 200
 /// `{ location, data }` + 400/401. Loads real skills from the global config dir's `{skill,skills}` and
 /// the project's `.opencode/{skill,skills}` (glob `{*.md, **/SKILL.md}`, project overrides global by
@@ -5160,6 +5222,7 @@ async fn v2_provider_get(
         session_abort,
         v2_model_list,
         v2_provider_list,
+        provider_list,
         v2_skill_list,
         v2_command_list,
         v2_reference_list,
@@ -7245,6 +7308,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("provider") {
         router = router.route("/api/provider", get(v2_provider_list));
         router = router.route("/api/provider/{providerID}", get(v2_provider_get));
+        router = router.route("/provider", get(provider_list));
     }
     if state.routes.handles("skill") {
         router = router.route("/api/skill", get(v2_skill_list));
