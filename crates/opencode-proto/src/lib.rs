@@ -1280,6 +1280,16 @@ pub enum AuthPrompt {
     Select(AuthPromptSelect),
 }
 
+/// 200 body of `tui.control.next` (`{ path, body }`) — the next control request the server forwards to
+/// a connected TUI. `body` is a free-form value (golden empty/any schema).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct TuiControlNext {
+    /// The control request path/kind.
+    pub path: String,
+    /// The request body (any JSON value).
+    pub body: serde_json::Value,
+}
+
 /// One way to authenticate a provider (`provider.auth`): `{ type, label, prompts? }` where `type` is
 /// `oauth` | `api`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

@@ -106,6 +106,19 @@ const CUTOVER_PATHS: &[&str] = &[
     "/api/permission/saved/{id}",
     "/api/credential/{credentialID}",
     "/api/integration/attempt/{attemptID}",
+    "/tui/append-prompt",
+    "/tui/submit-prompt",
+    "/tui/clear-prompt",
+    "/tui/execute-command",
+    "/tui/show-toast",
+    "/tui/open-help",
+    "/tui/open-models",
+    "/tui/open-sessions",
+    "/tui/open-themes",
+    "/tui/publish",
+    "/tui/select-session",
+    "/tui/control/next",
+    "/tui/control/response",
 ];
 
 #[derive(Parser)]
