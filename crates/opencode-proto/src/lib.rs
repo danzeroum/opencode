@@ -443,6 +443,75 @@ pub enum VcsApplyRequestError {
     Invalid(InvalidRequestError),
 }
 
+/// `{ message }` — the data payload shared by the simple `{ name, data }` experimental errors.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NamedMessageData {
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// A `{ name, data: { message } }` experimental error — structurally shared by `WorktreeError`,
+/// `MoveSessionError`, and `WorkspaceWarpError` (the diff drops the per-error `name` enum).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NamedMessageError {
+    /// The error name.
+    pub name: String,
+    /// Error payload.
+    pub data: NamedMessageData,
+}
+
+/// `{ message, forceRequired? }` — `ProjectCopyError`'s data.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectCopyErrorData {
+    /// Human-readable message.
+    pub message: String,
+    /// Whether a forced copy is required to proceed.
+    #[serde(rename = "forceRequired", skip_serializing_if = "Option::is_none")]
+    pub force_required: Option<bool>,
+}
+
+/// `{ name: "ProjectCopyError", data }`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectCopyError {
+    /// Always `"ProjectCopyError"`.
+    pub name: String,
+    /// Error payload.
+    pub data: ProjectCopyErrorData,
+}
+
+/// The 400 union `anyOf[<NamedMessageError>, InvalidRequestError]` — used by `worktree.*` and
+/// `experimental.controlPlane.moveSession`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum NamedMessageRequestError {
+    /// The named operation error.
+    Named(NamedMessageError),
+    /// The request was otherwise invalid.
+    Invalid(InvalidRequestError),
+}
+
+/// The 400 union `anyOf[ProjectCopyError, InvalidRequestError]` — used by `v2.projectCopy.*`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ProjectCopyRequestError {
+    /// The project-copy error.
+    Copy(ProjectCopyError),
+    /// The request was otherwise invalid.
+    Invalid(InvalidRequestError),
+}
+
+/// The 400 union `anyOf[WorkspaceWarpError, VcsApplyError, InvalidRequestError]` — `workspace.warp`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum WorkspaceWarpRequestError {
+    /// The warp error.
+    Warp(NamedMessageError),
+    /// A VCS apply failure during warp.
+    Vcs(VcsApplyError),
+    /// The request was otherwise invalid.
+    Invalid(InvalidRequestError),
+}
+
 /// The tool call a [`PermissionRequest`] is gating (`{ messageID, callID }`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PermissionRequestTool {

@@ -5321,6 +5321,18 @@ async fn v2_provider_get(
         tui_control_response,
         tui_select_session,
         tui_control_next,
+        worktree_list,
+        worktree_remove,
+        worktree_reset,
+        experimental_resource_list,
+        experimental_session_background,
+        experimental_console_switch_org,
+        experimental_control_plane_move_session,
+        experimental_workspace_sync_list,
+        experimental_workspace_warp,
+        v2_project_copy_remove,
+        v2_project_copy_refresh,
+        sync_start,
         config_get,
         config_update,
         config_providers,
@@ -6712,6 +6724,119 @@ async fn tui_control_next() -> Json<opencode_proto::TuiControlNext> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Experimental / sync / worktree / project-copy (groups `experimental`, `sync`). The local backend
+// exposes these for the total cutover; the cloud/control-plane/workspace/worktree subsystems aren't
+// ported, so list reads are empty, idempotent ops ack `204`, and action ops report `false` ("not done
+// natively yet"). Honest contract parity; the real subsystems are follow-ups (PENDENCIAS).
+// ---------------------------------------------------------------------------
+
+/// `GET /experimental/worktree` — list git worktrees. Empty until the worktree subsystem is ported.
+#[utoipa::path(get, path = "/experimental/worktree", operation_id = "worktree.list",
+    responses((status = 200, description = "Worktrees", body = Vec<String>),
+        (status = 400, description = "Bad request", body = opencode_proto::NamedMessageRequestError)), tag = "experimental")]
+async fn worktree_list() -> Json<Vec<String>> {
+    Json(Vec::new())
+}
+
+/// `DELETE /experimental/worktree` — remove a worktree. No-op `false` (none tracked natively yet).
+#[utoipa::path(delete, path = "/experimental/worktree", operation_id = "worktree.remove",
+    responses((status = 200, description = "Removed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::NamedMessageRequestError)), tag = "experimental")]
+async fn worktree_remove() -> Json<bool> {
+    Json(false)
+}
+
+/// `POST /experimental/worktree/reset` — reset a worktree. No-op `false`.
+#[utoipa::path(post, path = "/experimental/worktree/reset", operation_id = "worktree.reset",
+    responses((status = 200, description = "Reset", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::NamedMessageRequestError)), tag = "experimental")]
+async fn worktree_reset() -> Json<bool> {
+    Json(false)
+}
+
+/// `GET /experimental/resource` — MCP/experimental resources. Empty map until ported.
+#[utoipa::path(get, path = "/experimental/resource", operation_id = "experimental.resource.list",
+    responses((status = 200, description = "Resources", body = std::collections::HashMap<String, serde_json::Value>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_resource_list() -> Json<std::collections::HashMap<String, serde_json::Value>>
+{
+    Json(std::collections::HashMap::new())
+}
+
+/// `POST /experimental/session/{sessionID}/background` — background a subagent run. No-op `false`.
+#[utoipa::path(post, path = "/experimental/session/{sessionID}/background", operation_id = "experimental.session.background",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses((status = 200, description = "Backgrounded", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "experimental")]
+async fn experimental_session_background(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> Json<bool> {
+    Json(false)
+}
+
+/// `POST /experimental/console/switch` — switch console org (cloud). No-op `false`.
+#[utoipa::path(post, path = "/experimental/console/switch", operation_id = "experimental.console.switchOrg",
+    responses((status = 200, description = "Switched", body = bool, content_type = "application/json")), tag = "experimental")]
+async fn experimental_console_switch_org() -> Json<bool> {
+    Json(false)
+}
+
+/// `POST /experimental/control-plane/move-session` — move a session to another instance. No-op 204.
+#[utoipa::path(post, path = "/experimental/control-plane/move-session", operation_id = "experimental.controlPlane.moveSession",
+    responses((status = 204, description = "Moved"),
+        (status = 400, description = "Bad request", body = opencode_proto::NamedMessageRequestError)), tag = "experimental")]
+async fn experimental_control_plane_move_session() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `POST /experimental/workspace/sync-list` — sync the workspace list. No-op 204.
+#[utoipa::path(post, path = "/experimental/workspace/sync-list", operation_id = "experimental.workspace.syncList",
+    responses((status = 204, description = "Synced"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_workspace_sync_list() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `POST /experimental/workspace/warp` — warp to a workspace. No-op 204 (404 declared for parity).
+#[utoipa::path(post, path = "/experimental/workspace/warp", operation_id = "experimental.workspace.warp",
+    responses((status = 204, description = "Warped"),
+        (status = 400, description = "Bad request", body = opencode_proto::WorkspaceWarpRequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)), tag = "experimental")]
+async fn experimental_workspace_warp() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `DELETE /experimental/project/{projectID}/copy` — remove a project copy. Idempotent 204.
+#[utoipa::path(delete, path = "/experimental/project/{projectID}/copy", operation_id = "v2.projectCopy.remove",
+    params(("projectID" = String, Path, description = "Project id")),
+    responses((status = 204, description = "Removed"),
+        (status = 400, description = "Bad request", body = opencode_proto::ProjectCopyRequestError)), tag = "experimental")]
+async fn v2_project_copy_remove(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `POST /experimental/project/{projectID}/copy/refresh` — refresh a project copy. Idempotent 204.
+#[utoipa::path(post, path = "/experimental/project/{projectID}/copy/refresh", operation_id = "v2.projectCopy.refresh",
+    params(("projectID" = String, Path, description = "Project id")),
+    responses((status = 204, description = "Refreshed"),
+        (status = 400, description = "Bad request", body = opencode_proto::ProjectCopyRequestError)), tag = "experimental")]
+async fn v2_project_copy_refresh(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `POST /sync/start` — start workspace sync. No-op `false` (sync subsystem not ported).
+#[utoipa::path(post, path = "/sync/start", operation_id = "sync.start",
+    responses((status = 200, description = "Started", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "sync")]
+async fn sync_start() -> Json<bool> {
+    Json(false)
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7619,6 +7744,43 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("experimental") {
         router = router.route("/experimental/tool", get(tool_list));
         router = router.route("/experimental/tool/ids", get(tool_ids));
+        router = router.route(
+            "/experimental/worktree",
+            get(worktree_list).delete(worktree_remove),
+        );
+        router = router.route("/experimental/worktree/reset", post(worktree_reset));
+        router = router.route("/experimental/resource", get(experimental_resource_list));
+        router = router.route(
+            "/experimental/session/{sessionID}/background",
+            post(experimental_session_background),
+        );
+        router = router.route(
+            "/experimental/console/switch",
+            post(experimental_console_switch_org),
+        );
+        router = router.route(
+            "/experimental/control-plane/move-session",
+            post(experimental_control_plane_move_session),
+        );
+        router = router.route(
+            "/experimental/workspace/sync-list",
+            post(experimental_workspace_sync_list),
+        );
+        router = router.route(
+            "/experimental/workspace/warp",
+            post(experimental_workspace_warp),
+        );
+        router = router.route(
+            "/experimental/project/{projectID}/copy",
+            axum::routing::delete(v2_project_copy_remove),
+        );
+        router = router.route(
+            "/experimental/project/{projectID}/copy/refresh",
+            post(v2_project_copy_refresh),
+        );
+    }
+    if state.routes.handles("sync") {
+        router = router.route("/sync/start", post(sync_start));
     }
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));
