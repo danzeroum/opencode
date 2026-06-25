@@ -119,6 +119,17 @@ const CUTOVER_PATHS: &[&str] = &[
     "/tui/select-session",
     "/tui/control/next",
     "/tui/control/response",
+    "/experimental/worktree",
+    "/experimental/worktree/reset",
+    "/experimental/resource",
+    "/experimental/session/{sessionID}/background",
+    "/experimental/console/switch",
+    "/experimental/control-plane/move-session",
+    "/experimental/workspace/sync-list",
+    "/experimental/workspace/warp",
+    "/experimental/project/{projectID}/copy",
+    "/experimental/project/{projectID}/copy/refresh",
+    "/sync/start",
 ];
 
 #[derive(Parser)]
