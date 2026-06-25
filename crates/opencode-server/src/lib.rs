@@ -5308,6 +5308,19 @@ async fn v2_provider_get(
         tool_ids,
         auth_set,
         auth_remove,
+        tui_append_prompt,
+        tui_submit_prompt,
+        tui_clear_prompt,
+        tui_execute_command,
+        tui_show_toast,
+        tui_open_help,
+        tui_open_models,
+        tui_open_sessions,
+        tui_open_themes,
+        tui_publish,
+        tui_control_response,
+        tui_select_session,
+        tui_control_next,
         config_get,
         config_update,
         config_providers,
@@ -6559,6 +6572,146 @@ async fn auth_remove(
     Ok(Json(true))
 }
 
+// ---------------------------------------------------------------------------
+// TUI control surface (group `tui`). These accept a control request the server forwards to a connected
+// TUI; with no TUI attached (the web-GUI deployment) they ack acceptance (`200 true`). `control.next`
+// is the TUI's poll for the next request (none queued → an empty request). Faithful contract parity for
+// the total cutover; request bodies aren't read (delivery to a live TUI is a follow-up).
+// ---------------------------------------------------------------------------
+
+/// Macro: a `tui.*` action endpoint that accepts the control request and acks `200 true`. The 400 body
+/// type varies per op in the golden (`BadRequestError` vs the `RequestError` union), so it's a param.
+macro_rules! tui_ack {
+    ($fn:ident, $path:literal, $op:literal, $desc:literal, $err:ty) => {
+        #[utoipa::path(
+            post,
+            path = $path,
+            operation_id = $op,
+            responses(
+                (status = 200, description = $desc, body = bool, content_type = "application/json"),
+                (status = 400, description = "Bad request", body = $err)
+            ),
+            tag = "tui"
+        )]
+        async fn $fn() -> Json<bool> {
+            Json(true)
+        }
+    };
+}
+
+tui_ack!(
+    tui_append_prompt,
+    "/tui/append-prompt",
+    "tui.appendPrompt",
+    "Prompt appended",
+    opencode_proto::RequestError
+);
+tui_ack!(
+    tui_submit_prompt,
+    "/tui/submit-prompt",
+    "tui.submitPrompt",
+    "Prompt submitted",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_clear_prompt,
+    "/tui/clear-prompt",
+    "tui.clearPrompt",
+    "Prompt cleared",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_execute_command,
+    "/tui/execute-command",
+    "tui.executeCommand",
+    "Command executed",
+    opencode_proto::RequestError
+);
+tui_ack!(
+    tui_show_toast,
+    "/tui/show-toast",
+    "tui.showToast",
+    "Toast shown",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_open_help,
+    "/tui/open-help",
+    "tui.openHelp",
+    "Help opened",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_open_models,
+    "/tui/open-models",
+    "tui.openModels",
+    "Models opened",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_open_sessions,
+    "/tui/open-sessions",
+    "tui.openSessions",
+    "Sessions opened",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_open_themes,
+    "/tui/open-themes",
+    "tui.openThemes",
+    "Themes opened",
+    opencode_proto::BadRequestError
+);
+tui_ack!(
+    tui_publish,
+    "/tui/publish",
+    "tui.publish",
+    "Event published",
+    opencode_proto::RequestError
+);
+tui_ack!(
+    tui_control_response,
+    "/tui/control/response",
+    "tui.control.response",
+    "Response submitted",
+    opencode_proto::BadRequestError
+);
+
+/// `POST /tui/select-session` — select a session in the TUI (group `tui`). 200 `true`, 400, 404.
+#[utoipa::path(
+    post,
+    path = "/tui/select-session",
+    operation_id = "tui.selectSession",
+    responses(
+        (status = 200, description = "Session selected", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)
+    ),
+    tag = "tui"
+)]
+async fn tui_select_session() -> Json<bool> {
+    Json(true)
+}
+
+/// `GET /tui/control/next` — the TUI polls for the next control request (group `tui`). 200
+/// `{ path, body }`, 400. None queued (no TUI control queue yet) → an empty request.
+#[utoipa::path(
+    get,
+    path = "/tui/control/next",
+    operation_id = "tui.control.next",
+    responses(
+        (status = 200, description = "Next TUI request", body = opencode_proto::TuiControlNext),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "tui"
+)]
+async fn tui_control_next() -> Json<opencode_proto::TuiControlNext> {
+    Json(opencode_proto::TuiControlNext {
+        path: String::new(),
+        body: serde_json::Value::Null,
+    })
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7336,6 +7489,21 @@ pub fn build_router(state: ServerState) -> Router {
             "/api/credential/{credentialID}",
             axum::routing::delete(v2_credential_remove),
         );
+    }
+    if state.routes.handles("tui") {
+        router = router.route("/tui/append-prompt", post(tui_append_prompt));
+        router = router.route("/tui/submit-prompt", post(tui_submit_prompt));
+        router = router.route("/tui/clear-prompt", post(tui_clear_prompt));
+        router = router.route("/tui/execute-command", post(tui_execute_command));
+        router = router.route("/tui/show-toast", post(tui_show_toast));
+        router = router.route("/tui/open-help", post(tui_open_help));
+        router = router.route("/tui/open-models", post(tui_open_models));
+        router = router.route("/tui/open-sessions", post(tui_open_sessions));
+        router = router.route("/tui/open-themes", post(tui_open_themes));
+        router = router.route("/tui/publish", post(tui_publish));
+        router = router.route("/tui/select-session", post(tui_select_session));
+        router = router.route("/tui/control/next", get(tui_control_next));
+        router = router.route("/tui/control/response", post(tui_control_response));
     }
     if state.routes.handles("question") {
         router = router.route("/question", get(question_list));
