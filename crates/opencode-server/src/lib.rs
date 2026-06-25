@@ -4590,6 +4590,69 @@ async fn v2_permission_saved_list(
     Json(opencode_proto::PermissionSavedListResponse { data: Vec::new() })
 }
 
+/// `DELETE /api/permission/saved/{id}` — remove a saved permission rule (group `permission`). Matches
+/// the golden `v2.permission.saved.remove`: 204, 400, 401. Saved rules aren't persisted natively yet
+/// (`v2.permission.saved.list` is empty), so this is an idempotent no-op 204.
+#[utoipa::path(
+    delete,
+    path = "/api/permission/saved/{id}",
+    operation_id = "v2.permission.saved.remove",
+    params(("id" = String, Path, description = "Saved-permission id")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "permission"
+)]
+async fn v2_permission_saved_remove(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `DELETE /api/credential/{credentialID}` — remove a stored credential (group `credential`). Matches
+/// the golden `v2.credential.remove`: 204, 400, 401. The V2 credential DB store isn't ported yet, so
+/// this is an idempotent no-op 204 (a real store + the connect flows are a follow-up).
+#[utoipa::path(
+    delete,
+    path = "/api/credential/{credentialID}",
+    operation_id = "v2.credential.remove",
+    params(("credentialID" = String, Path, description = "Credential id")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "credential"
+)]
+async fn v2_credential_remove(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// `DELETE /api/integration/attempt/{attemptID}` — cancel an in-flight integration connect attempt
+/// (group `integration`). Matches the golden `v2.integration.attempt.cancel`: 204, 400, 401. The
+/// integration connect/attempt machinery isn't ported yet, so this is an idempotent no-op 204.
+#[utoipa::path(
+    delete,
+    path = "/api/integration/attempt/{attemptID}",
+    operation_id = "v2.integration.attempt.cancel",
+    params(("attemptID" = String, Path, description = "Attempt id")),
+    responses(
+        (status = 204, description = "Cancelled"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "integration"
+)]
+async fn v2_integration_attempt_cancel(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
+}
+
 /// `GET /api/session/{sessionID}/permission` — a session's pending permission requests (group
 /// `session`). Matches the golden `v2.session.permission.list`: 200 `{ data }`, 400/401, 404
 /// `SessionNotFoundError`. 404s an unknown session; otherwise empty until the runner produces requests.
@@ -5279,6 +5342,9 @@ async fn v2_provider_get(
         v2_health_get,
         v2_permission_request_list,
         v2_permission_saved_list,
+        v2_permission_saved_remove,
+        v2_credential_remove,
+        v2_integration_attempt_cancel,
         v2_session_permission_list,
         permission_respond,
         permission_reply,
@@ -7260,6 +7326,16 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/permission/{requestID}/reply", post(permission_reply));
         router = router.route("/api/permission/request", get(v2_permission_request_list));
         router = router.route("/api/permission/saved", get(v2_permission_saved_list));
+        router = router.route(
+            "/api/permission/saved/{id}",
+            axum::routing::delete(v2_permission_saved_remove),
+        );
+    }
+    if state.routes.handles("credential") {
+        router = router.route(
+            "/api/credential/{credentialID}",
+            axum::routing::delete(v2_credential_remove),
+        );
     }
     if state.routes.handles("question") {
         router = router.route("/question", get(question_list));
@@ -7383,6 +7459,10 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("integration") {
         router = router.route("/api/integration", get(v2_integration_list));
+        router = router.route(
+            "/api/integration/attempt/{attemptID}",
+            axum::routing::delete(v2_integration_attempt_cancel),
+        );
     }
     if state.routes.handles("location") {
         router = router.route("/api/location", get(v2_location_get));
