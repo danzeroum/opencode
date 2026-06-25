@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **100/168 (60%)** — Tier 4 completo, Tier 5 em andamento. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **103/168 (61%)** — Tier 4 completo, Tier 5 em andamento. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -32,7 +32,8 @@
 - ✅ T5.2a `provider.list` (`GET /provider`, `{all, default, connected}` — reusa proto `Provider` + `catalog_v2::{available_providers, models}`; `connected` = mesma lógica de enable do v2) — **#153**
 - ✅ T5.2b `provider.auth` (`GET /provider/auth`, `{[id]:[ProviderAuthMethod]}`) — modelado o fecho `ProviderAuthMethod`/`AuthPrompt`(text/select)/`AuthSelectOption`/`AuthPromptWhen`; advertise método API-key p/ providers com env (OAuth via plugin = follow-up) — **#154**
 - ⏳ T5.2 `v2.credential.*` (tabela `credential`)
-- ⏳ T5.3 `provider.oauth.*`, `v2.integration.*`, `v2.permission.saved.remove`
+- ✅ T5.3a deletes idempotentes (204 sobre stores vazios — fiéis): `v2.permission.saved.remove`, `v2.credential.remove`, `v2.integration.attempt.cancel` — **#155**
+- ⏳ T5.3b fluxos OAuth/credencial **reais** (store DB `credential` + máquina de estado): `provider.oauth.authorize/callback`, `v2.credential.update`, `v2.integration.{get,connect.key,connect.oauth,attempt.status,attempt.complete}`
 
 **Tier 6 — Subsistemas novos:**
 - ⏳ T6.1 MCP runtime (`rmcp`): `mcp.add/connect/disconnect` + `mcp.auth.*`
