@@ -1213,6 +1213,86 @@ pub struct ProviderListV1Response {
     pub connected: Vec<String>,
 }
 
+/// A `when` guard on an auth prompt (`{ key, op, value }`) — show the prompt only when an earlier
+/// answer `key` is `eq`/`neq` `value`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AuthPromptWhen {
+    /// The earlier prompt key this depends on.
+    pub key: String,
+    /// `eq` | `neq`.
+    pub op: String,
+    /// The value to compare against.
+    pub value: String,
+}
+
+/// A free-text auth prompt (`{ type: "text", key, message, placeholder?, when? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AuthPromptText {
+    /// Always `"text"`.
+    pub r#type: String,
+    /// The answer's field key.
+    pub key: String,
+    /// Prompt message.
+    pub message: String,
+    /// Input placeholder, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// Conditional display guard, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when: Option<AuthPromptWhen>,
+}
+
+/// One option of a [`AuthPromptSelect`] (`{ label, value, hint? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AuthSelectOption {
+    /// Display label.
+    pub label: String,
+    /// Option value.
+    pub value: String,
+    /// Optional hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// A select auth prompt (`{ type: "select", key, message, options, when? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AuthPromptSelect {
+    /// Always `"select"`.
+    pub r#type: String,
+    /// The answer's field key.
+    pub key: String,
+    /// Prompt message.
+    pub message: String,
+    /// The choices.
+    pub options: Vec<AuthSelectOption>,
+    /// Conditional display guard, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when: Option<AuthPromptWhen>,
+}
+
+/// One prompt of an auth method — a `text` or `select` input.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AuthPrompt {
+    /// Free-text input.
+    Text(AuthPromptText),
+    /// Single-choice select.
+    Select(AuthPromptSelect),
+}
+
+/// One way to authenticate a provider (`provider.auth`): `{ type, label, prompts? }` where `type` is
+/// `oauth` | `api`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderAuthMethod {
+    /// `oauth` | `api`.
+    pub r#type: String,
+    /// Display label.
+    pub label: String,
+    /// The inputs to collect, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<Vec<AuthPrompt>>,
+}
+
 /// 200 body of `config.providers` (GET /config/providers): `{ providers, default }` — the resolved
 /// provider list plus a `{ [providerID]: defaultModelID }` map.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]

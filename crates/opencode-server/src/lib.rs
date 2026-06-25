@@ -4364,6 +4364,54 @@ async fn provider_list(
     })
 }
 
+/// `GET /provider/auth` — auth methods per provider (group `provider`). Matches the golden
+/// `provider.auth`: 200 `{ [providerID]: [ProviderAuthMethod] }`, 400 `BadRequestError`. Advertises an
+/// API-key method for every catalog provider that declares key env vars (the common case for
+/// deepseek/glm/openai/…); OAuth methods (plugin-derived in the reference) are a follow-up.
+#[utoipa::path(
+    get,
+    path = "/provider/auth",
+    operation_id = "provider.auth",
+    params(
+        ("directory" = Option<String>, Query, description = "Location context"),
+        ("workspace" = Option<String>, Query, description = "Workspace id")
+    ),
+    responses(
+        (status = 200, description = "Provider auth methods", body = std::collections::HashMap<String, Vec<opencode_proto::ProviderAuthMethod>>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "provider"
+)]
+async fn provider_auth(
+    State(state): State<ServerState>,
+) -> Json<std::collections::HashMap<String, Vec<opencode_proto::ProviderAuthMethod>>> {
+    let catalog = state.ctx.catalog();
+    let mut out: std::collections::HashMap<String, Vec<opencode_proto::ProviderAuthMethod>> =
+        std::collections::HashMap::new();
+    for (id, provider) in catalog.iter() {
+        // API-key providers (those that declare key env vars) get an API-key method with a text prompt.
+        if !provider.env.is_empty() {
+            out.insert(
+                id.clone(),
+                vec![opencode_proto::ProviderAuthMethod {
+                    r#type: "api".to_string(),
+                    label: "API Key".to_string(),
+                    prompts: Some(vec![opencode_proto::AuthPrompt::Text(
+                        opencode_proto::AuthPromptText {
+                            r#type: "text".to_string(),
+                            key: "key".to_string(),
+                            message: format!("Paste your {} API key", provider.name),
+                            placeholder: None,
+                            when: None,
+                        },
+                    )]),
+                }],
+            );
+        }
+    }
+    Json(out)
+}
+
 /// `GET /api/skill` — list skills (group `skill`). Matches the golden `v2.skill.list`: 200
 /// `{ location, data }` + 400/401. Loads real skills from the global config dir's `{skill,skills}` and
 /// the project's `.opencode/{skill,skills}` (glob `{*.md, **/SKILL.md}`, project overrides global by
@@ -5223,6 +5271,7 @@ async fn v2_provider_get(
         v2_model_list,
         v2_provider_list,
         provider_list,
+        provider_auth,
         v2_skill_list,
         v2_command_list,
         v2_reference_list,
@@ -7309,6 +7358,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/provider", get(v2_provider_list));
         router = router.route("/api/provider/{providerID}", get(v2_provider_get));
         router = router.route("/provider", get(provider_list));
+        router = router.route("/provider/auth", get(provider_auth));
     }
     if state.routes.handles("skill") {
         router = router.route("/api/skill", get(v2_skill_list));

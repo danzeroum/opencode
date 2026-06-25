@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **99/168 (59%)** — Tier 4 completo, Tier 5 em andamento. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **100/168 (60%)** — Tier 4 completo, Tier 5 em andamento. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -30,7 +30,7 @@
 **Tier 5 — Auth/credenciais/integrações (épico OAuth):**
 - ✅ T5.1 `auth.set`/`auth.remove` (escreve/remove no `auth.json` — inverso do reader do #141; `provider::{set,remove}_auth_entry`) — **#152**
 - ✅ T5.2a `provider.list` (`GET /provider`, `{all, default, connected}` — reusa proto `Provider` + `catalog_v2::{available_providers, models}`; `connected` = mesma lógica de enable do v2) — **#153**
-- ⏳ T5.2b `provider.auth` (`GET /provider/auth`) — precisa modelar `ProviderAuthMethod` (união de prompts text/select + `when`)
+- ✅ T5.2b `provider.auth` (`GET /provider/auth`, `{[id]:[ProviderAuthMethod]}`) — modelado o fecho `ProviderAuthMethod`/`AuthPrompt`(text/select)/`AuthSelectOption`/`AuthPromptWhen`; advertise método API-key p/ providers com env (OAuth via plugin = follow-up) — **#154**
 - ⏳ T5.2 `v2.credential.*` (tabela `credential`)
 - ⏳ T5.3 `provider.oauth.*`, `v2.integration.*`, `v2.permission.saved.remove`
 
