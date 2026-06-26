@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **137/168 (82%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle nativo. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **138/168 (82%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle nativo. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -45,7 +45,8 @@
 - ✅ T7.2/7.3a stubs honestos (empty/204/false) de experimental+sync+worktree+projectCopy (12 ops): `worktree.list/remove/reset`, `experimental.{resource.list,session.background,console.switchOrg,controlPlane.moveSession,workspace.syncList,workspace.warp}`, `v2.projectCopy.remove/refresh`, `sync.start` — modelados os unions de erro `NamedMessageError`/`ProjectCopyError`/`WorkspaceWarpRequestError` — **#157**
 - ✅ T7.3b-console `experimental.console.get` (default `ConsoleState`) + `console.listOrgs` (`{orgs:[]}`) — modelados `ConsoleState`/`ConsoleOrg`/`EffectHttpApiInternalServerError` — **#158**
 - ✅ T7.3c-reads `experimental.workspace.{list,status,adapter.list}` (empties; modelado `Workspace`+`WorkspaceTimeUsed` union, `WorkspaceStatus`, `WorkspaceAdapter`), `sync.history.list` (empty, `SyncEvent`), `experimental.projectCopy.generateName` (`{name}` derivado) — **#159**
-- ⏳ T7.3d restantes (criam/retornam objeto, não stubbáveis honestamente): `worktree.create`(Worktree), `experimental.workspace.{create,remove}`(Workspace), `experimental.session.list`(GlobalSession ~20 campos → pode ser empty c/ tipo modelado), `sync.{replay,steal}`, `v2.projectCopy.create`(ProjectCopyCopy), `global.upgrade`(union)
+- ✅ T7.3d-session `experimental.session.list` (empty; modelado `GlobalSession` + `GlobalSessionProject` reduzido) — **#161**
+- ⏳ T7.3e restantes (criam/retornam objeto): `worktree.create`(Worktree), `experimental.workspace.{create,remove}`(Workspace), `sync.{replay,steal}`, `v2.projectCopy.create`(ProjectCopyCopy), `global.upgrade` (união `{success}` — diff de ordem de membros finicky, revisitar)
 
 **Tier 8 — Cutover (Fase 6):**
 - ⏳ T8.1 Schema ownership (Rust aplica a migração consolidada)

@@ -1349,6 +1349,78 @@ pub enum AuthPrompt {
     Select(AuthPromptSelect),
 }
 
+/// The reduced project info embedded in a [`GlobalSession`] (`{ id, name?, worktree }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GlobalSessionProject {
+    /// Project id.
+    pub id: String,
+    /// Display name, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Absolute worktree path.
+    pub worktree: String,
+}
+
+/// A global session (`experimental.session.list`) — the V1 [`Session`] fields plus the reduced owning
+/// `project` (`{ id, name?, worktree }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct GlobalSession {
+    /// Session id (`ses_…`).
+    pub id: String,
+    /// URL-safe slug.
+    pub slug: String,
+    /// Owning project id.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// Owning workspace id, if any.
+    #[serde(rename = "workspaceID", skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Working directory.
+    pub directory: String,
+    /// Session path, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Parent session id, if a child.
+    #[serde(rename = "parentID", skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Change summary, if computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SessionSummary>,
+    /// Accumulated cost (USD).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Accumulated token usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<SessionTokens>,
+    /// Share link, if shared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share: Option<SessionShare>,
+    /// Title.
+    pub title: String,
+    /// Active agent, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Active model, if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Schema/app version that wrote the session.
+    pub version: String,
+    /// Free-form metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub metadata: Option<serde_json::Value>,
+    /// Timestamps.
+    pub time: SessionV1Time,
+    /// Permission ruleset (`[PermissionRule]`), if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Vec<PermissionRule>>,
+    /// Revert pointer, if the session is reverted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert: Option<SessionRevert>,
+    /// The owning project (reduced).
+    pub project: GlobalSessionProject,
+}
+
 /// A workspace's `timeUsed` — a number, or one of the JSON-special strings (`NaN`/`Infinity`/…).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 #[serde(untagged)]
