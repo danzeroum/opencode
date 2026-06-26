@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **138/168 (82%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle nativo. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **143/168 (85%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle + PTY-reads nativos. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -37,7 +37,7 @@
 
 **Tier 6 — Subsistemas novos:**
 - ⏳ T6.1 MCP runtime (`rmcp`): `mcp.connect`/`mcp.disconnect` ✅ wired-404 (sem server configurado) — **#160**; falta `mcp.add` (persistir config) + `mcp.auth.*` (OAuth) + a conexão real `rmcp`
-- ⏳ T6.2 PTY (`portable-pty`): `pty.*`
+- ⏳ T6.2 PTY (`portable-pty`): `pty.shells` (real, enumera `/etc/shells`+`$SHELL`) + `pty.list`/`get`/`remove`/`update` (vazio/404 até o registry) ✅ **#162**; falta `pty.create`/`connect`/`connectToken` (spawn `portable-pty` + streaming + registry)
 - ⏳ T6.3 LSP runtime (`lsp.status` real)
 
 **Tier 7 — TUI + sync + experimental:**
