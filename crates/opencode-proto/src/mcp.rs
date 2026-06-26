@@ -44,3 +44,39 @@ pub struct McpServerNotFoundError {
     /// Human-readable message.
     pub message: String,
 }
+
+/// 200 body of `mcp.auth.start` (`{ authorizationUrl, oauthState }`) — the OAuth flow kickoff.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpAuthStart {
+    /// The provider authorization URL the user opens.
+    #[serde(rename = "authorizationUrl")]
+    pub authorization_url: String,
+    /// Opaque CSRF/PKCE state echoed back on callback.
+    #[serde(rename = "oauthState")]
+    pub oauth_state: String,
+}
+
+/// 200 body of `mcp.auth.remove` (`{ success: true }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpAuthRemoved {
+    /// Always `true`.
+    pub success: bool,
+}
+
+/// `McpUnsupportedOAuthError` — the server doesn't support OAuth (`{ error }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpUnsupportedOAuthError {
+    /// Failure detail.
+    pub error: String,
+}
+
+/// The 400 union of `mcp.auth.start` / `mcp.auth.authenticate`
+/// (`anyOf[McpUnsupportedOAuthError, InvalidRequestError]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum McpAuthOAuthError {
+    /// Server doesn't support OAuth.
+    Unsupported(McpUnsupportedOAuthError),
+    /// Schema validation error.
+    Invalid(crate::InvalidRequestError),
+}
