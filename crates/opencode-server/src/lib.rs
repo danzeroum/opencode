@@ -5340,6 +5340,7 @@ async fn v2_provider_get(
         experimental_workspace_adapter_list,
         sync_history_list,
         experimental_project_copy_generate_name,
+        experimental_session_list,
         config_get,
         config_update,
         config_providers,
@@ -6916,6 +6917,15 @@ async fn experimental_project_copy_generate_name(
     })
 }
 
+/// `GET /experimental/session` — global sessions across projects (group `experimental`). Empty until
+/// the cross-project session index is ported. 200 `[GlobalSession]`, 400.
+#[utoipa::path(get, path = "/experimental/session", operation_id = "experimental.session.list",
+    responses((status = 200, description = "Global sessions", body = Vec<opencode_proto::GlobalSession>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_session_list() -> Json<Vec<opencode_proto::GlobalSession>> {
+    Json(Vec::new())
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7913,6 +7923,7 @@ pub fn build_router(state: ServerState) -> Router {
             "/experimental/project/{projectID}/copy/generate-name",
             post(experimental_project_copy_generate_name),
         );
+        router = router.route("/experimental/session", get(experimental_session_list));
         router = router.route(
             "/experimental/project/{projectID}/copy",
             axum::routing::delete(v2_project_copy_remove),

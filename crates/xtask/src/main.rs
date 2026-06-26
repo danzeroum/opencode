@@ -139,6 +139,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/experimental/workspace/adapter",
     "/sync/history",
     "/experimental/project/{projectID}/copy/generate-name",
+    "/experimental/session",
 ];
 
 #[derive(Parser)]
