@@ -1349,6 +1349,86 @@ pub enum AuthPrompt {
     Select(AuthPromptSelect),
 }
 
+/// A workspace's `timeUsed` — a number, or one of the JSON-special strings (`NaN`/`Infinity`/…).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(untagged)]
+pub enum WorkspaceTimeUsed {
+    /// A finite timestamp.
+    Number(f64),
+    /// A non-finite marker (`NaN` / `Infinity` / `-Infinity`).
+    Special(String),
+}
+
+/// A workspace (`experimental.workspace.{list,create,remove}`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct Workspace {
+    /// Workspace id (`wrk_…`).
+    pub id: String,
+    /// Adapter type.
+    pub r#type: String,
+    /// Display name.
+    pub name: String,
+    /// Git branch, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Working directory, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// Adapter-specific extra data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
+    /// Owning project id.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// Last-used timestamp.
+    #[serde(rename = "timeUsed")]
+    pub time_used: WorkspaceTimeUsed,
+}
+
+/// One entry of `experimental.workspace.status` (`{ workspaceID, status }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct WorkspaceStatus {
+    /// Workspace id (`wrk_…`).
+    #[serde(rename = "workspaceID")]
+    pub workspace_id: String,
+    /// `connected` | `connecting` | `disconnected` | `error`.
+    pub status: String,
+}
+
+/// One entry of `experimental.workspace.adapter.list` (`{ type, name, description }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct WorkspaceAdapter {
+    /// Adapter type id.
+    pub r#type: String,
+    /// Display name.
+    pub name: String,
+    /// Description.
+    pub description: String,
+}
+
+/// One entry of `sync.history.list` (`{ id, aggregate_id, seq, type, data }`) — a stored event.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SyncEvent {
+    /// Event id (`evt_…`).
+    pub id: String,
+    /// Aggregate id.
+    pub aggregate_id: String,
+    /// Per-aggregate sequence.
+    pub seq: i64,
+    /// Event type.
+    pub r#type: String,
+    /// Event payload (free-form).
+    #[schema(value_type = Object)]
+    pub data: serde_json::Value,
+}
+
+/// 200 body of `experimental.projectCopy.generateName` (`{ name }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GenerateNameResponse {
+    /// The generated copy name.
+    pub name: String,
+}
+
 /// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct EffectHttpApiInternalServerError {

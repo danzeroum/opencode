@@ -5335,6 +5335,11 @@ async fn v2_provider_get(
         sync_start,
         experimental_console_get,
         experimental_console_list_orgs,
+        experimental_workspace_list,
+        experimental_workspace_status,
+        experimental_workspace_adapter_list,
+        sync_history_list,
+        experimental_project_copy_generate_name,
         config_get,
         config_update,
         config_providers,
@@ -6863,6 +6868,52 @@ async fn experimental_console_list_orgs() -> Json<opencode_proto::ConsoleOrgsRes
     Json(opencode_proto::ConsoleOrgsResponse { orgs: Vec::new() })
 }
 
+/// `GET /experimental/workspace` — list workspaces. Empty until the workspace subsystem is ported.
+#[utoipa::path(get, path = "/experimental/workspace", operation_id = "experimental.workspace.list",
+    responses((status = 200, description = "Workspaces", body = Vec<opencode_proto::Workspace>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_workspace_list() -> Json<Vec<opencode_proto::Workspace>> {
+    Json(Vec::new())
+}
+
+/// `GET /experimental/workspace/status` — per-workspace connection status. Empty until ported.
+#[utoipa::path(get, path = "/experimental/workspace/status", operation_id = "experimental.workspace.status",
+    responses((status = 200, description = "Status", body = Vec<opencode_proto::WorkspaceStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_workspace_status() -> Json<Vec<opencode_proto::WorkspaceStatus>> {
+    Json(Vec::new())
+}
+
+/// `GET /experimental/workspace/adapter` — available workspace adapters. Empty until ported.
+#[utoipa::path(get, path = "/experimental/workspace/adapter", operation_id = "experimental.workspace.adapter.list",
+    responses((status = 200, description = "Adapters", body = Vec<opencode_proto::WorkspaceAdapter>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_workspace_adapter_list() -> Json<Vec<opencode_proto::WorkspaceAdapter>> {
+    Json(Vec::new())
+}
+
+/// `POST /sync/history` — list synced events. Empty until the sync subsystem is ported.
+#[utoipa::path(post, path = "/sync/history", operation_id = "sync.history.list",
+    responses((status = 200, description = "Sync events", body = Vec<opencode_proto::SyncEvent>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "sync")]
+async fn sync_history_list() -> Json<Vec<opencode_proto::SyncEvent>> {
+    Json(Vec::new())
+}
+
+/// `POST /experimental/project/{projectID}/copy/generate-name` — generate a name for a project copy.
+/// Returns a simple derived name (the naming heuristic is config/LLM-driven in the reference).
+#[utoipa::path(post, path = "/experimental/project/{projectID}/copy/generate-name", operation_id = "experimental.projectCopy.generateName",
+    params(("projectID" = String, Path, description = "Project id")),
+    responses((status = 200, description = "Generated name", body = opencode_proto::GenerateNameResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "experimental")]
+async fn experimental_project_copy_generate_name(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> Json<opencode_proto::GenerateNameResponse> {
+    Json(opencode_proto::GenerateNameResponse {
+        name: "project-copy".to_string(),
+    })
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7801,6 +7852,19 @@ pub fn build_router(state: ServerState) -> Router {
             "/experimental/console/orgs",
             get(experimental_console_list_orgs),
         );
+        router = router.route("/experimental/workspace", get(experimental_workspace_list));
+        router = router.route(
+            "/experimental/workspace/status",
+            get(experimental_workspace_status),
+        );
+        router = router.route(
+            "/experimental/workspace/adapter",
+            get(experimental_workspace_adapter_list),
+        );
+        router = router.route(
+            "/experimental/project/{projectID}/copy/generate-name",
+            post(experimental_project_copy_generate_name),
+        );
         router = router.route(
             "/experimental/project/{projectID}/copy",
             axum::routing::delete(v2_project_copy_remove),
@@ -7812,6 +7876,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("sync") {
         router = router.route("/sync/start", post(sync_start));
+        router = router.route("/sync/history", post(sync_history_list));
     }
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));
