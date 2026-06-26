@@ -145,6 +145,10 @@ const CUTOVER_PATHS: &[&str] = &[
     "/pty/{ptyID}",
     "/pty/{ptyID}/connect-token",
     "/pty/{ptyID}/connect",
+    "/sync/replay",
+    "/sync/steal",
+    "/experimental/workspace/{id}",
+    "/session/{sessionID}/share",
 ];
 
 #[derive(Parser)]

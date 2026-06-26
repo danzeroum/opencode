@@ -3766,6 +3766,81 @@ async fn mutated_session(
     Ok(Json(session_v1_from_record(record)))
 }
 
+/// Responder for `session.share`/`unshare`. Public sharing needs opencode's hosted share backend,
+/// absent in this self-hosted build: 404 if the session is unknown, else a faithful 500 — matching the
+/// reference, which routes any share failure through `InternalServerError` rather than faking success.
+enum ShareFailure {
+    NotFound(String),
+    Unavailable,
+}
+
+impl axum::response::IntoResponse for ShareFailure {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            ShareFailure::NotFound(session_id) => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(opencode_proto::NotFoundError {
+                    name: "NotFoundError".to_string(),
+                    data: opencode_proto::NotFoundData {
+                        message: format!("Session not found: {session_id}"),
+                    },
+                }),
+            )
+                .into_response(),
+            ShareFailure::Unavailable => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(opencode_proto::EffectHttpApiInternalServerError {
+                    tag: "InternalServerError".to_string(),
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Confirm a session exists (404 otherwise), then report sharing unavailable (no share backend).
+async fn share_or_404(
+    state: &ServerState,
+    session_id: String,
+) -> Result<Json<opencode_proto::Session>, ShareFailure> {
+    match state.ctx.sessions().get_full(&session_id).await {
+        Ok(Some(_)) => Err(ShareFailure::Unavailable),
+        Ok(None) => Err(ShareFailure::NotFound(session_id)),
+        Err(_) => Err(ShareFailure::Unavailable),
+    }
+}
+
+/// `POST /session/{sessionID}/share` — publicly share a session (group `session`). Needs opencode's
+/// hosted share backend (absent here): 404 if unknown, else a faithful 500. 200 `Session` + 400 are
+/// declared for contract parity.
+#[utoipa::path(post, path = "/session/{sessionID}/share", operation_id = "session.share",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses((status = 200, description = "Shared session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError),
+        (status = 500, description = "Server error", body = opencode_proto::EffectHttpApiInternalServerError)), tag = "session")]
+async fn session_share(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::Session>, ShareFailure> {
+    share_or_404(&state, session_id).await
+}
+
+/// `DELETE /session/{sessionID}/share` — stop sharing a session (group `session`). Same backing
+/// dependency as `share`: 404 if unknown, else faithful 500.
+#[utoipa::path(delete, path = "/session/{sessionID}/share", operation_id = "session.unshare",
+    params(("sessionID" = String, Path, description = "Session id")),
+    responses((status = 200, description = "Unshared session", body = opencode_proto::Session),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Session not found", body = opencode_proto::NotFoundError),
+        (status = 500, description = "Server error", body = opencode_proto::EffectHttpApiInternalServerError)), tag = "session")]
+async fn session_unshare(
+    State(state): State<ServerState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::Session>, ShareFailure> {
+    share_or_404(&state, session_id).await
+}
+
 /// Request body for `session.revert` (`{ messageID, partID? }`).
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RevertBody {
@@ -5340,6 +5415,11 @@ async fn v2_provider_get(
         experimental_workspace_status,
         experimental_workspace_adapter_list,
         sync_history_list,
+        sync_replay,
+        sync_steal,
+        experimental_workspace_remove,
+        session_share,
+        session_unshare,
         experimental_project_copy_generate_name,
         experimental_session_list,
         pty_shells,
@@ -6912,6 +6992,54 @@ async fn sync_history_list() -> Json<Vec<opencode_proto::SyncEvent>> {
     Json(Vec::new())
 }
 
+/// A contract-shaped 400 `RequestError` (the InvalidRequestError arm) for an op whose backing
+/// subsystem isn't present in this build — a faithful "can't do that here", never a fake success.
+fn subsystem_unavailable(message: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::RequestError::Invalid(
+            opencode_proto::InvalidRequestError {
+                tag: "InvalidRequestError".to_string(),
+                message: message.to_string(),
+                kind: None,
+                field: None,
+            },
+        )),
+    )
+        .into_response()
+}
+
+/// `POST /sync/replay` — replay synced events into a session. Cross-instance sync needs opencode's
+/// hosted infra (absent in this self-hosted build) → faithful 400. 200 `{sessionID}` declared for
+/// contract parity.
+#[utoipa::path(post, path = "/sync/replay", operation_id = "sync.replay",
+    responses((status = 200, description = "Replayed sync events", body = opencode_proto::SyncSessionResult),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "sync")]
+async fn sync_replay() -> axum::response::Response {
+    subsystem_unavailable("sync is not available in this build")
+}
+
+/// `POST /sync/steal` — steal a session into this workspace. Sync subsystem absent → faithful 400.
+#[utoipa::path(post, path = "/sync/steal", operation_id = "sync.steal",
+    responses((status = 200, description = "Session stolen into workspace", body = opencode_proto::SyncSessionResult),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "sync")]
+async fn sync_steal() -> axum::response::Response {
+    subsystem_unavailable("sync is not available in this build")
+}
+
+/// `DELETE /experimental/workspace/{id}` — remove a workspace. The control-plane workspace subsystem is
+/// unported (list is empty), so any id is unknown → faithful 400. 200 `Workspace` declared for parity.
+#[utoipa::path(delete, path = "/experimental/workspace/{id}", operation_id = "experimental.workspace.remove",
+    params(("id" = String, Path, description = "Workspace id")),
+    responses((status = 200, description = "Removed workspace", body = opencode_proto::Workspace),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "experimental")]
+async fn experimental_workspace_remove(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    subsystem_unavailable("workspaces are not available in this build")
+}
+
 /// `POST /experimental/project/{projectID}/copy/generate-name` — generate a name for a project copy.
 /// Returns a simple derived name (the naming heuristic is config/LLM-driven in the reference).
 #[utoipa::path(post, path = "/experimental/project/{projectID}/copy/generate-name", operation_id = "experimental.projectCopy.generateName",
@@ -8035,6 +8163,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/session/{sessionID}/revert", post(session_revert));
         router = router.route("/session/{sessionID}/unrevert", post(session_unrevert));
         router = router.route(
+            "/session/{sessionID}/share",
+            post(session_share).delete(session_unshare),
+        );
+        router = router.route(
             "/session/{sessionID}/prompt_async",
             post(session_prompt_async),
         );
@@ -8132,10 +8264,16 @@ pub fn build_router(state: ServerState) -> Router {
             "/experimental/project/{projectID}/copy/refresh",
             post(v2_project_copy_refresh),
         );
+        router = router.route(
+            "/experimental/workspace/{id}",
+            axum::routing::delete(experimental_workspace_remove),
+        );
     }
     if state.routes.handles("sync") {
         router = router.route("/sync/start", post(sync_start));
         router = router.route("/sync/history", post(sync_history_list));
+        router = router.route("/sync/replay", post(sync_replay));
+        router = router.route("/sync/steal", post(sync_steal));
     }
     if state.routes.handles("pty") {
         router = router.route("/pty", get(pty_list).post(pty_create));
@@ -9054,6 +9192,98 @@ mod tests {
         )
         .unwrap();
         assert!(v2.get("revert").is_none());
+    }
+
+    #[tokio::test]
+    async fn session_share_404s_unknown_and_500s_known() {
+        use tower::ServiceExt;
+        let sessions = Arc::new(opencode_db::MemorySessionStore::new());
+        sessions.insert(test_session_record("ses_1"));
+        let state = ServerState {
+            ctx: AppContext::new(AppServices {
+                sessions,
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("session"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        // Unknown session → 404 NotFoundError.
+        let resp = build_router(state.clone())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/session/ses_unknown/share")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["name"], "NotFoundError");
+        // Known session → 500 (no share backend); unshare behaves the same.
+        let resp2 = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("DELETE")
+                    .uri("/session/ses_1/share")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), 500);
+        let v2: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v2["_tag"], "InternalServerError");
+    }
+
+    #[tokio::test]
+    async fn sync_replay_steal_and_workspace_remove_are_unavailable_400() {
+        use tower::ServiceExt;
+        let mk = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("sync,experimental"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        for (method, uri) in [
+            ("POST", "/sync/replay"),
+            ("POST", "/sync/steal"),
+            ("DELETE", "/experimental/workspace/wrk_1"),
+        ] {
+            let resp = build_router(mk())
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 400, "{method} {uri}");
+            let v: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            // The InvalidRequestError arm of the RequestError union.
+            assert_eq!(v["_tag"], "InvalidRequestError", "{method} {uri}");
+        }
     }
 
     #[tokio::test]

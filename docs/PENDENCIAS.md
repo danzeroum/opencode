@@ -56,6 +56,13 @@ O grupo `pty` está **funcionalmente completo** (spawn/list/get/update/remove + 
 - **Impacto:** nenhum no contrato HTTP/OpenAPI (o `openapi-diff` passa com as 8 ops) nem na interação real do terminal (o streaming é via WebSocket, não via SSE). Só afeta clientes que queiram reagir a criação/saída de PTY pelo stream `/event` global.
 - **Plano:** quando o barramento de eventos for acessível ao subsistema PTY (passar o handle do `EventStore`/bus ao `PtyManager`, ou movê-lo para o `AppContext`), emitir os 4 eventos no `create`/`update`/exit(reader-thread)/`remove`. Não bloqueia nada.
 
+### #9 — Estratégia dos ~13% finais (subsistemas opcionais) — DECISÃO do dono
+As ops restantes são todas de **subsistemas opcionais** que um setup local deepseek/glm/ollama **não usa** (todos os providers do dono são API-key/keyless, já funcionando): **OAuth** de provider/MCP, **integrações** github/slack, **share** público de sessão, **sync** multi-device, **workspaces** cloud, **self-upgrade**. Tentei perguntar a estratégia (a ferramenta de pergunta falhou); segui pela minha recomendação e o sinal repetido de "continue".
+- **Decisão que tomei (revisável):** **portar de verdade** o que é self-contained (OAuth/integração falam com endpoints padrão dos providers) e **erro fiel** o que precisa de infra hospedada da opencode (share→500, sync/workspace→400). Isso chega a 100% de cobertura de contrato sem successes falsos, permitindo remover o proxy e (com sua confirmação) deletar o TS.
+- **Já feito sob essa decisão (este PR):** `sync.replay/steal`, `experimental.workspace.remove`, `session.share/unshare` como erros fiéis (ver T7.3e-infra no ROADMAP).
+- **Alternativas se preferir:** (a) **portar tudo** (OAuth/share/sync/integrações/workspaces reais — bem mais trabalho para features fora do seu uso); (b) **portar só OAuth** (caso queira logar em Claude/Copilot depois) e deixar o resto como erro fiel; (c) **manter um sidecar TS mínimo** só para esses grupos (não deletar o TS por completo). Me avise e eu ajusto — trocar um erro fiel por um port real é só o corpo do handler (baixo retrabalho).
+- **⚠️ Antes do passo irreversível** (deletar `packages/{server,core,llm}` + parar de publicar o TS) eu **paro e confirmo** com você.
+
 ## Resolvidas
 
 ### #6 — Write-path do runner ✅ (resolvido — #80/#81/#82)

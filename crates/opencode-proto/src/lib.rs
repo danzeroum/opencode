@@ -1614,6 +1614,14 @@ pub struct GenerateNameResponse {
     pub name: String,
 }
 
+/// 200 body of `sync.replay` / `sync.steal` (`{ sessionID }`) — the session the op resolved to.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SyncSessionResult {
+    /// The session id (`ses_…`).
+    #[serde(rename = "sessionID")]
+    pub session_id: String,
+}
+
 /// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct EffectHttpApiInternalServerError {

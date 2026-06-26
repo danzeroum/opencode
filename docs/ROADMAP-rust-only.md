@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **146/168 (87%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle + **grupo `pty` 100% nativo (terminais reais via `portable-pty` + streaming WebSocket)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **151/168 (90%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle + **grupo `pty` 100% nativo (terminais reais via `portable-pty` + streaming WebSocket)** + **erros fiéis para os subsistemas que dependem de infra hospedada da opencode** (share/sync/workspace). Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -46,7 +46,8 @@
 - ✅ T7.3b-console `experimental.console.get` (default `ConsoleState`) + `console.listOrgs` (`{orgs:[]}`) — modelados `ConsoleState`/`ConsoleOrg`/`EffectHttpApiInternalServerError` — **#158**
 - ✅ T7.3c-reads `experimental.workspace.{list,status,adapter.list}` (empties; modelado `Workspace`+`WorkspaceTimeUsed` union, `WorkspaceStatus`, `WorkspaceAdapter`), `sync.history.list` (empty, `SyncEvent`), `experimental.projectCopy.generateName` (`{name}` derivado) — **#159**
 - ✅ T7.3d-session `experimental.session.list` (empty; modelado `GlobalSession` + `GlobalSessionProject` reduzido) — **#161**
-- ⏳ T7.3e restantes (criam/retornam objeto): `worktree.create`(Worktree), `experimental.workspace.{create,remove}`(Workspace), `sync.{replay,steal}`, `v2.projectCopy.create`(ProjectCopyCopy), `global.upgrade` (união `{success}` — diff de ordem de membros finicky, revisitar)
+- ✅ T7.3e-infra **erros fiéis** para os subsistemas que dependem de **infra hospedada da opencode** (ausente num build self-hosted): `sync.replay`/`sync.steal` → 400 `RequestError` ("sync not available"); `experimental.workspace.remove` → 400 ("workspaces not available", coerente com a lista vazia); `session.share`/`session.unshare` → 404 se a sessão não existe, senão **500** `effect_HttpApiError_InternalServerError` (igual ao TS, que roteia qualquer falha de share para 500). Não são successes falsos — reportam fielmente "não dá aqui". Modelado `SyncSessionResult`. — **(este PR)**
+- ⏳ T7.3e restantes (criam/retornam objeto, precisam de subsistema real): `worktree.create`(Worktree), `experimental.workspace.create`(Workspace), `v2.projectCopy.create`(ProjectCopyCopy), `global.upgrade` (união `{success}` — diff de ordem de membros finicky, revisitar)
 
 **Tier 8 — Cutover (Fase 6):**
 - ⏳ T8.1 Schema ownership (Rust aplica a migração consolidada)
