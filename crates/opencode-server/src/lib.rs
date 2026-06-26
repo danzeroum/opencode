@@ -5333,6 +5333,8 @@ async fn v2_provider_get(
         v2_project_copy_remove,
         v2_project_copy_refresh,
         sync_start,
+        experimental_console_get,
+        experimental_console_list_orgs,
         config_get,
         config_update,
         config_providers,
@@ -6837,6 +6839,30 @@ async fn sync_start() -> Json<bool> {
     Json(false)
 }
 
+/// `GET /experimental/console` — console state (group `experimental`). No console configured natively →
+/// a default empty state. 200 `ConsoleState`, 400, 500.
+#[utoipa::path(get, path = "/experimental/console", operation_id = "experimental.console.get",
+    responses((status = 200, description = "Console state", body = opencode_proto::ConsoleState),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 500, description = "Server error", body = opencode_proto::EffectHttpApiInternalServerError)), tag = "experimental")]
+async fn experimental_console_get() -> Json<opencode_proto::ConsoleState> {
+    Json(opencode_proto::ConsoleState {
+        console_managed_providers: Vec::new(),
+        active_org_name: None,
+        switchable_org_count: 0,
+    })
+}
+
+/// `GET /experimental/console/orgs` — switchable console orgs (group `experimental`). Empty (no console
+/// account natively). 200 `{ orgs }`, 400, 500.
+#[utoipa::path(get, path = "/experimental/console/orgs", operation_id = "experimental.console.listOrgs",
+    responses((status = 200, description = "Orgs", body = opencode_proto::ConsoleOrgsResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 500, description = "Server error", body = opencode_proto::EffectHttpApiInternalServerError)), tag = "experimental")]
+async fn experimental_console_list_orgs() -> Json<opencode_proto::ConsoleOrgsResponse> {
+    Json(opencode_proto::ConsoleOrgsResponse { orgs: Vec::new() })
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7769,6 +7795,11 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route(
             "/experimental/workspace/warp",
             post(experimental_workspace_warp),
+        );
+        router = router.route("/experimental/console", get(experimental_console_get));
+        router = router.route(
+            "/experimental/console/orgs",
+            get(experimental_console_list_orgs),
         );
         router = router.route(
             "/experimental/project/{projectID}/copy",

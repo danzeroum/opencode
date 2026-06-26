@@ -1349,6 +1349,57 @@ pub enum AuthPrompt {
     Select(AuthPromptSelect),
 }
 
+/// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct EffectHttpApiInternalServerError {
+    /// Always `"InternalServerError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+}
+
+/// 200 body of `experimental.console.get` (`{ consoleManagedProviders, activeOrgName?, switchableOrgCount }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConsoleState {
+    /// Provider ids managed by the console.
+    #[serde(rename = "consoleManagedProviders")]
+    pub console_managed_providers: Vec<String>,
+    /// The active org name, if any.
+    #[serde(rename = "activeOrgName", skip_serializing_if = "Option::is_none")]
+    pub active_org_name: Option<String>,
+    /// How many orgs the account can switch to.
+    #[serde(rename = "switchableOrgCount")]
+    pub switchable_org_count: i64,
+}
+
+/// One switchable Console org (`experimental.console.listOrgs`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConsoleOrg {
+    /// Account id.
+    #[serde(rename = "accountID")]
+    pub account_id: String,
+    /// Account email.
+    #[serde(rename = "accountEmail")]
+    pub account_email: String,
+    /// Account URL.
+    #[serde(rename = "accountUrl")]
+    pub account_url: String,
+    /// Org id.
+    #[serde(rename = "orgID")]
+    pub org_id: String,
+    /// Org name.
+    #[serde(rename = "orgName")]
+    pub org_name: String,
+    /// Whether this org is active.
+    pub active: bool,
+}
+
+/// 200 body of `experimental.console.listOrgs` (`{ orgs }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConsoleOrgsResponse {
+    /// The switchable orgs.
+    pub orgs: Vec<ConsoleOrg>,
+}
+
 /// 200 body of `tui.control.next` (`{ path, body }`) — the next control request the server forwards to
 /// a connected TUI. `body` is a free-form value (golden empty/any schema).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]

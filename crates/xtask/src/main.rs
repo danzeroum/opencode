@@ -130,6 +130,8 @@ const CUTOVER_PATHS: &[&str] = &[
     "/experimental/project/{projectID}/copy",
     "/experimental/project/{projectID}/copy/refresh",
     "/sync/start",
+    "/experimental/console",
+    "/experimental/console/orgs",
 ];
 
 #[derive(Parser)]
