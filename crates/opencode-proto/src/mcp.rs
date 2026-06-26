@@ -32,3 +32,15 @@ pub enum McpStatus {
         error: String,
     },
 }
+
+/// 404 body of the MCP runtime routes (`{ _tag: "McpServerNotFoundError", name, message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct McpServerNotFoundError {
+    /// Always `"McpServerNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The server name that wasn't found.
+    pub name: String,
+    /// Human-readable message.
+    pub message: String,
+}
