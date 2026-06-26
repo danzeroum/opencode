@@ -28,6 +28,7 @@ tracing.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 ulid.workspace = true
+portable-pty = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

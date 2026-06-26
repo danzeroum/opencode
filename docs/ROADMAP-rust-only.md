@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **143/168 (85%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle + PTY-reads nativos. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **146/168 (87%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle + **grupo `pty` 100% nativo (terminais reais via `portable-pty` + streaming WebSocket)**. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -37,7 +37,7 @@
 
 **Tier 6 — Subsistemas novos:**
 - ⏳ T6.1 MCP runtime (`rmcp`): `mcp.connect`/`mcp.disconnect` ✅ wired-404 (sem server configurado) — **#160**; falta `mcp.add` (persistir config) + `mcp.auth.*` (OAuth) + a conexão real `rmcp`
-- ⏳ T6.2 PTY (`portable-pty`): `pty.shells` (real, enumera `/etc/shells`+`$SHELL`) + `pty.list`/`get`/`remove`/`update` (vazio/404 até o registry) ✅ **#162**; falta `pty.create`/`connect`/`connectToken` (spawn `portable-pty` + streaming + registry)
+- ✅ T6.2 PTY (`portable-pty`) **— grupo completo**: `pty.shells` (enumera `/etc/shells`+`$SHELL`) + `pty.list`/`get`/`remove`/`update` ✅ **#162**; e agora `pty.create` (spawn real: `openpty`+`CommandBuilder`+thread leitora drenando scrollback de 2 MiB), `pty.connect` (upgrade WebSocket — replay por cursor + frame meta `0x00`+JSON + I/O ao vivo bidirecional), `pty.connectToken` (ticket single-use 60 s gated por header `x-opencode-ticket` + Origin) — `PtyManager` global em `crates/opencode-server/src/pty.rs` — **(este PR)**
 - ⏳ T6.3 LSP runtime (`lsp.status` real)
 
 **Tier 7 — TUI + sync + experimental:**
@@ -160,7 +160,7 @@ O backend Rust resolve o provider a partir do prefixo do `model` (`provider/mode
 - ⏳ 4d — deletar `packages/server` + `packages/core` TS
 
 ## Fora do escopo web-only ➖
-- ➖ `tui.*`, `pty.*` (exceto stub `pty.remove`), `sync.*`, maior parte de `experimental.*`, `mcp.auth` avançado, `formatter`, `lsp.*` além de status, `vcs.*` além de get, billing/login.
+- ➖ `sync.*` (replay/steal), parte de `experimental.*` (worktree/workspace/projectCopy create-ops), `mcp.add`/`mcp.auth` avançado, OAuth de provider/credential, billing/login. (`pty.*` e `tui.*` já nativos.)
 
 ## Frontend (parallel track — não é "backend Rust")
 - ⏳ Recriar o design handoff (`docs/design_handoff_opencode_web`) em SolidJS. Track separado; ver PENDENCIAS #3.

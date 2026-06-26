@@ -1464,6 +1464,76 @@ pub struct PtyNotFoundError {
     pub message: String,
 }
 
+/// `effect_HttpApiError_Forbidden` — Effect's generic HttpApi forbidden error (`{ _tag: "Forbidden" }`).
+/// The 403 body of `pty.connect`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(as = effect_HttpApiError_Forbidden)]
+pub struct EffectHttpApiForbidden {
+    /// Always `"Forbidden"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+}
+
+/// 403 body of `pty.connectToken` (`{ _tag: "PtyForbiddenError", message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtyForbiddenError {
+    /// Always `"PtyForbiddenError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// 200 body of `pty.connectToken` — a short-lived WebSocket connect ticket (`{ ticket, expires_in }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtyConnectToken {
+    /// Opaque single-use ticket presented on the WebSocket upgrade.
+    pub ticket: String,
+    /// Seconds until the ticket expires.
+    pub expires_in: i64,
+}
+
+/// Request body of `pty.create` (`{ command?, args?, cwd?, title?, env? }`). All optional — an absent
+/// `command` spawns the user's login shell.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtyCreateRequest {
+    /// The command to spawn (defaults to the login shell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Command arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Working directory (defaults to the server cwd).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Display title (defaults to the command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Extra environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
+}
+
+/// A PTY's window size in character cells (`{ rows, cols }`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtySize {
+    /// Number of rows.
+    pub rows: u16,
+    /// Number of columns.
+    pub cols: u16,
+}
+
+/// Request body of `pty.update` (`{ title?, size? }`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtyUpdateRequest {
+    /// New display title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// New window size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<PtySize>,
+}
+
 /// A workspace's `timeUsed` — a number, or one of the JSON-special strings (`NaN`/`Infinity`/…).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 #[serde(untagged)]

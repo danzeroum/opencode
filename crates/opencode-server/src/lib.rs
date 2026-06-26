@@ -7,6 +7,7 @@
 //! zero native handlers. An always-native `/_rust/health` liveness route supports the Phase 0 smoke.
 
 pub mod proxy;
+pub mod pty;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -5343,9 +5344,12 @@ async fn v2_provider_get(
         experimental_session_list,
         pty_shells,
         pty_list,
+        pty_create,
         pty_get,
         pty_remove,
         pty_update,
+        pty_connect_token,
+        pty_connect,
         config_get,
         config_update,
         config_providers,
@@ -6932,9 +6936,10 @@ async fn experimental_session_list() -> Json<Vec<opencode_proto::GlobalSession>>
 }
 
 // ---------------------------------------------------------------------------
-// PTY (group `pty`). `pty.shells` enumerates the system's login shells (real). The PTY session registry
-// (spawn via `portable-pty` + the streaming `connect`) isn't ported yet, so `list` is empty and
-// `get`/`remove`/`update` 404 — consistent with no sessions until `create` lands (PENDENCIAS).
+// PTY (group `pty`). Real terminals via wezterm's `portable-pty`: `create` spawns a child attached to
+// a pseudo-terminal, `list`/`get` enumerate live sessions, `update` resizes/retitles, `remove` kills,
+// and `connect` upgrades to a WebSocket streaming the scrollback + live I/O. `pty.shells` enumerates
+// the system's login shells. See [`crate::pty`] for the registry + streaming protocol.
 // ---------------------------------------------------------------------------
 
 /// Enumerate available login shells from `/etc/shells` (+ `$SHELL`), each with its basename and whether
@@ -6981,12 +6986,47 @@ async fn pty_shells() -> Json<Vec<opencode_proto::PtyShell>> {
     Json(list_shells())
 }
 
-/// `GET /pty` — list PTY sessions (group `pty`). Empty until the PTY registry is ported.
+/// `GET /pty` — list live PTY sessions (group `pty`).
 #[utoipa::path(get, path = "/pty", operation_id = "pty.list",
     responses((status = 200, description = "Sessions", body = Vec<opencode_proto::Pty>),
         (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "pty")]
 async fn pty_list() -> Json<Vec<opencode_proto::Pty>> {
-    Json(Vec::new())
+    Json(crate::pty::manager().list())
+}
+
+/// `POST /pty` — spawn a PTY session (group `pty`). 200 `Pty`, 400 on a spawn/validation failure.
+#[utoipa::path(post, path = "/pty", operation_id = "pty.create",
+    request_body = opencode_proto::PtyCreateRequest,
+    responses((status = 200, description = "Session", body = opencode_proto::Pty),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "pty")]
+async fn pty_create(
+    body: Option<Json<opencode_proto::PtyCreateRequest>>,
+) -> Result<Json<opencode_proto::Pty>, PtyCreateError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    crate::pty::manager()
+        .create(req)
+        .map(Json)
+        .map_err(|e| PtyCreateError(e.to_string()))
+}
+
+/// 400 responder for `pty.create` — a contract-shaped `RequestError` (the InvalidRequestError arm).
+struct PtyCreateError(String);
+
+impl axum::response::IntoResponse for PtyCreateError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(opencode_proto::RequestError::Invalid(
+                opencode_proto::InvalidRequestError {
+                    tag: "InvalidRequestError".to_string(),
+                    message: self.0,
+                    kind: None,
+                    field: None,
+                },
+            )),
+        )
+            .into_response()
+    }
 }
 
 /// 404 responder for the PTY routes — a contract-shaped `PtyNotFoundError`.
@@ -7006,7 +7046,7 @@ impl axum::response::IntoResponse for PtyNotFound {
     }
 }
 
-/// `GET /pty/{ptyID}` — a PTY session (group `pty`). 404 until the registry is ported.
+/// `GET /pty/{ptyID}` — a PTY session (group `pty`). 404 if unknown.
 #[utoipa::path(get, path = "/pty/{ptyID}", operation_id = "pty.get",
     params(("ptyID" = String, Path, description = "PTY id")),
     responses((status = 200, description = "Session", body = opencode_proto::Pty),
@@ -7015,10 +7055,13 @@ impl axum::response::IntoResponse for PtyNotFound {
 async fn pty_get(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<opencode_proto::Pty>, PtyNotFound> {
-    Err(PtyNotFound(id))
+    crate::pty::manager()
+        .get(&id)
+        .map(Json)
+        .ok_or(PtyNotFound(id))
 }
 
-/// `DELETE /pty/{ptyID}` — remove a PTY session (group `pty`). 404 until the registry is ported.
+/// `DELETE /pty/{ptyID}` — kill + remove a PTY session (group `pty`). 404 if unknown.
 #[utoipa::path(delete, path = "/pty/{ptyID}", operation_id = "pty.remove",
     params(("ptyID" = String, Path, description = "PTY id")),
     responses((status = 200, description = "Removed", body = bool, content_type = "application/json"),
@@ -7027,19 +7070,60 @@ async fn pty_get(
 async fn pty_remove(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<bool>, PtyNotFound> {
-    Err(PtyNotFound(id))
+    if crate::pty::manager().remove(&id) {
+        Ok(Json(true))
+    } else {
+        Err(PtyNotFound(id))
+    }
 }
 
-/// `PUT /pty/{ptyID}` — update a PTY session (title/size) (group `pty`). 404 until the registry is ported.
+/// `PUT /pty/{ptyID}` — update a PTY session (title/size) (group `pty`). 404 if unknown.
 #[utoipa::path(put, path = "/pty/{ptyID}", operation_id = "pty.update",
     params(("ptyID" = String, Path, description = "PTY id")),
+    request_body = opencode_proto::PtyUpdateRequest,
     responses((status = 200, description = "Updated", body = opencode_proto::Pty),
         (status = 400, description = "Bad request", body = opencode_proto::RequestError),
         (status = 404, description = "Not found", body = opencode_proto::PtyNotFoundError)), tag = "pty")]
 async fn pty_update(
     axum::extract::Path(id): axum::extract::Path<String>,
+    body: Option<Json<opencode_proto::PtyUpdateRequest>>,
 ) -> Result<Json<opencode_proto::Pty>, PtyNotFound> {
-    Err(PtyNotFound(id))
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    crate::pty::manager()
+        .update(&id, req)
+        .map(Json)
+        .ok_or(PtyNotFound(id))
+}
+
+/// `POST /pty/{ptyID}/connect-token` — issue a WebSocket connect ticket (group `pty`). 403 if the
+/// connect header/Origin guard fails, 404 if unknown.
+#[utoipa::path(post, path = "/pty/{ptyID}/connect-token", operation_id = "pty.connectToken",
+    params(("ptyID" = String, Path, description = "PTY id")),
+    responses((status = 200, description = "WebSocket connect token", body = opencode_proto::PtyConnectToken),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 403, description = "Forbidden", body = opencode_proto::PtyForbiddenError),
+        (status = 404, description = "Not found", body = opencode_proto::PtyNotFoundError)), tag = "pty")]
+async fn pty_connect_token(
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    crate::pty::connect_token(id, headers)
+}
+
+/// `GET /pty/{ptyID}/connect` — attach to a PTY over WebSocket (group `pty`). The JSON contract is a
+/// `200 boolean`; 403 on an invalid ticket, 404 if unknown.
+#[utoipa::path(get, path = "/pty/{ptyID}/connect", operation_id = "pty.connect",
+    params(("ptyID" = String, Path, description = "PTY id")),
+    responses((status = 200, description = "Connected session", body = bool, content_type = "application/json"),
+        (status = 403, description = "Forbidden", body = opencode_proto::EffectHttpApiForbidden),
+        (status = 404, description = "Not found", body = opencode_proto::NotFoundError)), tag = "pty")]
+async fn pty_connect(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    crate::pty::MaybeWs(ws): crate::pty::MaybeWs,
+) -> axum::response::Response {
+    crate::pty::connect(id, params, headers, ws).await
 }
 
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
@@ -8054,12 +8138,14 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/sync/history", post(sync_history_list));
     }
     if state.routes.handles("pty") {
-        router = router.route("/pty", get(pty_list));
+        router = router.route("/pty", get(pty_list).post(pty_create));
         router = router.route("/pty/shells", get(pty_shells));
         router = router.route(
             "/pty/{ptyID}",
             get(pty_get).delete(pty_remove).put(pty_update),
         );
+        router = router.route("/pty/{ptyID}/connect-token", post(pty_connect_token));
+        router = router.route("/pty/{ptyID}/connect", get(pty_connect));
     }
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));
