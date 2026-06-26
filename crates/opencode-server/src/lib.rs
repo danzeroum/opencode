@@ -5354,6 +5354,8 @@ async fn v2_provider_get(
         permission_list,
         question_list,
         mcp_status,
+        mcp_connect,
+        mcp_disconnect,
         lsp_status,
         vcs_get,
         project_list,
@@ -7564,6 +7566,50 @@ async fn mcp_status(
     Json(std::collections::HashMap::new())
 }
 
+/// 404 responder for the MCP runtime routes — a contract-shaped `McpServerNotFoundError`.
+pub struct McpNotFound(String);
+
+impl axum::response::IntoResponse for McpNotFound {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(opencode_proto::McpServerNotFoundError {
+                tag: "McpServerNotFoundError".to_string(),
+                name: self.0.clone(),
+                message: format!("MCP server not found: {}", self.0),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// `POST /mcp/{name}/connect` — connect an MCP server (group `mcp`). Matches the golden `mcp.connect`:
+/// 200 `true`, 400, 404 `McpServerNotFoundError`. The MCP client runtime (`rmcp`) isn't ported, so no
+/// server is configured natively → 404. (A real connect + tool integration is a follow-up.)
+#[utoipa::path(post, path = "/mcp/{name}/connect", operation_id = "mcp.connect",
+    params(("name" = String, Path, description = "MCP server name")),
+    responses((status = 200, description = "Connected", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Not found", body = opencode_proto::McpServerNotFoundError)), tag = "mcp")]
+async fn mcp_connect(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<bool>, McpNotFound> {
+    Err(McpNotFound(name))
+}
+
+/// `POST /mcp/{name}/disconnect` — disconnect an MCP server (group `mcp`). Matches the golden
+/// `mcp.disconnect`: 200 `true`, 400, 404. 404 until the MCP runtime is ported.
+#[utoipa::path(post, path = "/mcp/{name}/disconnect", operation_id = "mcp.disconnect",
+    params(("name" = String, Path, description = "MCP server name")),
+    responses((status = 200, description = "Disconnected", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Not found", body = opencode_proto::McpServerNotFoundError)), tag = "mcp")]
+async fn mcp_disconnect(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<bool>, McpNotFound> {
+    Err(McpNotFound(name))
+}
+
 /// `GET /lsp` — status of all running language servers (group `lsp`). Matches the golden `lsp.status`:
 /// 200 `[LSPStatus]`, 400 `BadRequestError`. The running-server set is live runtime state owned by the
 /// LSP host; until that host exists in Rust no server is running, so this returns an empty list —
@@ -7715,6 +7761,8 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("mcp") {
         router = router.route("/mcp", get(mcp_status));
+        router = router.route("/mcp/{name}/connect", post(mcp_connect));
+        router = router.route("/mcp/{name}/disconnect", post(mcp_disconnect));
     }
     if state.routes.handles("lsp") {
         router = router.route("/lsp", get(lsp_status));
