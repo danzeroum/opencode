@@ -1421,6 +1421,49 @@ pub struct GlobalSession {
     pub project: GlobalSessionProject,
 }
 
+/// A PTY session (`pty.{list,get,create,update}`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Pty {
+    /// PTY id (`pty_…`).
+    pub id: String,
+    /// Display title.
+    pub title: String,
+    /// The spawned command.
+    pub command: String,
+    /// Command arguments.
+    pub args: Vec<String>,
+    /// Working directory.
+    pub cwd: String,
+    /// `running` | `exited`.
+    pub status: String,
+    /// Process id.
+    pub pid: i64,
+}
+
+/// One entry of `pty.shells` (`{ path, name, acceptable }`) — an available login shell.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtyShell {
+    /// Absolute path to the shell binary.
+    pub path: String,
+    /// Shell name (the binary's basename).
+    pub name: String,
+    /// Whether the shell binary exists / is usable.
+    pub acceptable: bool,
+}
+
+/// 404 body of the PTY routes (`{ _tag: "PtyNotFoundError", ptyID, message }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PtyNotFoundError {
+    /// Always `"PtyNotFoundError"`.
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    /// The PTY id that wasn't found.
+    #[serde(rename = "ptyID")]
+    pub pty_id: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
 /// A workspace's `timeUsed` — a number, or one of the JSON-special strings (`NaN`/`Infinity`/…).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 #[serde(untagged)]

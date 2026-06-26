@@ -5341,6 +5341,11 @@ async fn v2_provider_get(
         sync_history_list,
         experimental_project_copy_generate_name,
         experimental_session_list,
+        pty_shells,
+        pty_list,
+        pty_get,
+        pty_remove,
+        pty_update,
         config_get,
         config_update,
         config_providers,
@@ -6926,6 +6931,117 @@ async fn experimental_session_list() -> Json<Vec<opencode_proto::GlobalSession>>
     Json(Vec::new())
 }
 
+// ---------------------------------------------------------------------------
+// PTY (group `pty`). `pty.shells` enumerates the system's login shells (real). The PTY session registry
+// (spawn via `portable-pty` + the streaming `connect`) isn't ported yet, so `list` is empty and
+// `get`/`remove`/`update` 404 — consistent with no sessions until `create` lands (PENDENCIAS).
+// ---------------------------------------------------------------------------
+
+/// Enumerate available login shells from `/etc/shells` (+ `$SHELL`), each with its basename and whether
+/// the binary exists.
+fn list_shells() -> Vec<opencode_proto::PtyShell> {
+    let mut shells: Vec<opencode_proto::PtyShell> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |path: String| {
+        if path.is_empty() || !seen.insert(path.clone()) {
+            return;
+        }
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&path)
+            .to_string();
+        let acceptable = std::path::Path::new(&path).exists();
+        shells.push(opencode_proto::PtyShell {
+            path,
+            name,
+            acceptable,
+        });
+    };
+    if let Ok(content) = std::fs::read_to_string("/etc/shells") {
+        for line in content.lines() {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                push(line.to_string());
+            }
+        }
+    }
+    if let Ok(shell) = std::env::var("SHELL") {
+        push(shell);
+    }
+    shells
+}
+
+/// `GET /pty/shells` — available login shells (group `pty`). Matches the golden `pty.shells`: 200
+/// `[{ path, name, acceptable }]`, 400. Real: enumerates `/etc/shells` + `$SHELL`.
+#[utoipa::path(get, path = "/pty/shells", operation_id = "pty.shells",
+    responses((status = 200, description = "Shells", body = Vec<opencode_proto::PtyShell>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "pty")]
+async fn pty_shells() -> Json<Vec<opencode_proto::PtyShell>> {
+    Json(list_shells())
+}
+
+/// `GET /pty` — list PTY sessions (group `pty`). Empty until the PTY registry is ported.
+#[utoipa::path(get, path = "/pty", operation_id = "pty.list",
+    responses((status = 200, description = "Sessions", body = Vec<opencode_proto::Pty>),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)), tag = "pty")]
+async fn pty_list() -> Json<Vec<opencode_proto::Pty>> {
+    Json(Vec::new())
+}
+
+/// 404 responder for the PTY routes — a contract-shaped `PtyNotFoundError`.
+pub struct PtyNotFound(String);
+
+impl axum::response::IntoResponse for PtyNotFound {
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(opencode_proto::PtyNotFoundError {
+                tag: "PtyNotFoundError".to_string(),
+                pty_id: self.0.clone(),
+                message: format!("PTY not found: {}", self.0),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// `GET /pty/{ptyID}` — a PTY session (group `pty`). 404 until the registry is ported.
+#[utoipa::path(get, path = "/pty/{ptyID}", operation_id = "pty.get",
+    params(("ptyID" = String, Path, description = "PTY id")),
+    responses((status = 200, description = "Session", body = opencode_proto::Pty),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Not found", body = opencode_proto::PtyNotFoundError)), tag = "pty")]
+async fn pty_get(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::Pty>, PtyNotFound> {
+    Err(PtyNotFound(id))
+}
+
+/// `DELETE /pty/{ptyID}` — remove a PTY session (group `pty`). 404 until the registry is ported.
+#[utoipa::path(delete, path = "/pty/{ptyID}", operation_id = "pty.remove",
+    params(("ptyID" = String, Path, description = "PTY id")),
+    responses((status = 200, description = "Removed", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Not found", body = opencode_proto::PtyNotFoundError)), tag = "pty")]
+async fn pty_remove(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<bool>, PtyNotFound> {
+    Err(PtyNotFound(id))
+}
+
+/// `PUT /pty/{ptyID}` — update a PTY session (title/size) (group `pty`). 404 until the registry is ported.
+#[utoipa::path(put, path = "/pty/{ptyID}", operation_id = "pty.update",
+    params(("ptyID" = String, Path, description = "PTY id")),
+    responses((status = 200, description = "Updated", body = opencode_proto::Pty),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::PtyNotFoundError)), tag = "pty")]
+async fn pty_update(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::Pty>, PtyNotFound> {
+    Err(PtyNotFound(id))
+}
+
 /// The opencode config directory (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
 fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -7936,6 +8052,14 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("sync") {
         router = router.route("/sync/start", post(sync_start));
         router = router.route("/sync/history", post(sync_history_list));
+    }
+    if state.routes.handles("pty") {
+        router = router.route("/pty", get(pty_list));
+        router = router.route("/pty/shells", get(pty_shells));
+        router = router.route(
+            "/pty/{ptyID}",
+            get(pty_get).delete(pty_remove).put(pty_update),
+        );
     }
     if state.routes.handles("fs") {
         router = router.route("/api/fs/list", get(v2_fs_list));
