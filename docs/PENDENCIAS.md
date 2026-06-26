@@ -51,6 +51,11 @@ A GUI web lê o histórico do chat via **`session.messages` V1** (`GET /session/
 - **Lossiness conhecida (aceita por ora):** ids de `Part` são sintetizados deterministicamente (`prt_{messageID}_{i}`); entradas-marcador que o V1 não modela são **puladas** (`agent-switched`/`model-switched`/`system`/`shell`/`compaction`). Inócuo hoje porque os **produtores** dessas entradas (troca de agente/modelo mid-run, `session.shell`, `session.summarize`) ainda não estão na engine Rust. Quando entrarem, decidir: (a) mapear essas entradas no projetor V1, ou (b) trocar para um **store V1 raw** de `message`/`part` (mais fiel, mais código + storage duplo).
 - **Mutações V1 ainda pendentes** (precisam de run síncrono + escrita no timeline + projeção): `session.command` (`{info,parts}`), `session.shell` (idem + 409), `session.deleteMessage` (bool), `part.update` (Part), `part.delete` (bool). `session.command`/`shell` são os próximos pontos da engine.
 
+### #8 — Eventos de ciclo de vida do PTY no barramento SSE — follow-up
+O grupo `pty` está **funcionalmente completo** (spawn/list/get/update/remove + streaming WebSocket via `connect`). A única lacuna deliberada: o TS publica `pty.created`/`pty.updated`/`pty.exited`/`pty.deleted` no `EventV2` (consumidos pelo SSE `/event`), enquanto o `PtyManager` Rust (registry global em `OnceLock`, sem handle do event store) **ainda não publica** esses eventos.
+- **Impacto:** nenhum no contrato HTTP/OpenAPI (o `openapi-diff` passa com as 8 ops) nem na interação real do terminal (o streaming é via WebSocket, não via SSE). Só afeta clientes que queiram reagir a criação/saída de PTY pelo stream `/event` global.
+- **Plano:** quando o barramento de eventos for acessível ao subsistema PTY (passar o handle do `EventStore`/bus ao `PtyManager`, ou movê-lo para o `AppContext`), emitir os 4 eventos no `create`/`update`/exit(reader-thread)/`remove`. Não bloqueia nada.
+
 ## Resolvidas
 
 ### #6 — Write-path do runner ✅ (resolvido — #80/#81/#82)

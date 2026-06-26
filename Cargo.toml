@@ -39,7 +39,8 @@ opencode-server = { path = "crates/opencode-server" }
 
 # Async runtime + HTTP
 tokio = { version = "1", features = ["full"] }
-axum = "0.8"
+# `ws` enables the WebSocket upgrade used by the PTY `connect` route (interactive terminal I/O).
+axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 # Phase 3: real HTTPS to LLM providers needs a TLS backend. `rustls-tls` uses rustls + ring
@@ -71,6 +72,9 @@ ignore = "0.4"
 globset = "0.4"
 grep = "0.3"
 tempfile = "3"
+# PTY sessions (the `pty` group): spawn/resize/kill real terminals. wezterm's portable-pty — the
+# plan's pre-selected choice; pure-Rust over libc/nix (Unix) and the Windows ConPTY API.
+portable-pty = "0.9"
 
 [profile.release]
 lto = "thin"
