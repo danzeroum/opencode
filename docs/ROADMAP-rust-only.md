@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **128/168 (76%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 (tui + experimental/sync stubs) quase todo. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-22 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **130/168 (77%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo. Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -43,7 +43,8 @@
 **Tier 7 — TUI + sync + experimental:**
 - ✅ T7.1 `tui.*` (13 ops) — endpoints de controle: ações acками `200 true`; `control.next` retorna request vazio (sem TUI conectada = web-GUI). Macro `tui_ack!`; 400 por-op (`BadRequestError` vs `RequestError`). — **#156**
 - ✅ T7.2/7.3a stubs honestos (empty/204/false) de experimental+sync+worktree+projectCopy (12 ops): `worktree.list/remove/reset`, `experimental.{resource.list,session.background,console.switchOrg,controlPlane.moveSession,workspace.syncList,workspace.warp}`, `v2.projectCopy.remove/refresh`, `sync.start` — modelados os unions de erro `NamedMessageError`/`ProjectCopyError`/`WorkspaceWarpRequestError` — **#157**
-- ⏳ T7.3b restantes (retornam tipos reais): `worktree.create`(Worktree), `experimental.workspace.{list,status,adapter.list,create,remove}`(Workspace), `experimental.console.{get,listOrgs}`(ConsoleState), `experimental.session.list`, `sync.{replay,steal,history.list}`, `v2.projectCopy.create`(ProjectCopyCopy), `experimental.projectCopy.generateName`, `global.upgrade`
+- ✅ T7.3b-console `experimental.console.get` (default `ConsoleState`) + `console.listOrgs` (`{orgs:[]}`) — modelados `ConsoleState`/`ConsoleOrg`/`EffectHttpApiInternalServerError` — **#158**
+- ⏳ T7.3c restantes (tipos reais/semântica): `worktree.create`(Worktree, `timeUsed` union number|string), `experimental.workspace.{list,status,adapter.list,create,remove}`(Workspace), `experimental.session.list`(GlobalSession ~20 campos), `sync.{replay,steal,history.list}`, `v2.projectCopy.create`(ProjectCopyCopy), `experimental.projectCopy.generateName`, `global.upgrade`(union)
 
 **Tier 8 — Cutover (Fase 6):**
 - ⏳ T8.1 Schema ownership (Rust aplica a migração consolidada)
