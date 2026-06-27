@@ -5265,6 +5265,77 @@ async fn v2_integration_list(
     }))
 }
 
+// Integration connect/get/attempt (`v2.integration.{get,connect.key,connect.oauth,attempt.complete}`).
+// The integration subsystem (the github/gitlab/slack catalog + connection store) isn't ported and
+// `v2.integration.list` is empty, so these faithfully report "not available" via a 400
+// `InvalidRequestError` (never a fake success). The 200/204 success shapes are declared for parity.
+
+/// A contract-shaped 400 `InvalidRequestError` for the unported integration subsystem.
+fn integrations_unavailable() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::InvalidRequestError {
+            tag: "InvalidRequestError".to_string(),
+            message: "Integrations are not available in this build".to_string(),
+            kind: None,
+            field: None,
+        }),
+    )
+        .into_response()
+}
+
+/// `GET /api/integration/{integrationID}` — one integration (group `integration`). 400 (unported).
+#[utoipa::path(get, path = "/api/integration/{integrationID}", operation_id = "v2.integration.get",
+    params(("integrationID" = String, Path, description = "Integration id")),
+    responses((status = 200, description = "Integration", body = opencode_proto::IntegrationGetResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)), tag = "integration")]
+async fn v2_integration_get(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    integrations_unavailable()
+}
+
+/// `POST /api/integration/{integrationID}/connect/key` — connect via API key (group `integration`).
+/// 400 (unported). 204 + 401 declared for parity.
+#[utoipa::path(post, path = "/api/integration/{integrationID}/connect/key", operation_id = "v2.integration.connect.key",
+    params(("integrationID" = String, Path, description = "Integration id")),
+    responses((status = 204, description = "Connected"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)), tag = "integration")]
+async fn v2_integration_connect_key(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    integrations_unavailable()
+}
+
+/// `POST /api/integration/{integrationID}/connect/oauth` — begin an OAuth connect (group `integration`).
+/// 400 (unported). 200 `IntegrationAttempt` + 401 declared for parity.
+#[utoipa::path(post, path = "/api/integration/{integrationID}/connect/oauth", operation_id = "v2.integration.connect.oauth",
+    params(("integrationID" = String, Path, description = "Integration id")),
+    responses((status = 200, description = "Attempt", body = opencode_proto::IntegrationOauthResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)), tag = "integration")]
+async fn v2_integration_connect_oauth(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    integrations_unavailable()
+}
+
+/// `POST /api/integration/attempt/{attemptID}/complete` — complete an OAuth attempt (group
+/// `integration`). 400 (unported). 204 + 401 declared for parity.
+#[utoipa::path(post, path = "/api/integration/attempt/{attemptID}/complete", operation_id = "v2.integration.attempt.complete",
+    params(("attemptID" = String, Path, description = "Attempt id")),
+    responses((status = 204, description = "Completed"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)), tag = "integration")]
+async fn v2_integration_attempt_complete(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    integrations_unavailable()
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -5536,6 +5607,10 @@ async fn v2_provider_get(
         v2_fs_find,
         v2_fs_read,
         v2_integration_list,
+        v2_integration_get,
+        v2_integration_connect_key,
+        v2_integration_connect_oauth,
+        v2_integration_attempt_complete,
         v2_location_get,
         v2_provider_get
     ),
@@ -8410,9 +8485,22 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("integration") {
         router = router.route("/api/integration", get(v2_integration_list));
+        router = router.route("/api/integration/{integrationID}", get(v2_integration_get));
+        router = router.route(
+            "/api/integration/{integrationID}/connect/key",
+            post(v2_integration_connect_key),
+        );
+        router = router.route(
+            "/api/integration/{integrationID}/connect/oauth",
+            post(v2_integration_connect_oauth),
+        );
         router = router.route(
             "/api/integration/attempt/{attemptID}",
             axum::routing::delete(v2_integration_attempt_cancel),
+        );
+        router = router.route(
+            "/api/integration/attempt/{attemptID}/complete",
+            post(v2_integration_attempt_complete),
         );
     }
     if state.routes.handles("location") {
@@ -10061,6 +10149,43 @@ mod tests {
             // The named ProviderAuthError1 arm of the union.
             assert_eq!(v["name"], "ProviderAuthOauthMissing", "{uri}");
             assert_eq!(v["data"]["providerID"], "deepseek", "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_connect_ops_are_unavailable_400() {
+        use tower::ServiceExt;
+        let mk = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("integration"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        for (method, uri) in [
+            ("GET", "/api/integration/github"),
+            ("POST", "/api/integration/github/connect/key"),
+            ("POST", "/api/integration/github/connect/oauth"),
+            ("POST", "/api/integration/attempt/att_1/complete"),
+        ] {
+            let resp = build_router(mk())
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 400, "{method} {uri}");
+            let v: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(v["_tag"], "InvalidRequestError", "{method} {uri}");
         }
     }
 
