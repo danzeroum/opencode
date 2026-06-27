@@ -5255,6 +5255,236 @@ export type BadRequestError = {
   }
 }
 
+export type V2ProviderTestData = {
+  body?: never
+  path: {
+    providerID: string
+  }
+  query?: never
+  url: "/api/provider/{providerID}/test"
+}
+
+export type V2ProviderTestResponses = {
+  /**
+   * Success
+   */
+  200: {
+    ok: boolean
+    status?: number
+    error?: string
+    models?: number
+  }
+}
+
+export type V2ProviderTestResponse = V2ProviderTestResponses[keyof V2ProviderTestResponses]
+
+export type ConfigSourcesData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/config/sources"
+}
+
+export type ConfigSourcesErrors = {
+  /**
+   * BadRequestError
+   */
+  400: BadRequestError
+}
+
+export type ConfigSourcesError = ConfigSourcesErrors[keyof ConfigSourcesErrors]
+
+export type ConfigSourcesResponses = {
+  /**
+   * Success
+   */
+  200: {
+    levels: Array<{
+      code: string
+      label: string
+      source: string
+      readOnly: boolean
+      config: {
+        [key: string]: unknown
+      }
+    }>
+  }
+}
+
+export type ConfigSourcesResponse = ConfigSourcesResponses[keyof ConfigSourcesResponses]
+
+export type V2AgentDeleteData = {
+  body?: never
+  path: {
+    agentID: string
+  }
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/agent/{agentID}"
+}
+
+export type V2AgentDeleteErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2AgentDeleteError = V2AgentDeleteErrors[keyof V2AgentDeleteErrors]
+
+export type V2AgentDeleteResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2AgentDeleteResponse = V2AgentDeleteResponses[keyof V2AgentDeleteResponses]
+
+export type V2AgentSetData = {
+  body: {
+    model?: {
+      id: string
+      providerID: string
+      variant?: string
+    }
+    system?: string
+    description?: string
+    mode?: "subagent" | "primary" | "all"
+    hidden?: boolean
+    color?: string
+    steps?: number
+  }
+  path: {
+    agentID: string
+  }
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/agent/{agentID}"
+}
+
+export type V2AgentSetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2AgentSetError = V2AgentSetErrors[keyof V2AgentSetErrors]
+
+export type V2AgentSetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: AgentV2Info
+  }
+}
+
+export type V2AgentSetResponse = V2AgentSetResponses[keyof V2AgentSetResponses]
+
+export type V2CommandDeleteData = {
+  body?: never
+  path: {
+    commandID: string
+  }
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/command/{commandID}"
+}
+
+export type V2CommandDeleteErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2CommandDeleteError = V2CommandDeleteErrors[keyof V2CommandDeleteErrors]
+
+export type V2CommandDeleteResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2CommandDeleteResponse = V2CommandDeleteResponses[keyof V2CommandDeleteResponses]
+
+export type V2CommandSetData = {
+  body: {
+    template: string
+    description?: string
+    agent?: string
+    model?: {
+      id: string
+      providerID: string
+      variant?: string
+    }
+    subtask?: boolean
+  }
+  path: {
+    commandID: string
+  }
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/command/{commandID}"
+}
+
+export type V2CommandSetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2CommandSetError = V2CommandSetErrors[keyof V2CommandSetErrors]
+
+export type V2CommandSetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: CommandV2Info
+  }
+}
+
+export type V2CommandSetResponse = V2CommandSetResponses[keyof V2CommandSetResponses]
+
 export type AuthRemoveData = {
   body?: never
   path: {
