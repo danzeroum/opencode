@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **157/168 (93%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, grupos `pty`/`mcp` 100% nativos, `provider.oauth.*` fiel-400 (providers do dono são API-key/keyless, não fazem OAuth) + erros fiéis para os subsistemas que dependem de infra hospedada da opencode (share/sync/workspace). Restam só `v2.integration.*` (4) e `global.upgrade` (1). Plano em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **161/168 (96%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, grupos `pty`/`mcp` 100% nativos, `provider.oauth.*` + `v2.integration.*` fiel-400 + erros fiéis para os subsistemas que dependem de infra hospedada da opencode (share/sync/workspace/integrations). **Resta só `global.upgrade` (1)**, depois o cutover (remover proxy + deletar TS — confirmo antes). Plano em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução

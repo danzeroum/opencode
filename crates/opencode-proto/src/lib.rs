@@ -1673,6 +1673,141 @@ pub enum ProviderOauthRequestError {
     Invalid(InvalidRequestError),
 }
 
+// --- Integrations (`v2.integration.*`) -------------------------------------
+
+/// An OAuth integration method (`{ id, type:"oauth", label, prompts? }`). Reuses [`AuthPrompt`] for
+/// `prompts` (structurally identical to the golden `IntegrationTextPrompt`/`IntegrationSelectPrompt`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct IntegrationOauthMethod {
+    /// Method id.
+    pub id: String,
+    /// Always `"oauth"`.
+    pub r#type: String,
+    /// Display label.
+    pub label: String,
+    /// Input prompts for the flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<Vec<AuthPrompt>>,
+}
+
+/// An API-key integration method (`{ type:"key", label? }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct IntegrationKeyMethod {
+    /// Always `"key"`.
+    pub r#type: String,
+    /// Display label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// An environment-variable integration method (`{ type:"env", names }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct IntegrationEnvMethod {
+    /// Always `"env"`.
+    pub r#type: String,
+    /// The env var names that activate this integration.
+    pub names: Vec<String>,
+}
+
+/// One integration auth method (`anyOf[OAuth, Key, Env]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum IntegrationMethod {
+    /// OAuth flow.
+    Oauth(IntegrationOauthMethod),
+    /// API key.
+    Key(IntegrationKeyMethod),
+    /// Environment variables.
+    Env(IntegrationEnvMethod),
+}
+
+/// A credential-backed connection (`{ type:"credential", id, label }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConnectionCredentialInfo {
+    /// Always `"credential"`.
+    pub r#type: String,
+    /// Credential id.
+    pub id: String,
+    /// Display label.
+    pub label: String,
+}
+
+/// An env-backed connection (`{ type:"env", name }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ConnectionEnvInfo {
+    /// Always `"env"`.
+    pub r#type: String,
+    /// The env var name.
+    pub name: String,
+}
+
+/// One active connection (`anyOf[Credential, Env]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ConnectionInfo {
+    /// Credential-backed.
+    Credential(ConnectionCredentialInfo),
+    /// Env-backed.
+    Env(ConnectionEnvInfo),
+}
+
+/// An integration (`{ id, name, methods, connections }`) — the `data` of `v2.integration.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct IntegrationInfo {
+    /// Integration id (e.g. `github`).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Available auth methods.
+    pub methods: Vec<IntegrationMethod>,
+    /// Active connections.
+    pub connections: Vec<ConnectionInfo>,
+}
+
+/// 200 body of `v2.integration.get` (`{ location, data }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct IntegrationGetResponse {
+    /// Resolved location context.
+    pub location: LocationInfo,
+    /// The integration.
+    pub data: IntegrationInfo,
+}
+
+/// `time` of an [`IntegrationAttempt`] (`{ created, expires }`); each is a number or a JSON-special
+/// string (reuses [`WorkspaceTimeUsed`]).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct IntegrationAttemptTime {
+    /// Creation time.
+    pub created: WorkspaceTimeUsed,
+    /// Expiry time.
+    pub expires: WorkspaceTimeUsed,
+}
+
+/// An in-flight OAuth attempt (`{ attemptID, url, instructions, mode, time }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct IntegrationAttempt {
+    /// Attempt id.
+    #[serde(rename = "attemptID")]
+    pub attempt_id: String,
+    /// The authorization URL.
+    pub url: String,
+    /// Human-readable instructions.
+    pub instructions: String,
+    /// Flow mode: `auto` | `code`.
+    pub mode: String,
+    /// Timestamps.
+    pub time: IntegrationAttemptTime,
+}
+
+/// 200 body of `v2.integration.connect.oauth` (`{ location, data }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct IntegrationOauthResponse {
+    /// Resolved location context.
+    pub location: LocationInfo,
+    /// The started attempt.
+    pub data: IntegrationAttempt,
+}
+
 /// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct EffectHttpApiInternalServerError {
