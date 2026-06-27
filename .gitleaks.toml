@@ -4,5 +4,9 @@ title = "opencode gitleaks config"
 useDefault = true
 
 [allowlist]
-description = "Deliberately fake secrets in skill-vetter test fixtures (script/skills/fixtures)"
-paths = ['''script/skills/fixtures/.*''']
+description = "Fake secrets in skill-vetter test fixtures, and generated SDK client code (regenerated from the public openapi.json contract — no real secrets; matches are generated identifiers with incidental entropy)"
+paths = [
+  '''script/skills/fixtures/.*''',
+  '''packages/sdk/js/src/gen/.*''',
+  '''packages/sdk/js/src/v2/gen/.*''',
+]
