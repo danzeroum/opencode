@@ -542,15 +542,12 @@ mod tests {
 
     // Real recorded cassettes (request.body + response.body) from
     // `packages/llm/test/fixtures/recordings/bedrock-converse/`.
-    const STREAMS_TEXT: &str = include_str!(
-        "../../../packages/llm/test/fixtures/recordings/bedrock-converse/streams-text.json"
-    );
-    const STREAMS_TOOL_CALL: &str = include_str!(
-        "../../../packages/llm/test/fixtures/recordings/bedrock-converse/streams-a-tool-call.json"
-    );
-    const DRIVES_TOOL_LOOP: &str = include_str!(
-        "../../../packages/llm/test/fixtures/recordings/bedrock-converse/drives-a-tool-loop.json"
-    );
+    const STREAMS_TEXT: &str =
+        include_str!("../fixtures/recordings/bedrock-converse/streams-text.json");
+    const STREAMS_TOOL_CALL: &str =
+        include_str!("../fixtures/recordings/bedrock-converse/streams-a-tool-call.json");
+    const DRIVES_TOOL_LOOP: &str =
+        include_str!("../fixtures/recordings/bedrock-converse/drives-a-tool-loop.json");
 
     /// Base64-decode the `response.body` of the nth interaction in a cassette.
     fn response_bytes(cassette: &str, interaction: usize) -> Vec<u8> {

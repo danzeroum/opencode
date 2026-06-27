@@ -9,9 +9,11 @@ import path from "path"
 
 import { createClient } from "@hey-api/openapi-ts"
 
-const opencode = path.resolve(dir, "../../opencode")
-
-await $`bun dev generate > ${dir}/openapi.json`.cwd(opencode)
+// The OpenAPI contract is now owned by the Rust backend and committed as the golden
+// `packages/sdk/openapi.json` (the Rust server is verified against it by `xtask openapi-diff`). The SDK
+// client is generated from that committed spec — the old `bun dev generate` step ran the now-deleted
+// TypeScript server.
+await $`cp ${path.resolve(dir, "../openapi.json")} ${dir}/openapi.json`
 
 await createClient({
   input: "./openapi.json",
