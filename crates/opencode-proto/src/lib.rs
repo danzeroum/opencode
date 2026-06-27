@@ -1622,6 +1622,57 @@ pub struct SyncSessionResult {
     pub session_id: String,
 }
 
+/// 200 body of `provider.oauth.authorize` (`{ url, method, instructions }`) — the OAuth kickoff.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderOauthAuthorization {
+    /// The provider authorization URL the user opens.
+    pub url: String,
+    /// Flow kind: `auto` | `code`.
+    pub method: String,
+    /// Human-readable next-step instructions.
+    pub instructions: String,
+}
+
+/// Payload of [`ProviderOauthError`] (`{ providerID?, field?, message?, kind? }`). (Named with an
+/// `Oauth` prefix to avoid colliding with the message-part `ProviderAuthErrorData` component.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderOauthErrorData {
+    /// The provider id, if applicable.
+    #[serde(rename = "providerID", skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// The offending field, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Error kind discriminator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// The named provider-OAuth error (golden `ProviderAuthError1`: `{ name, data }`); `name` is one of
+/// `BadRequest`/`ProviderAuthOauthMissing`/`…CodeMissing`/`…CallbackFailed`/`ProviderAuthValidationFailed`.
+/// (The diff matches by structure, so the Rust name need not equal the golden's.)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProviderOauthError {
+    /// The error name (discriminator).
+    pub name: String,
+    /// Error payload.
+    pub data: ProviderOauthErrorData,
+}
+
+/// The 400 union of `provider.oauth.authorize` / `callback`
+/// (`anyOf[ProviderAuthError1, InvalidRequestError]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ProviderOauthRequestError {
+    /// Named provider-auth error.
+    Typed(ProviderOauthError),
+    /// Schema validation error.
+    Invalid(InvalidRequestError),
+}
+
 /// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct EffectHttpApiInternalServerError {
