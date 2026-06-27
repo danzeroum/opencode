@@ -1,10 +1,11 @@
 //! axum HTTP API + the **strangler-fig seam**.
 //!
-//! Native contract routes are added to the router as they are cut over, gated by a [`RouteTable`]
-//! parsed from `OPENCODE_RUST_ROUTES`. Everything not handled natively falls through to
-//! [`proxy::proxy_handler`], which forwards the request to the existing TypeScript server. With an
-//! empty route table the server proxies 100% of contract traffic — proving the seam end-to-end with
-//! zero native handlers. An always-native `/_rust/health` liveness route supports the Phase 0 smoke.
+//! All 168 contract operations are now served natively, so the [`RouteTable`] default (from
+//! `OPENCODE_RUST_ROUTES`, unset ⇒ all-native) is **Rust-only**: every group is handled by Rust and no
+//! TypeScript upstream is needed. The seam is retained as an escape hatch — a subset (`health,fs,…`)
+//! serves only those natively and proxies the rest via [`proxy::proxy_handler`]; `none`/empty proxies
+//! everything — until the TS packages are deleted (the final, irreversible cutover step). An
+//! always-native `/_rust/health` liveness route supports the cross-platform smoke.
 
 pub mod proxy;
 pub mod pty;
@@ -38,42 +39,71 @@ use opencode_proto::Health;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Which contract route groups are served natively by Rust; the rest are proxied to TypeScript.
-/// Parsed from `OPENCODE_RUST_ROUTES` (comma-separated group names, e.g. `health,fs,location`).
+/// Native-vs-proxy routing decisions, parsed from `OPENCODE_RUST_ROUTES`.
+///
+/// Now that the Rust backend serves 100% of the contract, the **default is native-by-default**: with
+/// the variable unset (or `all`), every group is served by Rust and no TypeScript upstream is needed
+/// (Rust-only). Set a comma-separated subset (e.g. `health,fs`) to serve only those natively and proxy
+/// the rest (the migration/testing mode), or `none`/empty to proxy everything (the pre-cutover escape
+/// hatch). This is the reversible half of the Tier 8 cutover; deleting the TS packages is the separate,
+/// irreversible step.
 #[derive(Clone, Debug, Default)]
 pub struct RouteTable {
     groups: BTreeSet<String>,
+    /// When set, every group is served natively (the Rust-only default).
+    all: bool,
 }
 
 impl RouteTable {
-    /// Build from the `OPENCODE_RUST_ROUTES` environment variable.
+    /// Build from the `OPENCODE_RUST_ROUTES` environment variable. Unset ⇒ all-native (Rust-only).
     pub fn from_env() -> Self {
-        Self::parse(&std::env::var("OPENCODE_RUST_ROUTES").unwrap_or_default())
+        match std::env::var("OPENCODE_RUST_ROUTES") {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Self::all(),
+        }
     }
 
-    /// Parse a comma-separated list of group names.
+    /// Every group served natively (no proxy needed).
+    pub fn all() -> Self {
+        Self {
+            groups: BTreeSet::new(),
+            all: true,
+        }
+    }
+
+    /// Parse a comma-separated list of group names. `all` ⇒ everything native; `none`/empty ⇒ proxy
+    /// everything; otherwise the listed groups are native and the rest are proxied.
     pub fn parse(raw: &str) -> Self {
+        if raw.trim().eq_ignore_ascii_case("all") {
+            return Self::all();
+        }
         let groups = raw
             .split(',')
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
             .map(str::to_string)
             .collect();
-        Self { groups }
+        Self { groups, all: false }
     }
 
     /// Whether the named route group is served natively.
     pub fn handles(&self, group: &str) -> bool {
-        self.groups.contains(group)
+        self.all || self.groups.contains(group)
     }
 
-    /// Number of natively-served groups.
+    /// Number of explicitly-listed natively-served groups (`0` in all-native mode).
     pub fn len(&self) -> usize {
         self.groups.len()
     }
 
-    /// Whether no group is served natively (empty table → proxy everything).
+    /// Whether nothing is served natively (proxy everything).
     pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+        !self.all && self.groups.is_empty()
+    }
+
+    /// Whether every group is served natively (Rust-only; no proxy needed).
+    pub fn is_all(&self) -> bool {
+        self.all
     }
 }
 
@@ -8715,6 +8745,25 @@ mod tests {
         assert!(rt.handles("location"));
         assert!(!rt.handles("session"));
         assert_eq!(rt.len(), 3);
+    }
+
+    #[test]
+    fn route_table_all_native_and_escape_hatch() {
+        // `all` (and the unset default via `all()`) serves every group natively (Rust-only).
+        let all = RouteTable::all();
+        assert!(all.is_all());
+        assert!(all.handles("session") && all.handles("pty") && all.handles("anything"));
+        assert!(!all.is_empty());
+        assert!(RouteTable::parse("all").is_all());
+        assert!(RouteTable::parse("ALL").is_all());
+        // `none` / empty → proxy everything (the pre-cutover escape hatch).
+        assert!(RouteTable::parse("none").is_empty());
+        assert!(RouteTable::parse("").is_empty());
+        assert!(!RouteTable::parse("none").handles("session"));
+        // A subset stays hybrid (listed native, rest proxied).
+        let hybrid = RouteTable::parse("pty,mcp");
+        assert!(!hybrid.is_all() && !hybrid.is_empty());
+        assert!(hybrid.handles("pty") && !hybrid.handles("session"));
     }
 
     #[test]

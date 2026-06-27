@@ -1,5 +1,7 @@
-//! `opencode` binary (Rust). Boots the axum server that fronts the strangler-fig reverse proxy:
-//! native routes (per `OPENCODE_RUST_ROUTES`) are served by Rust, the rest proxied to the TS server.
+//! `opencode` binary (Rust). Boots the axum server. With the Rust backend now serving 100% of the
+//! contract, the default is **Rust-only** (all routes native, no TS upstream needed). `OPENCODE_RUST_ROUTES`
+//! can downgrade to a native subset (`health,fs,…`) or `none` to proxy everything — the strangler
+//! escape hatch retained until the TS packages are deleted.
 //!
 //! [`build_app_context`] is the composition root (the Rust analog of Effect's `Layer.provide`): it
 //! opens the single shared SQLite pool, verifies the migration journal, and wires the services into
@@ -204,11 +206,21 @@ async fn main() -> anyhow::Result<()> {
         runner: RunnerServices::from_env(root)?,
         coordinator: SessionCoordinator::default(),
     };
+    let mode = if state.routes.is_all() {
+        "rust-only (all native)".to_string()
+    } else if state.routes.is_empty() {
+        "proxy-all".to_string()
+    } else {
+        format!(
+            "hybrid ({} native group(s), rest proxied)",
+            state.routes.len()
+        )
+    };
     tracing::info!(
         bind = %cli.bind,
         upstream = %cli.upstream,
         db = %db_path.display(),
-        native_routes = state.routes.len(),
+        mode = %mode,
         "starting opencode (rust)"
     );
 
