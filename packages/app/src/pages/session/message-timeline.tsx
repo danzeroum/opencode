@@ -49,8 +49,8 @@ import type {
   UserMessage,
 } from "@opencode-ai/sdk/v2"
 import { showToast } from "@/utils/toast"
-import { Binary } from "@opencode-ai/core/util/binary"
-import { getDirectory, getFilename } from "@opencode-ai/core/util/path"
+import { Binary } from "@opencode-ai/util/binary"
+import { getDirectory, getFilename } from "@opencode-ai/util/path"
 import { Popover as KobaltePopover } from "@kobalte/core/popover"
 import { normalize } from "@opencode-ai/ui/session-diff"
 import { useFileComponent } from "@opencode-ai/ui/context/file"
