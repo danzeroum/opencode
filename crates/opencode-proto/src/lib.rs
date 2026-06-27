@@ -1997,6 +1997,36 @@ pub struct ConfigProvidersResponse {
     pub defaults: BTreeMap<String, String>,
 }
 
+/// One level of the config precedence cascade (`config.sources` item): its `code`/`label`, a short
+/// `source` description (where it comes from), whether it's read-only, and the raw JSON it contributes
+/// (`{}` when it defines nothing). Levels are returned base→top (lowest→highest precedence); a higher
+/// level overrides a lower one field-by-field. Mirrors the design's 7-level cascade (REMOTE → GLOBAL →
+/// CUSTOM → PROJECT → .OPENCODE → INLINE → MANAGED).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ConfigSourceLevel {
+    /// Level code (e.g. `GLOBAL`, `PROJECT`, `MANAGED`).
+    pub code: String,
+    /// Human label (e.g. `Global`, `Project`, `Managed`).
+    pub label: String,
+    /// Short description of where the level reads from (e.g. `~/.config/opencode`, `opencode.json`).
+    pub source: String,
+    /// Whether this level is read-only (a client must not offer to edit it).
+    #[serde(rename = "readOnly")]
+    pub read_only: bool,
+    /// The raw JSON this level contributes (`{}` if it defines nothing).
+    #[schema(value_type = Object)]
+    pub config: serde_json::Value,
+}
+
+/// 200 body of `config.sources` (GET /config/sources): the seven precedence levels (base→top), each
+/// with the raw JSON it contributes, so a client can render per-field provenance (which level a value
+/// came from) and the precedence cascade. The merged effective config is `config.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ConfigSourcesResponse {
+    /// The precedence levels, base→top.
+    pub levels: Vec<ConfigSourceLevel>,
+}
+
 // ---------------------------------------------------------------------------
 // V2 session prompt contract (`v2.session.prompt` — POST /api/session/{sessionID}/prompt).
 // `Prompt` and the `SessionInput.Admitted` projection mirror `packages/core/src/session/input.ts`

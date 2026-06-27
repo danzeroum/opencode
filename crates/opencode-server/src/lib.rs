@@ -5906,6 +5906,7 @@ async fn v2_provider_get(
         pty_connect_token,
         pty_connect,
         config_get,
+        config_sources,
         config_update,
         config_providers,
         global_config_get,
@@ -8254,18 +8255,86 @@ fn global_config_value() -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// Resolve the effective config: global `opencode.json` overlaid by the project `opencode.json` (cwd).
-/// A first, faithful-for-the-common-case loader — the remaining levels (remote/custom/`.opencode`/
-/// inline/managed), `.jsonc`, and per-field provenance are follow-ups (PENDENCIAS #1).
-fn resolved_config_value() -> serde_json::Value {
-    let mut merged = global_config_value();
-    if let Some(project) = std::env::current_dir()
+/// Read+parse an `opencode.json` at `path`, degrading a missing/unparseable file to `{}`.
+fn config_value_at(path: &std::path::Path) -> serde_json::Value {
+    read_config_json(path).unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Build one [`ConfigSourceLevel`] from its metadata + raw value.
+fn config_level(
+    code: &str,
+    label: &str,
+    source: &str,
+    read_only: bool,
+    config: serde_json::Value,
+) -> opencode_proto::ConfigSourceLevel {
+    opencode_proto::ConfigSourceLevel {
+        code: code.to_string(),
+        label: label.to_string(),
+        source: source.to_string(),
+        read_only,
+        config,
+    }
+}
+
+/// The seven config precedence levels (base→top), each with its metadata and the raw JSON it
+/// contributes (`{}` if absent/unreadable). The effective config is these deep-merged in order
+/// ([`resolved_config_value`]). Levels and ordering mirror the design's cascade:
+/// REMOTE → GLOBAL → CUSTOM → PROJECT → .OPENCODE → INLINE → MANAGED. REMOTE (`.well-known/opencode`)
+/// is a remote fetch not performed by the local server, so it's currently always empty; `.jsonc`
+/// parsing is a follow-up (only `opencode.json` is read).
+fn config_levels() -> Vec<opencode_proto::ConfigSourceLevel> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let global = config_dir()
+        .map(|d| config_value_at(&d.join("opencode.json")))
+        .unwrap_or_else(|| serde_json::json!({}));
+    let custom = std::env::var("OPENCODE_CONFIG")
         .ok()
-        .and_then(|d| read_config_json(&d.join("opencode.json")))
-    {
-        deep_merge(&mut merged, project);
+        .filter(|p| !p.is_empty())
+        .map(|p| config_value_at(std::path::Path::new(&p)))
+        .unwrap_or_else(|| serde_json::json!({}));
+    let project = config_value_at(&cwd.join("opencode.json"));
+    let dot = config_value_at(&cwd.join(".opencode").join("opencode.json"));
+    let inline = std::env::var("OPENCODE_CONFIG_CONTENT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let managed = config_value_at(std::path::Path::new("/etc/opencode/opencode.json"));
+    vec![
+        config_level(
+            "REMOTE",
+            "Remote",
+            ".well-known/opencode",
+            true,
+            serde_json::json!({}),
+        ),
+        config_level("GLOBAL", "Global", "~/.config/opencode", false, global),
+        config_level("CUSTOM", "Custom path", "OPENCODE_CONFIG", false, custom),
+        config_level("PROJECT", "Project", "opencode.json", false, project),
+        config_level("OPENCODE", ".opencode/", ".opencode", false, dot),
+        config_level("INLINE", "Inline", "OPENCODE_CONFIG_CONTENT", true, inline),
+        config_level("MANAGED", "Managed", "/etc/opencode", true, managed),
+    ]
+}
+
+/// Deep-merge precedence `levels` base→top into a single config value (each level overrides the
+/// previous field-by-field). The pure merge step of [`resolved_config_value`], split out so the
+/// precedence ordering is testable without touching global state (env / cwd / HOME).
+fn merge_config_levels(levels: Vec<opencode_proto::ConfigSourceLevel>) -> serde_json::Value {
+    let mut merged = serde_json::json!({});
+    for level in levels {
+        deep_merge(&mut merged, level.config);
     }
     merged
+}
+
+/// Resolve the effective config: the seven precedence levels ([`config_levels`]) deep-merged base→top
+/// (each level overrides the previous field-by-field). `.jsonc` and the remote (`.well-known`) level are
+/// follow-ups; the file levels (global / custom / project / `.opencode` / managed) and the inline env
+/// (`OPENCODE_CONFIG_CONTENT`) are read.
+fn resolved_config_value() -> serde_json::Value {
+    merge_config_levels(config_levels())
 }
 
 /// `GET /config` — the resolved opencode configuration (group `config`). Matches the golden `config.get`:
@@ -8284,6 +8353,29 @@ fn resolved_config_value() -> serde_json::Value {
 )]
 async fn config_get(State(_state): State<ServerState>) -> Json<opencode_proto::Config> {
     Json(serde_json::from_value(resolved_config_value()).unwrap_or_default())
+}
+
+/// `GET /config/sources` — the config precedence cascade (group `config`). Returns the seven levels
+/// (base→top: REMOTE → GLOBAL → CUSTOM → PROJECT → .OPENCODE → INLINE → MANAGED), each with the raw
+/// JSON it contributes, so a client can show per-field provenance and the cascade. The merged effective
+/// config is `config.get`. REMOTE is a remote fetch not done locally (always empty); `.jsonc` is a
+/// follow-up. New native op (no TS equivalent); see the golden contract for the response shape.
+#[utoipa::path(
+    get,
+    path = "/config/sources",
+    operation_id = "config.sources",
+    responses(
+        (status = 200, description = "Config precedence levels", body = opencode_proto::ConfigSourcesResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError)
+    ),
+    tag = "config"
+)]
+async fn config_sources(
+    State(_state): State<ServerState>,
+) -> Json<opencode_proto::ConfigSourcesResponse> {
+    Json(opencode_proto::ConfigSourcesResponse {
+        levels: config_levels(),
+    })
 }
 
 /// `GET /global/config` — the global configuration (group `global`). Matches the golden
@@ -8703,6 +8795,7 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("config") {
         router = router.route("/config", get(config_get).patch(config_update));
+        router = router.route("/config/sources", get(config_sources));
         router = router.route("/config/providers", get(config_providers));
     }
     if state.routes.handles("instance") {
@@ -11902,6 +11995,83 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 204);
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn merge_config_levels_respects_precedence() {
+        // Synthetic levels base->top: a later level overrides an earlier scalar and deep-merges objects.
+        let levels = vec![
+            config_level(
+                "GLOBAL",
+                "Global",
+                "g",
+                false,
+                serde_json::json!({"theme": "dark", "model": "a", "server": {"port": 1, "host": "g"}}),
+            ),
+            config_level(
+                "PROJECT",
+                "Project",
+                "p",
+                false,
+                serde_json::json!({"model": "b", "server": {"port": 2}}),
+            ),
+            config_level(
+                "MANAGED",
+                "Managed",
+                "m",
+                true,
+                serde_json::json!({"model": "c"}),
+            ),
+        ];
+        let merged = merge_config_levels(levels);
+        assert_eq!(merged["theme"], "dark"); // only GLOBAL set it
+        assert_eq!(merged["model"], "c"); // MANAGED (top) wins
+        assert_eq!(merged["server"]["port"], 2); // PROJECT overrode GLOBAL
+        assert_eq!(merged["server"]["host"], "g"); // deep-merge kept GLOBAL's untouched key
+    }
+
+    #[tokio::test]
+    async fn config_sources_returns_seven_levels() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::new(AppServices::default()),
+            routes: RouteTable::parse("config"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .uri("/config/sources")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let levels = v["levels"].as_array().unwrap();
+        // Seven levels, base->top, with the design's codes and read-only flags.
+        let codes: Vec<&str> = levels.iter().map(|l| l["code"].as_str().unwrap()).collect();
+        assert_eq!(
+            codes,
+            ["REMOTE", "GLOBAL", "CUSTOM", "PROJECT", "OPENCODE", "INLINE", "MANAGED"]
+        );
+        let read_only: Vec<bool> = levels
+            .iter()
+            .map(|l| l["readOnly"].as_bool().unwrap())
+            .collect();
+        assert_eq!(read_only, [true, false, false, false, false, true, true]);
+        // Every level carries a config object; REMOTE is always empty (no local remote fetch).
+        for l in levels {
+            assert!(l["config"].is_object());
+            assert!(l["source"].is_string());
+        }
+        assert_eq!(levels[0]["config"], serde_json::json!({}));
     }
 
     #[tokio::test]

@@ -6,6 +6,66 @@
     "description": "opencode api"
   },
   "paths": {
+    "/config/sources": {
+      "get": {
+        "tags": ["opencode HttpApi"],
+        "operationId": "config.sources",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "levels": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "readOnly": {
+                            "type": "boolean"
+                          },
+                          "config": {
+                            "type": "object"
+                          }
+                        },
+                        "required": ["code", "label", "source", "readOnly", "config"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["levels"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "BadRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Config precedence levels (base->top), each with the raw JSON it contributes, for per-field provenance.",
+        "summary": "Config sources"
+      }
+    },
     "/api/agent/{agentID}": {
       "put": {
         "tags": ["opencode HttpApi"],
