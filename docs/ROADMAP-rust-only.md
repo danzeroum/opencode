@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **151/168 (90%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, MCP toggle + **grupo `pty` 100% nativo (terminais reais via `portable-pty` + streaming WebSocket)** + **erros fiéis para os subsistemas que dependem de infra hospedada da opencode** (share/sync/workspace). Plano ordenado por facilidade/sem-retrabalho em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **155/168 (92%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, grupo `pty` 100% nativo (terminais reais + streaming WebSocket), **grupo `mcp` completo (auth.* fiel-404, sem server configurado)** + erros fiéis para os subsistemas que dependem de infra hospedada da opencode (share/sync/workspace). Restam só `provider.oauth.*`, `v2.integration.*`, `global.upgrade`. Plano em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -36,7 +36,7 @@
 - ⏳ T5.3b fluxos OAuth/credencial **reais** (store DB `credential` + máquina de estado): `provider.oauth.authorize/callback`, `v2.credential.update`, `v2.integration.{get,connect.key,connect.oauth,attempt.status,attempt.complete}`
 
 **Tier 6 — Subsistemas novos:**
-- ⏳ T6.1 MCP runtime (`rmcp`): `mcp.connect`/`mcp.disconnect` ✅ wired-404 (sem server configurado) — **#160**; falta `mcp.add` (persistir config) + `mcp.auth.*` (OAuth) + a conexão real `rmcp`
+- ✅ T6.1 MCP runtime (`rmcp`) **— superfície de contrato completa (fiel-404)**: `mcp.connect`/`disconnect` — **#160**; e agora `mcp.auth.{start,callback,authenticate,remove}` → 404 `McpServerNotFoundError` (nenhum server MCP configurado nativamente, coerente com connect/disconnect). Modelados `McpAuthStart`/`McpAuthRemoved`/`McpUnsupportedOAuthError`/`McpAuthOAuthError`. Falta a conexão `rmcp` real + `mcp.add` (não estão no contrato OpenAPI atual). — **(este PR)**
 - ✅ T6.2 PTY (`portable-pty`) **— grupo completo**: `pty.shells` (enumera `/etc/shells`+`$SHELL`) + `pty.list`/`get`/`remove`/`update` ✅ **#162**; e agora `pty.create` (spawn real: `openpty`+`CommandBuilder`+thread leitora drenando scrollback de 2 MiB), `pty.connect` (upgrade WebSocket — replay por cursor + frame meta `0x00`+JSON + I/O ao vivo bidirecional), `pty.connectToken` (ticket single-use 60 s gated por header `x-opencode-ticket` + Origin) — `PtyManager` global em `crates/opencode-server/src/pty.rs` — **(este PR)**
 - ⏳ T6.3 LSP runtime (`lsp.status` real)
 

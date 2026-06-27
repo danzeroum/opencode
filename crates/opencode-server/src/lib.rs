@@ -5446,6 +5446,10 @@ async fn v2_provider_get(
         mcp_status,
         mcp_connect,
         mcp_disconnect,
+        mcp_auth_start,
+        mcp_auth_callback,
+        mcp_auth_authenticate,
+        mcp_auth_remove,
         lsp_status,
         vcs_get,
         project_list,
@@ -7948,6 +7952,58 @@ async fn mcp_disconnect(
     Err(McpNotFound(name))
 }
 
+// MCP OAuth (`mcp.auth.*`). The `rmcp` runtime isn't ported, so no MCP server is configured natively
+// (see `mcp.connect`/`disconnect`) — every auth op faithfully 404s `McpServerNotFoundError`. The
+// success/400 response shapes are declared for contract parity.
+
+/// `POST /mcp/{name}/auth` — start an MCP server's OAuth flow (group `mcp`). 404 (no such server).
+#[utoipa::path(post, path = "/mcp/{name}/auth", operation_id = "mcp.auth.start",
+    params(("name" = String, Path, description = "MCP server name")),
+    responses((status = 200, description = "OAuth flow started", body = opencode_proto::McpAuthStart),
+        (status = 400, description = "Bad request", body = opencode_proto::McpAuthOAuthError),
+        (status = 404, description = "Not found", body = opencode_proto::McpServerNotFoundError)), tag = "mcp")]
+async fn mcp_auth_start(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::McpAuthStart>, McpNotFound> {
+    Err(McpNotFound(name))
+}
+
+/// `POST /mcp/{name}/auth/callback` — finish an MCP OAuth flow (group `mcp`). 404 (no such server).
+#[utoipa::path(post, path = "/mcp/{name}/auth/callback", operation_id = "mcp.auth.callback",
+    params(("name" = String, Path, description = "MCP server name")),
+    responses((status = 200, description = "Authenticated", body = opencode_proto::McpStatus),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError),
+        (status = 404, description = "Not found", body = opencode_proto::McpServerNotFoundError)), tag = "mcp")]
+async fn mcp_auth_callback(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::McpStatus>, McpNotFound> {
+    Err(McpNotFound(name))
+}
+
+/// `POST /mcp/{name}/auth/authenticate` — authenticate with stored MCP creds (group `mcp`). 404.
+#[utoipa::path(post, path = "/mcp/{name}/auth/authenticate", operation_id = "mcp.auth.authenticate",
+    params(("name" = String, Path, description = "MCP server name")),
+    responses((status = 200, description = "Authenticated", body = opencode_proto::McpStatus),
+        (status = 400, description = "Bad request", body = opencode_proto::McpAuthOAuthError),
+        (status = 404, description = "Not found", body = opencode_proto::McpServerNotFoundError)), tag = "mcp")]
+async fn mcp_auth_authenticate(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::McpStatus>, McpNotFound> {
+    Err(McpNotFound(name))
+}
+
+/// `DELETE /mcp/{name}/auth` — remove an MCP server's stored OAuth creds (group `mcp`). 404.
+#[utoipa::path(delete, path = "/mcp/{name}/auth", operation_id = "mcp.auth.remove",
+    params(("name" = String, Path, description = "MCP server name")),
+    responses((status = 200, description = "OAuth credentials removed", body = opencode_proto::McpAuthRemoved),
+        (status = 400, description = "Bad request", body = opencode_proto::BadRequestError),
+        (status = 404, description = "Not found", body = opencode_proto::McpServerNotFoundError)), tag = "mcp")]
+async fn mcp_auth_remove(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<opencode_proto::McpAuthRemoved>, McpNotFound> {
+    Err(McpNotFound(name))
+}
+
 /// `GET /lsp` — status of all running language servers (group `lsp`). Matches the golden `lsp.status`:
 /// 200 `[LSPStatus]`, 400 `BadRequestError`. The running-server set is live runtime state owned by the
 /// LSP host; until that host exists in Rust no server is running, so this returns an empty list —
@@ -8101,6 +8157,12 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/mcp", get(mcp_status));
         router = router.route("/mcp/{name}/connect", post(mcp_connect));
         router = router.route("/mcp/{name}/disconnect", post(mcp_disconnect));
+        router = router.route(
+            "/mcp/{name}/auth",
+            post(mcp_auth_start).delete(mcp_auth_remove),
+        );
+        router = router.route("/mcp/{name}/auth/callback", post(mcp_auth_callback));
+        router = router.route("/mcp/{name}/auth/authenticate", post(mcp_auth_authenticate));
     }
     if state.routes.handles("lsp") {
         router = router.route("/lsp", get(lsp_status));
@@ -9870,6 +9932,43 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // No MCP host yet → an empty JSON object map (not an array).
         assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn mcp_auth_ops_404_until_host_lands() {
+        use tower::ServiceExt;
+        let mk = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("mcp"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        for (method, uri) in [
+            ("POST", "/mcp/srv/auth"),
+            ("DELETE", "/mcp/srv/auth"),
+            ("POST", "/mcp/srv/auth/callback"),
+            ("POST", "/mcp/srv/auth/authenticate"),
+        ] {
+            let resp = build_router(mk())
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 404, "{method} {uri}");
+            let v: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(v["_tag"], "McpServerNotFoundError", "{method} {uri}");
+        }
     }
 
     #[test]
