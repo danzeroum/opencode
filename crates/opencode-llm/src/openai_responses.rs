@@ -469,13 +469,13 @@ mod tests {
 
     // Real recorded cassettes from `packages/llm/test/fixtures/recordings/openai-responses/`.
     const STREAMS_TEXT: &str = include_str!(
-        "../../../packages/llm/test/fixtures/recordings/openai-responses/gpt-5-5-streams-text.json"
+        "../fixtures/recordings/openai-responses/gpt-5-5-streams-text.json"
     );
     const STREAMS_TOOL_CALL: &str = include_str!(
-        "../../../packages/llm/test/fixtures/recordings/openai-responses/gpt-5-5-streams-tool-call.json"
+        "../fixtures/recordings/openai-responses/gpt-5-5-streams-tool-call.json"
     );
     const DRIVES_TOOL_LOOP: &str = include_str!(
-        "../../../packages/llm/test/fixtures/recordings/openai-responses/gpt-5-5-drives-a-tool-loop.json"
+        "../fixtures/recordings/openai-responses/gpt-5-5-drives-a-tool-loop.json"
     );
 
     fn response_body(cassette: &str, interaction: usize) -> String {
