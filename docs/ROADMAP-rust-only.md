@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. **Cobertura: 168/168 (100%) — todas as ops do contrato emitidas nativamente; `openapi-diff` verde com gate ESTRITO** (agora flagra qualquer método do golden ausente num path enforced — o blind spot foi fechado). **Próximo: o cutover (Tier 8)** — remover o fallback do proxy + deletar `packages/{server,core,llm}` + reapontar o publish. ⚠️ **Passo irreversível/outward-facing: confirmo com o dono antes.**
+> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)**. **Cobertura: 168/168 (100%) nativo, gate ESTRITO verde.** **Cutover Tier 8 — parte reversível FEITA:** o default agora é **Rust-only** (`OPENCODE_RUST_ROUTES` unset ⇒ todos os grupos nativos; sem upstream TS). O binário roda 100% em Rust por padrão; `=none` volta a proxiar (escape hatch) e um subset fica híbrido. **Falta a parte IRREVERSÍVEL** (deletar `packages/{server,core,llm}` ~414 arquivos + reapontar npm/publish p/ o binário cargo-dist + desligar CI do TS) — ⚠️ **aguarda confirmação explícita do dono** (a ferramenta de pergunta falhou 2×; descrevi as opções em texto no chat).
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
