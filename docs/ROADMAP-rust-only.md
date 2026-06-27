@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **161/168 (96%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, grupos `pty`/`mcp` 100% nativos, `provider.oauth.*` + `v2.integration.*` fiel-400 + erros fiéis para os subsistemas que dependem de infra hospedada da opencode (share/sync/workspace/integrations). **Resta só `global.upgrade` (1)**, depois o cutover (remover proxy + deletar TS — confirmo antes). Plano em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **162/168 ops emitidas (96%)**, `openapi-diff` verde. ⚠️ **Achado:** o gate `openapi-diff` NÃO flagra ops do golden ausentes do spec Rust quando o PATH já é enforced (só checa métodos que o Rust emite) — então 6 ops "create/read" em paths já enforced estavam **silenciosamente faltando**: `v2.integration.attempt.status` (GET), `v2.credential.update` (PATCH), `experimental.{projectCopy,workspace,worktree}.create` (POST), `mcp.add` (POST). **Próximo PR:** fechar o blind spot do gate + implementar esses 6 → 100% real. Depois o cutover (remover proxy + deletar TS — confirmo antes).
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução

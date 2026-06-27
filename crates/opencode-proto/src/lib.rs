@@ -1808,6 +1808,36 @@ pub struct IntegrationOauthResponse {
     pub data: IntegrationAttempt,
 }
 
+// --- global.upgrade --------------------------------------------------------
+
+/// The succeeded arm of `global.upgrade` (`{ success: true, version }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GlobalUpgradeSuccess {
+    /// Always `true`.
+    pub success: bool,
+    /// The version upgraded to.
+    pub version: String,
+}
+
+/// The failed arm of `global.upgrade` (`{ success: false, error }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GlobalUpgradeFailure {
+    /// Always `false`.
+    pub success: bool,
+    /// Failure detail.
+    pub error: String,
+}
+
+/// 200 body of `global.upgrade` (`anyOf[{success:true,version}, {success:false,error}]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GlobalUpgradeResult {
+    /// Upgrade succeeded.
+    Succeeded(GlobalUpgradeSuccess),
+    /// Upgrade failed / not performed.
+    Failed(GlobalUpgradeFailure),
+}
+
 /// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct EffectHttpApiInternalServerError {

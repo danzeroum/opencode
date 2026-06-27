@@ -5553,6 +5553,7 @@ async fn v2_provider_get(
         global_config_get,
         global_config_update,
         global_dispose,
+        global_upgrade,
         global_event,
         instance_dispose,
         file_list,
@@ -8167,6 +8168,30 @@ async fn global_dispose() -> Json<bool> {
     Json(true)
 }
 
+/// `POST /global/upgrade` — self-update the binary (group `global`). A Rust opencode is distributed via
+/// the package manager / cargo-dist installer and doesn't self-replace, so this faithfully returns the
+/// failure arm (`{ success: false, error }`) — a genuine 200 result, not a fake success. (`success:true`
+/// + 400 are declared for contract parity.)
+#[utoipa::path(
+    post,
+    path = "/global/upgrade",
+    operation_id = "global.upgrade",
+    responses(
+        (status = 200, description = "Upgrade result", body = opencode_proto::GlobalUpgradeResult),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)
+    ),
+    tag = "global"
+)]
+async fn global_upgrade() -> Json<opencode_proto::GlobalUpgradeResult> {
+    Json(opencode_proto::GlobalUpgradeResult::Failed(
+        opencode_proto::GlobalUpgradeFailure {
+            success: false,
+            error: "Self-upgrade is not supported in this build; update via your package manager"
+                .to_string(),
+        },
+    ))
+}
+
 /// `POST /instance/dispose` — dispose the instance (group `instance`). Matches the golden
 /// `instance.dispose`: 200 `boolean`, 400 `BadRequestError`. As with `global.dispose`, the Rust server
 /// has no per-call instance to dispose, so it acknowledges with `true`.
@@ -8200,6 +8225,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("global") {
         router = router.route("/global/health", get(global_health));
         router = router.route("/global/dispose", post(global_dispose));
+        router = router.route("/global/upgrade", post(global_upgrade));
         router = router.route("/global/event", get(global_event));
         router = router.route(
             "/global/config",
@@ -10187,6 +10213,38 @@ mod tests {
             .unwrap();
             assert_eq!(v["_tag"], "InvalidRequestError", "{method} {uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn global_upgrade_reports_unsupported() {
+        use tower::ServiceExt;
+        let state = ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("global"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let resp = build_router(state)
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/global/upgrade")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        // A genuine result (the failure arm), not a fake success.
+        assert_eq!(v["success"], false);
+        assert!(v["error"].as_str().unwrap().contains("package manager"));
     }
 
     #[test]
