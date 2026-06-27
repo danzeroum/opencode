@@ -5336,6 +5336,137 @@ async fn v2_integration_attempt_complete(
     integrations_unavailable()
 }
 
+/// `GET /api/integration/attempt/{attemptID}` — poll an in-flight connect attempt (group
+/// `integration`). Integrations unported → 400. 200 `IntegrationAttemptStatusResponse` + 401 declared
+/// for parity.
+#[utoipa::path(get, path = "/api/integration/attempt/{attemptID}", operation_id = "v2.integration.attempt.status",
+    params(("attemptID" = String, Path, description = "Attempt id")),
+    responses((status = 200, description = "Attempt status", body = opencode_proto::IntegrationAttemptStatusResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)), tag = "integration")]
+async fn v2_integration_attempt_status(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    integrations_unavailable()
+}
+
+// The remaining create/add ops back onto subsystems that aren't ported (control-plane workspaces,
+// worktrees, project copies, the MCP runtime) — each returns a faithful in-contract error (never a
+// fake-created object). Success shapes are declared for parity.
+
+/// `PATCH /api/credential/{credentialID}` — relabel a stored credential (group `credential`). The
+/// native auth store (`auth.json`) keys credentials by provider id and has no label field, so this
+/// faithfully 400s. 204 + 401 declared for parity.
+#[utoipa::path(patch, path = "/api/credential/{credentialID}", operation_id = "v2.credential.update",
+    params(("credentialID" = String, Path, description = "Credential id")),
+    responses((status = 204, description = "Updated"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)), tag = "credential")]
+async fn v2_credential_update(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::InvalidRequestError {
+            tag: "InvalidRequestError".to_string(),
+            message: "Credential labels are not supported in this build".to_string(),
+            kind: None,
+            field: None,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /experimental/project/{projectID}/copy` — create a project copy (group `experimental`). The
+/// project-copy subsystem isn't ported (remove/refresh are stubs) → faithful 400. 200 `ProjectCopyCopy`
+/// declared for parity.
+#[utoipa::path(post, path = "/experimental/project/{projectID}/copy", operation_id = "v2.projectCopy.create",
+    params(("projectID" = String, Path, description = "Project id")),
+    responses((status = 200, description = "Project copy", body = opencode_proto::ProjectCopyCopy),
+        (status = 400, description = "Bad request", body = opencode_proto::ProjectCopyRequestError)), tag = "experimental")]
+async fn v2_project_copy_create(
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::ProjectCopyRequestError::Invalid(
+            opencode_proto::InvalidRequestError {
+                tag: "InvalidRequestError".to_string(),
+                message: "Project copies are not available in this build".to_string(),
+                kind: None,
+                field: None,
+            },
+        )),
+    )
+        .into_response()
+}
+
+/// `POST /experimental/workspace` — create a control-plane workspace (group `experimental`). The
+/// workspace subsystem is unported (list empty, remove 400s) → faithful 400. 200 `Workspace` declared
+/// for parity.
+#[utoipa::path(post, path = "/experimental/workspace", operation_id = "experimental.workspace.create",
+    responses((status = 200, description = "Workspace", body = opencode_proto::Workspace),
+        (status = 400, description = "Bad request", body = opencode_proto::WorkspaceCreateRequestError)), tag = "experimental")]
+async fn experimental_workspace_create() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::WorkspaceCreateRequestError::Invalid(
+            opencode_proto::InvalidRequestError {
+                tag: "InvalidRequestError".to_string(),
+                message: "Workspaces are not available in this build".to_string(),
+                kind: None,
+                field: None,
+            },
+        )),
+    )
+        .into_response()
+}
+
+/// `POST /experimental/worktree` — create a git worktree (group `experimental`). The worktree subsystem
+/// is unported (list empty, reset/remove are no-ops) → faithful 400. 200 `Worktree` declared for parity.
+#[utoipa::path(post, path = "/experimental/worktree", operation_id = "worktree.create",
+    responses((status = 200, description = "Worktree", body = opencode_proto::Worktree),
+        (status = 400, description = "Bad request", body = opencode_proto::NamedMessageRequestError)), tag = "experimental")]
+async fn experimental_worktree_create() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::NamedMessageRequestError::Invalid(
+            opencode_proto::InvalidRequestError {
+                tag: "InvalidRequestError".to_string(),
+                message: "Worktrees are not available in this build".to_string(),
+                kind: None,
+                field: None,
+            },
+        )),
+    )
+        .into_response()
+}
+
+/// `POST /mcp` — add an MCP server (group `mcp`). The `rmcp` runtime isn't ported → faithful 400. 200
+/// (a `{ [server]: MCPStatus }` map) declared for parity.
+#[utoipa::path(post, path = "/mcp", operation_id = "mcp.add",
+    responses((status = 200, description = "MCP server added successfully", body = std::collections::HashMap<String, opencode_proto::McpStatus>),
+        (status = 400, description = "Bad request", body = opencode_proto::RequestError)), tag = "mcp")]
+async fn mcp_add() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::RequestError::Invalid(
+            opencode_proto::InvalidRequestError {
+                tag: "InvalidRequestError".to_string(),
+                message: "The MCP runtime is not available in this build".to_string(),
+                kind: None,
+                field: None,
+            },
+        )),
+    )
+        .into_response()
+}
+
 /// `GET /api/location` — resolve the request location (group `location`). Matches the golden
 /// `v2.location.get`: 200 `LocationInfo` + 400/401. Returns [`resolve_location`]'s result directly
 /// (no `{ location, data }` wrapper, unlike the list/get catalog routes).
@@ -5516,6 +5647,7 @@ async fn v2_provider_get(
         tui_control_next,
         worktree_list,
         worktree_remove,
+        experimental_worktree_create,
         worktree_reset,
         experimental_resource_list,
         experimental_session_background,
@@ -5524,6 +5656,7 @@ async fn v2_provider_get(
         experimental_workspace_sync_list,
         experimental_workspace_warp,
         v2_project_copy_remove,
+        v2_project_copy_create,
         v2_project_copy_refresh,
         sync_start,
         experimental_console_get,
@@ -5535,6 +5668,7 @@ async fn v2_provider_get(
         sync_replay,
         sync_steal,
         experimental_workspace_remove,
+        experimental_workspace_create,
         session_share,
         session_unshare,
         experimental_project_copy_generate_name,
@@ -5564,6 +5698,7 @@ async fn v2_provider_get(
         mcp_status,
         mcp_connect,
         mcp_disconnect,
+        mcp_add,
         mcp_auth_start,
         mcp_auth_callback,
         mcp_auth_authenticate,
@@ -5592,6 +5727,7 @@ async fn v2_provider_get(
         v2_permission_saved_list,
         v2_permission_saved_remove,
         v2_credential_remove,
+        v2_credential_update,
         v2_integration_attempt_cancel,
         v2_session_permission_list,
         permission_respond,
@@ -5612,6 +5748,7 @@ async fn v2_provider_get(
         v2_integration_connect_key,
         v2_integration_connect_oauth,
         v2_integration_attempt_complete,
+        v2_integration_attempt_status,
         v2_location_get,
         v2_provider_get
     ),
@@ -8278,7 +8415,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("credential") {
         router = router.route(
             "/api/credential/{credentialID}",
-            axum::routing::delete(v2_credential_remove),
+            axum::routing::delete(v2_credential_remove).patch(v2_credential_update),
         );
     }
     if state.routes.handles("tui") {
@@ -8303,7 +8440,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/question/request", get(v2_question_request_list));
     }
     if state.routes.handles("mcp") {
-        router = router.route("/mcp", get(mcp_status));
+        router = router.route("/mcp", get(mcp_status).post(mcp_add));
         router = router.route("/mcp/{name}/connect", post(mcp_connect));
         router = router.route("/mcp/{name}/disconnect", post(mcp_disconnect));
         router = router.route(
@@ -8432,7 +8569,9 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/experimental/tool/ids", get(tool_ids));
         router = router.route(
             "/experimental/worktree",
-            get(worktree_list).delete(worktree_remove),
+            get(worktree_list)
+                .delete(worktree_remove)
+                .post(experimental_worktree_create),
         );
         router = router.route("/experimental/worktree/reset", post(worktree_reset));
         router = router.route("/experimental/resource", get(experimental_resource_list));
@@ -8461,7 +8600,10 @@ pub fn build_router(state: ServerState) -> Router {
             "/experimental/console/orgs",
             get(experimental_console_list_orgs),
         );
-        router = router.route("/experimental/workspace", get(experimental_workspace_list));
+        router = router.route(
+            "/experimental/workspace",
+            get(experimental_workspace_list).post(experimental_workspace_create),
+        );
         router = router.route(
             "/experimental/workspace/status",
             get(experimental_workspace_status),
@@ -8477,7 +8619,7 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/experimental/session", get(experimental_session_list));
         router = router.route(
             "/experimental/project/{projectID}/copy",
-            axum::routing::delete(v2_project_copy_remove),
+            axum::routing::delete(v2_project_copy_remove).post(v2_project_copy_create),
         );
         router = router.route(
             "/experimental/project/{projectID}/copy/refresh",
@@ -8522,7 +8664,7 @@ pub fn build_router(state: ServerState) -> Router {
         );
         router = router.route(
             "/api/integration/attempt/{attemptID}",
-            axum::routing::delete(v2_integration_attempt_cancel),
+            axum::routing::delete(v2_integration_attempt_cancel).get(v2_integration_attempt_status),
         );
         router = router.route(
             "/api/integration/attempt/{attemptID}/complete",
@@ -10245,6 +10387,77 @@ mod tests {
         // A genuine result (the failure arm), not a fake success.
         assert_eq!(v["success"], false);
         assert!(v["error"].as_str().unwrap().contains("package manager"));
+    }
+
+    #[tokio::test]
+    async fn final_create_and_read_ops_are_faithful_400() {
+        use tower::ServiceExt;
+        // (group, method, uri, expected _tag/name discriminator key, expected value)
+        let cases: &[(&str, &str, &str, &str, &str)] = &[
+            (
+                "integration",
+                "GET",
+                "/api/integration/attempt/att_1",
+                "_tag",
+                "InvalidRequestError",
+            ),
+            (
+                "credential",
+                "PATCH",
+                "/api/credential/cred_1",
+                "_tag",
+                "InvalidRequestError",
+            ),
+            (
+                "experimental",
+                "POST",
+                "/experimental/project/prj_1/copy",
+                "_tag",
+                "InvalidRequestError",
+            ),
+            (
+                "experimental",
+                "POST",
+                "/experimental/workspace",
+                "_tag",
+                "InvalidRequestError",
+            ),
+            (
+                "experimental",
+                "POST",
+                "/experimental/worktree",
+                "_tag",
+                "InvalidRequestError",
+            ),
+            ("mcp", "POST", "/mcp", "_tag", "InvalidRequestError"),
+        ];
+        for (group, method, uri, key, val) in cases {
+            let state = ServerState {
+                ctx: AppContext::in_memory(),
+                routes: RouteTable::parse(group),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            };
+            let resp = build_router(state)
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method(*method)
+                        .uri(*uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 400, "{method} {uri}");
+            let v: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(v[*key], *val, "{method} {uri}");
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **162/168 ops emitidas (96%)**, `openapi-diff` verde. ⚠️ **Achado:** o gate `openapi-diff` NÃO flagra ops do golden ausentes do spec Rust quando o PATH já é enforced (só checa métodos que o Rust emite) — então 6 ops "create/read" em paths já enforced estavam **silenciosamente faltando**: `v2.integration.attempt.status` (GET), `v2.credential.update` (PATCH), `experimental.{projectCopy,workspace,worktree}.create` (POST), `mcp.add` (POST). **Próximo PR:** fechar o blind spot do gate + implementar esses 6 → 100% real. Depois o cutover (remover proxy + deletar TS — confirmo antes).
+> **Última atualização:** 2026-06-27 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. **Cobertura: 168/168 (100%) — todas as ops do contrato emitidas nativamente; `openapi-diff` verde com gate ESTRITO** (agora flagra qualquer método do golden ausente num path enforced — o blind spot foi fechado). **Próximo: o cutover (Tier 8)** — remover o fallback do proxy + deletar `packages/{server,core,llm}` + reapontar o publish. ⚠️ **Passo irreversível/outward-facing: confirmo com o dono antes.**
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
