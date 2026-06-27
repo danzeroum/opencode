@@ -24,7 +24,7 @@ use axum::{
 };
 use opencode_core::native_tools::{self, NativeToolBox};
 use opencode_core::provider::{
-    split_model, DefaultRegistry, EngineError, EngineSettings, OpencodeCredentials,
+    split_model, DefaultRegistry, EngineError, EngineSettings, OpencodeCredentials, ProtocolKind,
     ProviderRegistry,
 };
 use opencode_core::runner::SessionOutcome;
@@ -5801,6 +5801,127 @@ async fn v2_provider_get(
     Ok(Json(opencode_proto::ProviderGetResponse { location, data }))
 }
 
+/// Derive a provider's models-list URL from a resolved request `endpoint`: strip the protocol's
+/// completions/messages suffix to recover the base, then append the models path
+/// (`/models` for OpenAI-compatible, `/v1/models` for Anthropic). A best-effort, lightweight GET target
+/// for the connectivity check (`v2.provider.test`).
+fn provider_models_url(protocol: ProtocolKind, endpoint: &str) -> String {
+    match protocol {
+        ProtocolKind::OpenAiCompatible => {
+            let base = endpoint
+                .strip_suffix("/chat/completions")
+                .unwrap_or(endpoint)
+                .trim_end_matches('/');
+            format!("{base}/models")
+        }
+        ProtocolKind::Anthropic => {
+            let base = endpoint
+                .strip_suffix("/v1/messages")
+                .unwrap_or(endpoint)
+                .trim_end_matches('/');
+            format!("{base}/v1/models")
+        }
+    }
+}
+
+/// Probe a provider's models endpoint with the protocol-appropriate auth header, mapping the outcome to
+/// a [`ProviderTestResult`]: a 2xx is `ok` (with a best-effort model count from an OpenAI-style
+/// `{ data: [...] }`); a non-2xx carries the status; a transport/timeout error carries the message.
+async fn probe_provider(
+    client: &reqwest::Client,
+    protocol: ProtocolKind,
+    models_url: &str,
+    api_key: &str,
+) -> opencode_proto::ProviderTestResult {
+    let mut req = client.get(models_url);
+    if !api_key.is_empty() {
+        req = match protocol {
+            ProtocolKind::Anthropic => req
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01"),
+            ProtocolKind::OpenAiCompatible => {
+                req.header("authorization", format!("Bearer {api_key}"))
+            }
+        };
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16() as i64;
+            if resp.status().is_success() {
+                let models = resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+                    v.get("data")
+                        .and_then(|d| d.as_array())
+                        .map(|a| a.len() as i64)
+                });
+                opencode_proto::ProviderTestResult {
+                    ok: true,
+                    status: Some(code),
+                    error: None,
+                    models,
+                }
+            } else {
+                opencode_proto::ProviderTestResult {
+                    ok: false,
+                    status: Some(code),
+                    error: Some(format!("provider returned HTTP {code}")),
+                    models: None,
+                }
+            }
+        }
+        Err(e) => opencode_proto::ProviderTestResult {
+            ok: false,
+            status: None,
+            error: Some(e.to_string()),
+            models: None,
+        },
+    }
+}
+
+/// `POST /api/provider/{providerID}/test` — live connectivity check for a provider (group `provider`).
+/// Resolves the provider's endpoint + API key with the same precedence the runner uses
+/// (`OPENCODE_<ID>_BASE_URL` override → built-in base; stored `auth.json`/env key; keyless for
+/// ollama/localhost), then GETs its models endpoint. Always 200: a misconfiguration or a provider error
+/// is reported as `{ ok: false, error, status? }` (the check ran; its verdict is "failed"), so the UI's
+/// "Test" button can show why without treating it as a request error.
+#[utoipa::path(
+    post,
+    path = "/api/provider/{providerID}/test",
+    operation_id = "v2.provider.test",
+    params(("providerID" = String, Path, description = "Provider id")),
+    responses((status = 200, description = "Connectivity check result", body = opencode_proto::ProviderTestResult)),
+    tag = "provider"
+)]
+async fn v2_provider_test(
+    State(_state): State<ServerState>,
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+) -> Json<opencode_proto::ProviderTestResult> {
+    // Base URL: a per-provider env override, else the built-in default resolved inside `resolve`.
+    let base_url = std::env::var(format!("OPENCODE_{}_BASE_URL", provider_id.to_uppercase()))
+        .ok()
+        .filter(|s| !s.is_empty());
+    // The model id is irrelevant to base/key resolution (only the provider prefix matters); a placeholder
+    // keeps `resolve`'s `provider/model` contract.
+    let probe_model = format!("{provider_id}/_probe");
+    let settings =
+        match EngineSettings::resolve(&probe_model, base_url, &[], &OpencodeCredentials::load()) {
+            Ok(s) => s,
+            Err(e) => {
+                return Json(opencode_proto::ProviderTestResult {
+                    ok: false,
+                    status: None,
+                    error: Some(e.to_string()),
+                    models: None,
+                })
+            }
+        };
+    let url = provider_models_url(settings.protocol, &settings.endpoint);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    Json(probe_provider(&client, settings.protocol, &url, &settings.api_key).await)
+}
+
 /// Code-first OpenAPI document. `xtask openapi` emits it; `xtask openapi-diff` checks it against
 /// `packages/sdk/openapi.json` per route group.
 #[derive(utoipa::OpenApi)]
@@ -5979,7 +6100,8 @@ async fn v2_provider_get(
         v2_integration_attempt_complete,
         v2_integration_attempt_status,
         v2_location_get,
-        v2_provider_get
+        v2_provider_get,
+        v2_provider_test
     ),
     components(schemas(
         opencode_proto::Health,
@@ -8966,6 +9088,7 @@ pub fn build_router(state: ServerState) -> Router {
     if state.routes.handles("provider") {
         router = router.route("/api/provider", get(v2_provider_list));
         router = router.route("/api/provider/{providerID}", get(v2_provider_get));
+        router = router.route("/api/provider/{providerID}/test", post(v2_provider_test));
         router = router.route("/provider", get(provider_list));
         router = router.route("/provider/auth", get(provider_auth));
         router = router.route(
@@ -12072,6 +12195,70 @@ mod tests {
             assert!(l["source"].is_string());
         }
         assert_eq!(levels[0]["config"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn provider_models_url_derives_from_endpoint() {
+        assert_eq!(
+            provider_models_url(
+                ProtocolKind::OpenAiCompatible,
+                "https://api.deepseek.com/chat/completions"
+            ),
+            "https://api.deepseek.com/models"
+        );
+        assert_eq!(
+            provider_models_url(
+                ProtocolKind::Anthropic,
+                "https://api.anthropic.com/v1/messages"
+            ),
+            "https://api.anthropic.com/v1/models"
+        );
+        // Ollama's `/v1` base survives the strip → `/v1/models`.
+        assert_eq!(
+            provider_models_url(
+                ProtocolKind::OpenAiCompatible,
+                "http://localhost:11434/v1/chat/completions"
+            ),
+            "http://localhost:11434/v1/models"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_provider_reports_ok_and_model_count() {
+        let app = axum::Router::new().route(
+            "/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"data": [{"id": "a"}, {"id": "b"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/models");
+        let res = probe_provider(&client, ProtocolKind::OpenAiCompatible, &url, "key").await;
+        assert!(res.ok);
+        assert_eq!(res.status, Some(200));
+        assert_eq!(res.models, Some(2));
+        assert!(res.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_provider_reports_failure_on_non_2xx() {
+        let app = axum::Router::new().route(
+            "/models",
+            axum::routing::get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "nope") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/models");
+        let res = probe_provider(&client, ProtocolKind::OpenAiCompatible, &url, "key").await;
+        assert!(!res.ok);
+        assert_eq!(res.status, Some(401));
+        assert!(res.error.is_some());
+        assert!(res.models.is_none());
     }
 
     #[tokio::test]

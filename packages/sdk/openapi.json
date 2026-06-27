@@ -6,6 +6,53 @@
     "description": "opencode api"
   },
   "paths": {
+    "/api/provider/{providerID}/test": {
+      "post": {
+        "tags": ["opencode HttpApi"],
+        "operationId": "v2.provider.test",
+        "parameters": [
+          {
+            "name": "providerID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "models": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": ["ok"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "description": "Live connectivity check for a provider using its stored credentials.",
+        "summary": "Test provider"
+      }
+    },
     "/config/sources": {
       "get": {
         "tags": ["opencode HttpApi"],

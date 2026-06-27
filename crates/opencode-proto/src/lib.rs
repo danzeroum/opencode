@@ -2571,6 +2571,26 @@ pub struct ProviderGetResponse {
     pub data: ProviderV2Info,
 }
 
+/// 200 body of `v2.provider.test` (POST /api/provider/{providerID}/test): the result of a live
+/// connectivity check against the provider's resolved endpoint using its stored credentials. `ok` is the
+/// only required field — a failed check is `{ ok: false, error, status? }`, not an HTTP error. `status`
+/// is the provider's HTTP status (absent on a transport/timeout error); `models` is the count of models
+/// the provider listed, when it returns an OpenAI-style `{ data: [...] }` (best-effort).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct ProviderTestResult {
+    /// Whether the provider answered successfully (a 2xx from its models endpoint).
+    pub ok: bool,
+    /// The provider's HTTP status code, if a response was received.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    /// A short error description when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Number of models the provider listed (best-effort, OpenAI-style `{ data: [...] }`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<i64>,
+}
+
 /// A skill entry (`v2.skill.list` item). Mirrors the golden `SkillV2Info`: `{ name, description?,
 /// slash?, location, content }`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
