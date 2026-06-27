@@ -4,7 +4,7 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import { showToast } from "@/utils/toast"
 import { popularProviders, useProviders } from "@/hooks/use-providers"
-import { createMemo, type Component, For, Show } from "solid-js"
+import { createMemo, createSignal, type Component, For, Show } from "solid-js"
 import { useLanguage } from "@/context/language"
 import { useServerSDK } from "@/context/server-sdk"
 import { useServerSync } from "@/context/server-sync"
@@ -36,6 +36,8 @@ export const SettingsProvidersV2: Component = () => {
   const serverSdk = useServerSDK()
   const serverSync = useServerSync()
   const providers = useProviders()
+
+  const [testing, setTesting] = createSignal<string | undefined>(undefined)
 
   const connected = createMemo(() => {
     return providers
@@ -106,6 +108,39 @@ export const SettingsProvidersV2: Component = () => {
       })
   }
 
+  const test = async (providerID: string, name: string) => {
+    if (testing()) return
+    setTesting(providerID)
+    try {
+      const res = await serverSdk.client.v2.provider.test({ providerID })
+      const result = res.data
+      if (result?.ok) {
+        showToast({
+          variant: "success",
+          icon: "circle-check",
+          title: language.t("settings.providers.test.success.title"),
+          description:
+            typeof result.models === "number"
+              ? language.t("settings.providers.test.success.descriptionModels", {
+                  provider: name,
+                  models: String(result.models),
+                })
+              : language.t("settings.providers.test.success.description", { provider: name }),
+        })
+      } else {
+        showToast({
+          title: language.t("settings.providers.test.failure.title"),
+          description: result?.error ?? language.t("common.requestFailed"),
+        })
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      showToast({ title: language.t("settings.providers.test.failure.title"), description: message })
+    } finally {
+      setTesting(undefined)
+    }
+  }
+
   const disconnect = async (providerID: string, name: string) => {
     if (isConfigCustom(providerID)) {
       await serverSdk.client.auth.remove({ providerID }).catch(() => undefined)
@@ -160,18 +195,30 @@ export const SettingsProvidersV2: Component = () => {
                         <Tag>{type(item)}</Tag>
                       </div>
                     </div>
-                    <Show
-                      when={canDisconnect(item)}
-                      fallback={
-                        <span class="settings-v2-provider-env-hint">
-                          {language.t("settings.providers.connected.environmentDescription")}
-                        </span>
-                      }
-                    >
-                      <ButtonV2 size="normal" variant="ghost-muted" onClick={() => void disconnect(item.id, item.name)}>
-                        {language.t("common.disconnect")}
+                    <div class="flex items-center gap-2">
+                      <ButtonV2
+                        size="normal"
+                        variant="ghost-muted"
+                        disabled={testing() === item.id}
+                        onClick={() => void test(item.id, item.name)}
+                      >
+                        {testing() === item.id
+                          ? language.t("settings.providers.test.testing")
+                          : language.t("settings.providers.test")}
                       </ButtonV2>
-                    </Show>
+                      <Show
+                        when={canDisconnect(item)}
+                        fallback={
+                          <span class="settings-v2-provider-env-hint">
+                            {language.t("settings.providers.connected.environmentDescription")}
+                          </span>
+                        }
+                      >
+                        <ButtonV2 size="normal" variant="ghost-muted" onClick={() => void disconnect(item.id, item.name)}>
+                          {language.t("common.disconnect")}
+                        </ButtonV2>
+                      </Show>
+                    </div>
                   </div>
                 )}
               </For>
