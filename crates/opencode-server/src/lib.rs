@@ -8720,7 +8720,29 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/_rust/session/{sessionID}/abort", post(rust_session_abort));
     }
 
-    router.fallback(proxy::proxy_handler).with_state(state)
+    router
+        .fallback(proxy::proxy_handler)
+        .layer(cors_layer())
+        .with_state(state)
+}
+
+/// CORS for the web frontend (`packages/app`, a browser SPA that calls the API via `@opencode-ai/sdk`).
+/// Origins are gated by the same allow-list as the TypeScript `cors.ts` (localhost / loopback /
+/// `oc://renderer` / tauri / `*.opencode.ai`); methods and request headers are mirrored so the SPA's
+/// `x-opencode-*` headers pass, and credentials are allowed (the specific origin is reflected, never
+/// `*`). A request with no `Origin` (the CLI/SDK, server-to-server) is unaffected.
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+            origin
+                .to_str()
+                .map(crate::pty::is_allowed_cors_origin)
+                .unwrap_or(false)
+        }))
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+        .allow_credentials(true)
 }
 
 /// Bind `bind` (e.g. `127.0.0.1:4096`) and serve the router until shutdown.
@@ -8745,6 +8767,53 @@ mod tests {
         assert!(rt.handles("location"));
         assert!(!rt.handles("session"));
         assert_eq!(rt.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn cors_allows_web_frontend_origins_only() {
+        use tower::ServiceExt;
+        let router = || {
+            build_router(ServerState {
+                ctx: AppContext::in_memory(),
+                routes: RouteTable::all(),
+                proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+                runner: RunnerServices::default(),
+                coordinator: SessionCoordinator::default(),
+            })
+        };
+        // Preflight from an allowed origin (Vite dev server) is reflected.
+        let resp = router()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/global/health")
+                    .header("origin", "http://localhost:5173")
+                    .header("access-control-request-method", "GET")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+        // A disallowed cross-origin gets no allow-origin header.
+        let resp2 = router()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/global/health")
+                    .header("origin", "https://evil.example.com")
+                    .header("access-control-request-method", "GET")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp2.headers().get("access-control-allow-origin").is_none());
     }
 
     #[test]
