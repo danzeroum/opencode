@@ -50,6 +50,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/agent",
     "/command",
     "/config",
+    "/config/sources",
     "/config/providers",
     "/global/config",
     "/api/session",
