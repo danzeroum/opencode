@@ -1838,6 +1838,80 @@ pub enum GlobalUpgradeResult {
     Failed(GlobalUpgradeFailure),
 }
 
+// --- final create/read ops -------------------------------------------------
+
+/// 200 `data` of `v2.projectCopy.create` (`{ directory }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProjectCopyCopy {
+    /// The copy's directory.
+    pub directory: String,
+}
+
+/// A git worktree (`{ name, branch?, directory }`) — 200 of `worktree.create`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Worktree {
+    /// Worktree name.
+    pub name: String,
+    /// Checked-out branch, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Worktree directory.
+    pub directory: String,
+}
+
+/// The 400 union of `experimental.workspace.create`
+/// (`anyOf[WorkspaceCreateError, effect_HttpApiError_BadRequest, InvalidRequestError]`;
+/// `WorkspaceCreateError` is structurally a [`NamedMessageError`]).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum WorkspaceCreateRequestError {
+    /// Named create error (`{ name, data:{ message } }`).
+    Named(NamedMessageError),
+    /// Generic bad request.
+    BadRequest(EffectHttpApiBadRequest),
+    /// Schema validation error.
+    Invalid(InvalidRequestError),
+}
+
+/// A base attempt-status (`{ status, time }`) — `v2.integration.attempt.status` 200 `data` arm.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct IntegrationAttemptStatusBase {
+    /// Status discriminator.
+    pub status: String,
+    /// Timestamps.
+    pub time: IntegrationAttemptTime,
+}
+
+/// An attempt-status carrying a message (`{ status, message, time }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct IntegrationAttemptStatusMessage {
+    /// Status discriminator.
+    pub status: String,
+    /// Status detail.
+    pub message: String,
+    /// Timestamps.
+    pub time: IntegrationAttemptTime,
+}
+
+/// `data` of `v2.integration.attempt.status` (`anyOf[{status,time}, {status,message,time}]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(untagged)]
+pub enum IntegrationAttemptStatusData {
+    /// With a message.
+    Message(IntegrationAttemptStatusMessage),
+    /// Without a message.
+    Base(IntegrationAttemptStatusBase),
+}
+
+/// 200 body of `v2.integration.attempt.status` (`{ location, data }`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct IntegrationAttemptStatusResponse {
+    /// Resolved location context.
+    pub location: LocationInfo,
+    /// The attempt status.
+    pub data: IntegrationAttemptStatusData,
+}
+
 /// The Effect HttpApi 500 body (`{ _tag: "InternalServerError" }`). Structurally a tagged marker.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct EffectHttpApiInternalServerError {

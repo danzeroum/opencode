@@ -434,6 +434,34 @@ fn openapi_diff() -> anyhow::Result<()> {
         }
     }
 
+    // Blind-spot guard: for each enforced path, every golden HTTP method must be EMITTED by the Rust
+    // spec. The loop above only iterates methods the generated spec emits, so a golden method absent
+    // from an already-enforced path would otherwise pass silently (e.g. a path enforced for DELETE
+    // while its golden GET is unimplemented). This makes "OK" mean full method coverage per path.
+    const HTTP_METHODS: &[&str] = &[
+        "get", "post", "put", "delete", "patch", "head", "options", "trace",
+    ];
+    for &path in CUTOVER_PATHS {
+        let Some(gold_methods) = gold_paths.get(path).and_then(Value::as_object) else {
+            continue;
+        };
+        let gen_methods = gen_paths.get(path).and_then(Value::as_object);
+        for method in gold_methods.keys() {
+            if !HTTP_METHODS.contains(&method.as_str()) {
+                continue;
+            }
+            let present = gen_methods.is_some_and(|m| m.contains_key(method));
+            if !present {
+                println!(
+                    "  MISSING {method} {path}: golden operation not emitted by the Rust spec"
+                );
+                violations.push(format!(
+                    "{method} {path}: golden operation not emitted by the Rust spec"
+                ));
+            }
+        }
+    }
+
     println!(
         "enforced cut-over paths: {}",
         if CUTOVER_PATHS.is_empty() {
