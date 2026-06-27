@@ -12,6 +12,7 @@
     "astro": "astro"
   },
   "dependencies": {
+    "@opencode-ai/util": "workspace:*",
     "@astrojs/cloudflare": "12.6.3",
     "@astrojs/markdown-remark": "6.3.1",
     "@astrojs/solid-js": "5.1.0",

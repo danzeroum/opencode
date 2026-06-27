@@ -79,7 +79,7 @@ import { ImagePreview } from "@opencode-ai/ui/image-preview"
 import { useQueries } from "@tanstack/solid-query"
 import { useQueryOptions } from "@/context/server-sync"
 import { pathKey } from "@/utils/path-key"
-import { base64Encode } from "@opencode-ai/core/util/encode"
+import { base64Encode } from "@opencode-ai/util/encode"
 import { displayName } from "@/pages/layout/helpers"
 
 interface PromptInputProps {
