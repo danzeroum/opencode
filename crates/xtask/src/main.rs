@@ -108,6 +108,8 @@ const CUTOVER_PATHS: &[&str] = &[
     "/auth/{providerID}",
     "/provider",
     "/provider/auth",
+    "/provider/{providerID}/oauth/authorize",
+    "/provider/{providerID}/oauth/callback",
     "/api/permission/saved/{id}",
     "/api/credential/{credentialID}",
     "/api/integration/attempt/{attemptID}",

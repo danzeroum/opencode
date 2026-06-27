@@ -4488,6 +4488,52 @@ async fn provider_auth(
     Json(out)
 }
 
+/// 400 responder for the provider-OAuth routes — a contract-shaped `ProviderAuthError1` (the named arm
+/// of the `RequestError` union). Used when a provider doesn't support OAuth, which is the faithful
+/// answer for API-key/keyless providers (deepseek/glm/ollama/…) — the only kind configured here.
+fn provider_oauth_unsupported(provider_id: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(opencode_proto::ProviderOauthRequestError::Typed(
+            opencode_proto::ProviderOauthError {
+                name: "ProviderAuthOauthMissing".to_string(),
+                data: opencode_proto::ProviderOauthErrorData {
+                    provider_id: Some(provider_id.to_string()),
+                    message: Some(format!("Provider does not support OAuth: {provider_id}")),
+                    ..Default::default()
+                },
+            },
+        )),
+    )
+        .into_response()
+}
+
+/// `POST /provider/{providerID}/oauth/authorize` — begin a provider OAuth flow (group `provider`).
+/// API-key/keyless providers don't support OAuth → faithful 400 `ProviderAuthError1`. 200
+/// `ProviderOauthAuthorization` declared for contract parity.
+#[utoipa::path(post, path = "/provider/{providerID}/oauth/authorize", operation_id = "provider.oauth.authorize",
+    params(("providerID" = String, Path, description = "Provider id")),
+    responses((status = 200, description = "Authorization", body = opencode_proto::ProviderOauthAuthorization),
+        (status = 400, description = "Bad request", body = opencode_proto::ProviderOauthRequestError)), tag = "provider")]
+async fn provider_oauth_authorize(
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    provider_oauth_unsupported(&provider_id)
+}
+
+/// `POST /provider/{providerID}/oauth/callback` — finish a provider OAuth flow (group `provider`).
+/// No OAuth flow exists for API-key/keyless providers → faithful 400. 200 `bool` declared for parity.
+#[utoipa::path(post, path = "/provider/{providerID}/oauth/callback", operation_id = "provider.oauth.callback",
+    params(("providerID" = String, Path, description = "Provider id")),
+    responses((status = 200, description = "OAuth callback processed successfully", body = bool, content_type = "application/json"),
+        (status = 400, description = "Bad request", body = opencode_proto::ProviderOauthRequestError)), tag = "provider")]
+async fn provider_oauth_callback(
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    provider_oauth_unsupported(&provider_id)
+}
+
 /// `GET /api/skill` — list skills (group `skill`). Matches the golden `v2.skill.list`: 200
 /// `{ location, data }` + 400/401. Loads real skills from the global config dir's `{skill,skills}` and
 /// the project's `.opencode/{skill,skills}` (glob `{*.md, **/SKILL.md}`, project overrides global by
@@ -5463,6 +5509,8 @@ async fn v2_provider_get(
         v2_provider_list,
         provider_list,
         provider_auth,
+        provider_oauth_authorize,
+        provider_oauth_callback,
         v2_skill_list,
         v2_command_list,
         v2_reference_list,
@@ -8257,6 +8305,14 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/api/provider/{providerID}", get(v2_provider_get));
         router = router.route("/provider", get(provider_list));
         router = router.route("/provider/auth", get(provider_auth));
+        router = router.route(
+            "/provider/{providerID}/oauth/authorize",
+            post(provider_oauth_authorize),
+        );
+        router = router.route(
+            "/provider/{providerID}/oauth/callback",
+            post(provider_oauth_callback),
+        );
     }
     if state.routes.handles("skill") {
         router = router.route("/api/skill", get(v2_skill_list));
@@ -9968,6 +10024,43 @@ mod tests {
             )
             .unwrap();
             assert_eq!(v["_tag"], "McpServerNotFoundError", "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_oauth_is_unsupported_400() {
+        use tower::ServiceExt;
+        let mk = || ServerState {
+            ctx: AppContext::in_memory(),
+            routes: RouteTable::parse("provider"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        for uri in [
+            "/provider/deepseek/oauth/authorize",
+            "/provider/deepseek/oauth/callback",
+        ] {
+            let resp = build_router(mk())
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 400, "{uri}");
+            let v: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            // The named ProviderAuthError1 arm of the union.
+            assert_eq!(v["name"], "ProviderAuthOauthMissing", "{uri}");
+            assert_eq!(v["data"]["providerID"], "deepseek", "{uri}");
         }
     }
 

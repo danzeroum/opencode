@@ -2,7 +2,7 @@
 
 > Documento vivo. Objetivo: tornar o backend **100% Rust** (deletar o servidor TS `packages/server` + `packages/core`) servindo a **GUI web** (`packages/app` + `ui`, SolidJS) via o contrato OpenAPI existente. Atualizado a cada fatia mergeada.
 >
-> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **155/168 (92%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, grupo `pty` 100% nativo (terminais reais + streaming WebSocket), **grupo `mcp` completo (auth.* fiel-404, sem server configurado)** + erros fiéis para os subsistemas que dependem de infra hospedada da opencode (share/sync/workspace). Restam só `provider.oauth.*`, `v2.integration.*`, `global.upgrade`. Plano em "Plano de cutover total" abaixo.
+> **Última atualização:** 2026-06-26 · **Decisão do dono:** **cutover TOTAL (alvo B)** — portar TODAS as 168 ops (incl. TUI/PTY/experimental) e matar o TS. Cobertura atual: **157/168 (93%)** — Tiers 1–4 completos, Tier 5 parcial, Tier 7 quase todo, grupos `pty`/`mcp` 100% nativos, `provider.oauth.*` fiel-400 (providers do dono são API-key/keyless, não fazem OAuth) + erros fiéis para os subsistemas que dependem de infra hospedada da opencode (share/sync/workspace). Restam só `v2.integration.*` (4) e `global.upgrade` (1). Plano em "Plano de cutover total" abaixo.
 >
 
 ## Plano de cutover total (alvo B) — ordem de execução
@@ -34,6 +34,9 @@
 - ⏳ T5.2 `v2.credential.*` (tabela `credential`)
 - ✅ T5.3a deletes idempotentes (204 sobre stores vazios — fiéis): `v2.permission.saved.remove`, `v2.credential.remove`, `v2.integration.attempt.cancel` — **#155**
 - ⏳ T5.3b fluxos OAuth/credencial **reais** (store DB `credential` + máquina de estado): `provider.oauth.authorize/callback`, `v2.credential.update`, `v2.integration.{get,connect.key,connect.oauth,attempt.status,attempt.complete}`
+
+**Tier 5b — OAuth de provider:**
+- ✅ `provider.oauth.{authorize,callback}` → 400 fiel `ProviderAuthError1` (`name="ProviderAuthOauthMissing"`). É a resposta **correta** para os providers do dono (deepseek/glm/ollama são API-key/keyless e não suportam OAuth). Modelados `ProviderOauthAuthorization`/`ProviderOauthError`/`ProviderOauthErrorData`/`ProviderOauthRequestError` (prefixo `Oauth` p/ não colidir com o componente `ProviderAuthErrorData` do Part de mensagem — colisão pega pelo `openapi-diff`). — **(este PR)**
 
 **Tier 6 — Subsistemas novos:**
 - ✅ T6.1 MCP runtime (`rmcp`) **— superfície de contrato completa (fiel-404)**: `mcp.connect`/`disconnect` — **#160**; e agora `mcp.auth.{start,callback,authenticate,remove}` → 404 `McpServerNotFoundError` (nenhum server MCP configurado nativamente, coerente com connect/disconnect). Modelados `McpAuthStart`/`McpAuthRemoved`/`McpUnsupportedOAuthError`/`McpAuthOAuthError`. Falta a conexão `rmcp` real + `mcp.add` (não estão no contrato OpenAPI atual). — **(este PR)**
