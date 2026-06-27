@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     response::Json,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
     Router,
 };
 use opencode_core::native_tools::{self, NativeToolBox};
@@ -4671,6 +4671,199 @@ async fn v2_agent_list(
     Ok(Json(opencode_proto::AgentListResponse { location, data }))
 }
 
+/// `PUT /api/agent/{agentID}` — create or replace an agent (group `agent`). The agent's writable
+/// fields are persisted to the resolved project's `.opencode/agent/{agentID}.md` (frontmatter + body),
+/// then re-read from disk and returned as `{ location, data }`. `mode` is stored in frontmatter, so a
+/// `primary` agent round-trips from the canonical `agent/` directory. Idempotent: an existing file is
+/// overwritten. Returns 400 for an invalid id (path traversal) and 500 on a filesystem write failure.
+#[utoipa::path(
+    put,
+    path = "/api/agent/{agentID}",
+    operation_id = "v2.agent.set",
+    params(
+        ("agentID" = String, Path, description = "Agent id (relative name, may be nested)"),
+        ("location" = Option<String>, Query, description = "Location context (deepObject)")
+    ),
+    request_body = opencode_proto::AgentWriteRequest,
+    responses(
+        (status = 200, description = "Written agent", body = opencode_proto::AgentGetResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "agent"
+)]
+async fn v2_agent_set(
+    State(state): State<ServerState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<opencode_proto::AgentWriteRequest>,
+) -> Result<Json<opencode_proto::AgentGetResponse>, ApiError> {
+    let name = safe_md_name(&agent_id)?;
+    let location = resolve_location(&state, &params).await?;
+    let dir = std::path::Path::new(&location.directory)
+        .join(".opencode")
+        .join("agent");
+    let file = dir.join(format!("{name}.md"));
+    let mut fields: Vec<(&str, String)> = Vec::new();
+    if let Some(m) = &body.model {
+        fields.push(("model", format!("{}/{}", m.provider_id, m.id)));
+        if let Some(v) = &m.variant {
+            fields.push(("variant", v.clone()));
+        }
+    }
+    if let Some(d) = &body.description {
+        fields.push(("description", d.clone()));
+    }
+    if let Some(mode) = body.mode {
+        let s = match mode {
+            opencode_proto::AgentMode::Subagent => "subagent",
+            opencode_proto::AgentMode::Primary => "primary",
+            opencode_proto::AgentMode::All => "all",
+        };
+        fields.push(("mode", s.to_string()));
+    }
+    if let Some(h) = body.hidden {
+        fields.push(("hidden", h.to_string()));
+    }
+    if let Some(c) = &body.color {
+        fields.push(("color", c.clone()));
+    }
+    if let Some(s) = body.steps {
+        fields.push(("steps", s.to_string()));
+    }
+    let content = serialize_md(&fields, body.system.as_deref().unwrap_or(""));
+    write_md_file(&file, &content)?;
+    let data = build_agent(&dir, &file, false).ok_or_else(|| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            "failed to re-read written agent"
+        )))
+    })?;
+    Ok(Json(opencode_proto::AgentGetResponse { location, data }))
+}
+
+/// `DELETE /api/agent/{agentID}` — remove an agent from the resolved project's `.opencode` (group
+/// `agent`). Matches the V2 delete convention: 204, 400, 401. Removes `{agent,agents}/{agentID}.md` and
+/// `{mode,modes}/{agentID}.md` (the agent could live under either source). Idempotent — a missing file
+/// is still a 204. Only the project `.opencode` is touched (never the shared global config dir).
+#[utoipa::path(
+    delete,
+    path = "/api/agent/{agentID}",
+    operation_id = "v2.agent.delete",
+    params(
+        ("agentID" = String, Path, description = "Agent id (relative name, may be nested)"),
+        ("location" = Option<String>, Query, description = "Location context (deepObject)")
+    ),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "agent"
+)]
+async fn v2_agent_delete(
+    State(state): State<ServerState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let name = safe_md_name(&agent_id)?;
+    let location = resolve_location(&state, &params).await?;
+    let base = std::path::Path::new(&location.directory).join(".opencode");
+    for sub in ["agent", "agents", "mode", "modes"] {
+        remove_md_file(&base.join(sub).join(format!("{name}.md")))?;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/command/{commandID}` — create or replace a command (group `command`). The command's
+/// writable fields are persisted to the resolved project's `.opencode/command/{commandID}.md`
+/// (frontmatter + `template` body), then re-read from disk and returned as `{ location, data }`.
+/// Idempotent: an existing file is overwritten. Returns 400 for an invalid id, 500 on a write failure.
+#[utoipa::path(
+    put,
+    path = "/api/command/{commandID}",
+    operation_id = "v2.command.set",
+    params(
+        ("commandID" = String, Path, description = "Command id (relative name, may be nested)"),
+        ("location" = Option<String>, Query, description = "Location context (deepObject)")
+    ),
+    request_body = opencode_proto::CommandWriteRequest,
+    responses(
+        (status = 200, description = "Written command", body = opencode_proto::CommandGetResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "commands"
+)]
+async fn v2_command_set(
+    State(state): State<ServerState>,
+    axum::extract::Path(command_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<opencode_proto::CommandWriteRequest>,
+) -> Result<Json<opencode_proto::CommandGetResponse>, ApiError> {
+    let name = safe_md_name(&command_id)?;
+    let location = resolve_location(&state, &params).await?;
+    let dir = std::path::Path::new(&location.directory)
+        .join(".opencode")
+        .join("command");
+    let file = dir.join(format!("{name}.md"));
+    let mut fields: Vec<(&str, String)> = Vec::new();
+    if let Some(d) = &body.description {
+        fields.push(("description", d.clone()));
+    }
+    if let Some(a) = &body.agent {
+        fields.push(("agent", a.clone()));
+    }
+    if let Some(m) = &body.model {
+        fields.push(("model", format!("{}/{}", m.provider_id, m.id)));
+        if let Some(v) = &m.variant {
+            fields.push(("variant", v.clone()));
+        }
+    }
+    if let Some(s) = body.subtask {
+        fields.push(("subtask", s.to_string()));
+    }
+    let content = serialize_md(&fields, &body.template);
+    write_md_file(&file, &content)?;
+    let data = build_command(&dir, &file).ok_or_else(|| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            "failed to re-read written command"
+        )))
+    })?;
+    Ok(Json(opencode_proto::CommandGetResponse { location, data }))
+}
+
+/// `DELETE /api/command/{commandID}` — remove a command from the resolved project's `.opencode` (group
+/// `command`). Matches the V2 delete convention: 204, 400, 401. Removes `{command,commands}/{id}.md`.
+/// Idempotent — a missing file is still a 204. Only the project `.opencode` is touched.
+#[utoipa::path(
+    delete,
+    path = "/api/command/{commandID}",
+    operation_id = "v2.command.delete",
+    params(
+        ("commandID" = String, Path, description = "Command id (relative name, may be nested)"),
+        ("location" = Option<String>, Query, description = "Location context (deepObject)")
+    ),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "commands"
+)]
+async fn v2_command_delete(
+    State(state): State<ServerState>,
+    axum::extract::Path(command_id): axum::extract::Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let name = safe_md_name(&command_id)?;
+    let location = resolve_location(&state, &params).await?;
+    let base = std::path::Path::new(&location.directory).join(".opencode");
+    for sub in ["command", "commands"] {
+        remove_md_file(&base.join(sub).join(format!("{name}.md")))?;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// `GET /api/health` — V2 liveness (group `health`). Matches the golden `v2.health.get`: 200
 /// `{ healthy: true }` + 400/401. The Rust server is serving by definition when it answers, so this
 /// always reports `healthy: true`.
@@ -5751,8 +5944,12 @@ async fn v2_provider_get(
         provider_oauth_callback,
         v2_skill_list,
         v2_command_list,
+        v2_command_set,
+        v2_command_delete,
         v2_reference_list,
         v2_agent_list,
+        v2_agent_set,
+        v2_agent_delete,
         v2_health_get,
         v2_permission_request_list,
         v2_permission_saved_list,
@@ -7617,6 +7814,103 @@ fn parse_md_frontmatter(content: &str) -> (std::collections::BTreeMap<String, St
     (map, normalized.trim().to_string())
 }
 
+/// Quote a flat-frontmatter scalar `value` if it needs it so the minimal [`parse_md_frontmatter`] reads
+/// it back unchanged: values that are empty, have leading/trailing whitespace, or contain `:`/`#`/a
+/// leading quote are wrapped (single quotes when the value contains a double quote, else double quotes).
+/// The flat parser strips only one layer of matching quotes and doesn't unescape, so a value containing
+/// both quote styles or a newline can't round-trip; such values are rare for agent/command metadata.
+fn frontmatter_scalar(value: &str) -> String {
+    let needs_quote = value.is_empty()
+        || value.starts_with(char::is_whitespace)
+        || value.ends_with(char::is_whitespace)
+        || value.contains(':')
+        || value.contains('#')
+        || value.starts_with('"')
+        || value.starts_with('\'');
+    if !needs_quote {
+        return value.to_string();
+    }
+    if value.contains('"') && !value.contains('\'') {
+        format!("'{value}'")
+    } else {
+        format!("\"{value}\"")
+    }
+}
+
+/// Serialize ordered flat-frontmatter `fields` + a markdown `body` into the
+/// `---\n<key>: <value>\n---\n\n<body>\n` form [`parse_md_frontmatter`] reads back (the inverse of the
+/// agent/command markdown loaders). An empty `fields` list omits the frontmatter block (body-only).
+fn serialize_md(fields: &[(&str, String)], body: &str) -> String {
+    let mut out = String::new();
+    if !fields.is_empty() {
+        out.push_str("---\n");
+        for (k, v) in fields {
+            out.push_str(k);
+            out.push_str(": ");
+            out.push_str(&frontmatter_scalar(v));
+            out.push('\n');
+        }
+        out.push_str("---\n");
+        if !body.is_empty() {
+            out.push('\n');
+        }
+    }
+    out.push_str(body);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Validate a user-supplied agent/command id used as a relative `.md` path under `.opencode`. Nested
+/// names (`foo/bar`) are allowed, but anything that could escape the base directory is rejected: empty,
+/// absolute (`/…`), backslashes, NUL, or any `.`/`..`/empty path segment. Returns the trimmed name.
+fn safe_md_name(name: &str) -> Result<String, ApiError> {
+    let trimmed = name.trim();
+    let invalid = trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+        || trimmed
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..");
+    if invalid {
+        return Err(ApiError(opencode_effect::AppError::BadRequest(format!(
+            "invalid name: {name:?}"
+        ))));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Write `content` to a `.md` file, creating parent directories first. I/O failures map to a 500
+/// [`ApiError`] (the agent/command-write handlers' filesystem-error path).
+fn write_md_file(file: &std::path::Path, content: &str) -> Result<(), ApiError> {
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+                e.to_string()
+            )))
+        })?;
+    }
+    std::fs::write(file, content).map_err(|e| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))
+    })
+}
+
+/// Remove a `.md` file if present (idempotent): a missing file is `Ok(())`; other I/O failures map to a
+/// 500 [`ApiError`]. The agent/command-delete handlers' filesystem path.
+fn remove_md_file(file: &std::path::Path) -> Result<(), ApiError> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))),
+    }
+}
+
 /// Recursively collect `*.md` files under `dir` (sorted by the caller).
 fn collect_md_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -7646,6 +7940,33 @@ fn parse_model_ref(model: &str, variant: Option<String>) -> opencode_proto::Mode
 /// config directory (the global config dir, or a project's `.opencode`). The command `name` is the
 /// file path relative to that subdirectory, without the `.md` extension. Mirrors the TS
 /// `config-command` plugin (`{command,commands}/**/*.md`).
+/// Build a [`CommandV2Info`] from a single command `.md` file (relative to its `dir`). The command
+/// `name` is the file path relative to `dir`, without the `.md` extension. Returns `None` for an
+/// unreadable file or an empty name. The read side of [`serialize_md`] for command frontmatter.
+fn build_command(
+    dir: &std::path::Path,
+    file: &std::path::Path,
+) -> Option<opencode_proto::CommandV2Info> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let rel = file.strip_prefix(dir).ok()?.to_str()?.replace('\\', "/");
+    let name = rel.strip_suffix(".md").unwrap_or(&rel).to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let (front, body) = parse_md_frontmatter(&content);
+    let model = front
+        .get("model")
+        .map(|m| parse_model_ref(m, front.get("variant").cloned()));
+    Some(opencode_proto::CommandV2Info {
+        name,
+        template: body,
+        description: front.get("description").cloned(),
+        agent: front.get("agent").cloned(),
+        model,
+        subtask: front.get("subtask").map(|s| s == "true"),
+    })
+}
+
 fn load_commands_from_base(base: &std::path::Path) -> Vec<opencode_proto::CommandV2Info> {
     let mut out = Vec::new();
     for sub in ["command", "commands"] {
@@ -7654,29 +7975,9 @@ fn load_commands_from_base(base: &std::path::Path) -> Vec<opencode_proto::Comman
         collect_md_files(&dir, &mut files);
         files.sort();
         for file in files {
-            let Ok(content) = std::fs::read_to_string(&file) else {
-                continue;
-            };
-            let Some(rel) = file.strip_prefix(&dir).ok().and_then(|r| r.to_str()) else {
-                continue;
-            };
-            let name = rel.replace('\\', "/");
-            let name = name.strip_suffix(".md").unwrap_or(&name).to_string();
-            if name.is_empty() {
-                continue;
+            if let Some(cmd) = build_command(&dir, &file) {
+                out.push(cmd);
             }
-            let (front, body) = parse_md_frontmatter(&content);
-            let model = front
-                .get("model")
-                .map(|m| parse_model_ref(m, front.get("variant").cloned()));
-            out.push(opencode_proto::CommandV2Info {
-                name,
-                template: body,
-                description: front.get("description").cloned(),
-                agent: front.get("agent").cloned(),
-                model,
-                subtask: front.get("subtask").map(|s| s == "true"),
-            });
         }
     }
     out
@@ -8588,12 +8889,20 @@ pub fn build_router(state: ServerState) -> Router {
     }
     if state.routes.handles("command") {
         router = router.route("/api/command", get(v2_command_list));
+        router = router.route(
+            "/api/command/{commandID}",
+            put(v2_command_set).delete(v2_command_delete),
+        );
     }
     if state.routes.handles("reference") {
         router = router.route("/api/reference", get(v2_reference_list));
     }
     if state.routes.handles("agent") {
         router = router.route("/api/agent", get(v2_agent_list));
+        router = router.route(
+            "/api/agent/{agentID}",
+            put(v2_agent_set).delete(v2_agent_delete),
+        );
     }
     if state.routes.handles("experimental") {
         router = router.route("/experimental/tool", get(tool_list));
@@ -11391,6 +11700,208 @@ mod tests {
             .expect("project command loaded");
         assert_eq!(hello["template"], "Say hello to the user.");
         assert_eq!(hello["description"], "Say hi");
+    }
+
+    #[test]
+    fn serialize_md_round_trips_through_parse() {
+        // A colon-containing description must be quoted so the flat parser reads it back whole.
+        let fields = vec![
+            ("model", "anthropic/claude-x".to_string()),
+            ("description", "Use when: building".to_string()),
+            ("mode", "subagent".to_string()),
+            ("hidden", "true".to_string()),
+        ];
+        let md = serialize_md(&fields, "You are helpful.");
+        let (front, body) = parse_md_frontmatter(&md);
+        assert_eq!(front.get("model").unwrap(), "anthropic/claude-x");
+        assert_eq!(front.get("description").unwrap(), "Use when: building");
+        assert_eq!(front.get("mode").unwrap(), "subagent");
+        assert_eq!(front.get("hidden").unwrap(), "true");
+        assert_eq!(body, "You are helpful.");
+        // Empty fields → body-only (no frontmatter fence).
+        let body_only = serialize_md(&[], "just a prompt");
+        assert!(!body_only.starts_with("---"));
+        let (f2, b2) = parse_md_frontmatter(&body_only);
+        assert!(f2.is_empty());
+        assert_eq!(b2, "just a prompt");
+    }
+
+    #[test]
+    fn safe_md_name_rejects_traversal() {
+        // `Result<_, ApiError>` isn't Debug, so match the Ok payload via `as_deref` instead of unwrap.
+        assert!(matches!(
+            safe_md_name("ok/nested-name").as_deref(),
+            Ok("ok/nested-name")
+        ));
+        assert!(matches!(
+            safe_md_name("  trimmed  ").as_deref(),
+            Ok("trimmed")
+        ));
+        for bad in [
+            "",
+            "/abs",
+            "../escape",
+            "a/../b",
+            "a/./b",
+            "back\\slash",
+            "trail/",
+            "/",
+            "with\0nul",
+        ] {
+            assert!(safe_md_name(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_agent_set_and_delete_round_trip() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        let mut rec = test_project_record("prj_1");
+        rec.worktree = dir.path().display().to_string();
+        projects.insert(rec);
+        let make_state = || ServerState {
+            ctx: AppContext::new(AppServices {
+                projects: projects.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("agent"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let body = serde_json::json!({
+            "description": "Reviews code",
+            "mode": "subagent",
+            "system": "You review code.",
+            "model": { "id": "claude-x", "providerID": "anthropic" },
+            "hidden": true,
+            "steps": 5
+        });
+        let uri = format!("/api/agent/reviewer?directory={}", dir.path().display());
+        let resp = build_router(make_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("PUT")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"]["id"], "reviewer");
+        assert_eq!(v["data"]["description"], "Reviews code");
+        assert_eq!(v["data"]["mode"], "subagent");
+        assert_eq!(v["data"]["system"], "You review code.");
+        assert_eq!(v["data"]["model"]["providerID"], "anthropic");
+        assert_eq!(v["data"]["model"]["id"], "claude-x");
+        assert_eq!(v["data"]["hidden"], true);
+        assert_eq!(v["data"]["steps"], 5);
+        // The file is on disk and reloads via the loader.
+        let file = dir.path().join(".opencode/agent/reviewer.md");
+        assert!(file.exists());
+        assert!(load_agents(&dir.path().display().to_string())
+            .iter()
+            .any(|a| a.id == "reviewer"));
+        // An unsafe id (backslash — stays one path segment, no router slash ambiguity) is rejected
+        // with 400 by the path guard, before any write.
+        let bad_uri = format!("/api/agent/back%5Cslash?directory={}", dir.path().display());
+        let resp = build_router(make_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("PUT")
+                    .uri(&bad_uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        // DELETE removes it (204) and the file is gone; a second DELETE is idempotent.
+        for _ in 0..2 {
+            let resp = build_router(make_state())
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method("DELETE")
+                        .uri(&uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 204);
+        }
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn v2_command_set_and_delete_round_trip() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(opencode_db::MemoryProjectStore::new());
+        let mut rec = test_project_record("prj_1");
+        rec.worktree = dir.path().display().to_string();
+        projects.insert(rec);
+        let make_state = || ServerState {
+            ctx: AppContext::new(AppServices {
+                projects: projects.clone(),
+                ..Default::default()
+            }),
+            routes: RouteTable::parse("command"),
+            proxy: Arc::new(proxy::Upstream::new("http://127.0.0.1:1")),
+            runner: RunnerServices::default(),
+            coordinator: SessionCoordinator::default(),
+        };
+        let body = serde_json::json!({
+            "template": "Deploy the {{thing}}.",
+            "description": "Ship it",
+            "agent": "build",
+            "subtask": true
+        });
+        let uri = format!("/api/command/deploy?directory={}", dir.path().display());
+        let resp = build_router(make_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("PUT")
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"]["name"], "deploy");
+        assert_eq!(v["data"]["template"], "Deploy the {{thing}}.");
+        assert_eq!(v["data"]["description"], "Ship it");
+        assert_eq!(v["data"]["agent"], "build");
+        assert_eq!(v["data"]["subtask"], true);
+        let file = dir.path().join(".opencode/command/deploy.md");
+        assert!(file.exists());
+        // DELETE removes it (204) and the file is gone.
+        let resp = build_router(make_state())
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("DELETE")
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert!(!file.exists());
     }
 
     #[tokio::test]
