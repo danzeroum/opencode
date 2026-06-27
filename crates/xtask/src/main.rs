@@ -70,6 +70,7 @@ const CUTOVER_PATHS: &[&str] = &[
     "/session/{sessionID}/message",
     "/session/{sessionID}/message/{messageID}",
     "/global/dispose",
+    "/global/upgrade",
     "/global/event",
     "/instance/dispose",
     "/api/event",
