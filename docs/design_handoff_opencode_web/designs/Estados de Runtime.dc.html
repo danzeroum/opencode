@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{background:#0a0a0a;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased;}
+  ::selection{background:rgba(250,178,131,0.28);}
+  *::-webkit-scrollbar{width:10px;height:10px;}
+  *::-webkit-scrollbar-thumb{background:#262626;border-radius:5px;border:2px solid #0a0a0a;}
+  *::-webkit-scrollbar-track{background:transparent;}
+  button,input{font-family:inherit;}button:focus,input:focus{outline:none;}
+  @keyframes rt-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.82)}}
+  @keyframes rt-spin{to{transform:rotate(360deg)}}
+  @keyframes rt-blink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+  @keyframes rt-fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  @keyframes rt-dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+</style>
+</helmet>
+<div style="position:fixed;inset:0;display:flex;background:#0a0a0a;color:#e8e8e8;font-size:13px;line-height:1.5;overflow:hidden;">
+
+  <!-- ============ INDEX RAIL ============ -->
+  <aside style="width:268px;flex:none;border-right:1px solid #1a1a1a;background:#0c0c0c;display:flex;flex-direction:column;min-height:0;">
+    <div style="flex:none;padding:17px 18px 13px;border-bottom:1px solid #1a1a1a;">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px;">
+        <svg width="16" height="20" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+        <span style="font-weight:600;">opencode</span>
+        <span style="color:#3a3a3a;">/</span><span style="color:#cfcfcf;font-size:12px;">Estados de runtime</span>
+      </div>
+      <p style="margin:0;font-size:10.5px;color:#7a7a7a;line-height:1.5;">As telas que faltavam ao handoff — §5 do relatório de gaps. Foco da Fase 1: runtime, erro e onboarding.</p>
+    </div>
+    <div style="flex:1;min-height:0;overflow-y:auto;padding:12px 12px 24px;">
+      <sc-for list="{{ navGroups }}" as="g" hint-placeholder-count="4">
+        <div style="margin-bottom:14px;">
+          <div style="font-size:9px;letter-spacing:1.2px;color:{{ g.color }};text-transform:uppercase;font-weight:600;padding:0 6px 8px;">{{ g.label }}</div>
+          <sc-for list="{{ g.items }}" as="t" hint-placeholder-count="3">
+            <button onClick="{{ t.onClick }}" style="{{ t.style }}">
+              <span style="width:18px;text-align:center;flex:none;color:{{ t.iconColor }};">{{ t.icon }}</span>
+              <span style="flex:1;text-align:left;">{{ t.label }}</span>
+              <span style="{{ t.tagStyle }}">{{ t.tag }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </sc-for>
+    </div>
+  </aside>
+
+  <!-- ============ STAGE ============ -->
+  <main style="flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;">
+    <!-- caption bar -->
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:13px 22px;border-bottom:1px solid #1a1a1a;background:#0b0b0b;">
+      <span style="font-size:14px;font-weight:600;">{{ sceneTitle }}</span>
+      <span style="{{ sceneTagStyle }}">{{ sceneTag }}</span>
+      <div style="flex:1;"></div>
+      <span style="font-size:10.5px;color:#7a7a7a;">{{ sceneApi }}</span>
+    </div>
+    <div style="flex:none;padding:10px 22px;background:#090909;border-bottom:1px solid #161616;">
+      <p style="margin:0;font-size:11.5px;color:#9a9a9a;line-height:1.6;">{{ sceneDesc }}</p>
+    </div>
+
+    <!-- scene canvas -->
+    <div style="flex:1;min-height:0;overflow-y:auto;padding:26px;display:flex;align-items:flex-start;justify-content:center;">
+      <div style="width:100%;max-width:860px;">
+
+        <!-- ===== 1. PERMISSION ===== -->
+        <sc-if value="{{ isPermission }}" hint-placeholder-val="{{ true }}">
+        <div style="border:1px solid #1c1c1c;border-radius:13px;background:#0b0b0b;overflow:hidden;">
+          <div style="padding:18px 20px;display:flex;flex-direction:column;gap:14px;">
+            <div style="display:flex;gap:11px;align-items:flex-start;">
+              <span style="width:24px;height:24px;border-radius:5px;background:rgba(250,178,131,0.12);border:1px solid rgba(250,178,131,0.3);display:flex;align-items:center;justify-content:center;flex:none;"><svg width="11" height="14" viewBox="0 0 24 30"><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg></span>
+              <div style="flex:1;color:#d6d6d6;font-size:12.5px;padding-top:3px;">Vou rodar a suíte de testes antes de seguir.</div>
+            </div>
+            <!-- permission request card -->
+            <div style="margin-left:35px;border:1px solid rgba(230,192,123,0.3);border-radius:10px;background:rgba(230,192,123,0.04);overflow:hidden;">
+              <div style="display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid rgba(230,192,123,0.16);">
+                <span style="color:#e6c07b;font-size:13px;">▲</span>
+                <span style="font-size:11px;font-weight:600;color:#e6c07b;letter-spacing:0.3px;">PEDIDO DE PERMISSÃO</span>
+                <span style="flex:1;"></span>
+                <span style="font-size:10px;color:#9a9a9a;">agente <span style="color:#cfcfcf;">build</span> · política <span style="color:#e6c07b;">ask</span></span>
+              </div>
+              <div style="padding:14px;">
+                <div style="display:flex;align-items:center;gap:9px;margin-bottom:11px;">
+                  <span style="font-size:8.5px;font-weight:700;letter-spacing:0.5px;color:#0a0a0a;background:#7fb069;border-radius:4px;padding:2px 7px;">BASH</span>
+                  <span style="font-size:12px;color:#e8e8e8;">executar comando de shell</span>
+                </div>
+                <div style="background:#0a0a0a;border:1px solid #1e1e1e;border-radius:8px;padding:11px 13px;font-size:12.5px;color:#cfcfcf;margin-bottom:13px;"><span style="color:#5a8a4a;">$</span> bun test --coverage</div>
+                <div style="display:flex;align-items:center;gap:9px;">
+                  <button style="background:#7fb069;color:#0a1206;border:none;border-radius:7px;padding:8px 15px;font-weight:600;font-size:12px;cursor:pointer;">Permitir <span style="opacity:0.6;">⏎</span></button>
+                  <button style="background:transparent;border:1px solid #2a2a2a;color:#cfcfcf;border-radius:7px;padding:8px 15px;font-size:12px;cursor:pointer;">Permitir sempre</button>
+                  <button style="background:transparent;border:1px solid rgba(224,108,117,0.35);color:#e06c75;border-radius:7px;padding:8px 15px;font-size:12px;cursor:pointer;">Negar <span style="opacity:0.6;">esc</span></button>
+                  <span style="flex:1;"></span>
+                  <span style="font-size:10px;color:#6a6a6a;">expira em 0:58</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 2. QUESTION ===== -->
+        <sc-if value="{{ isQuestion }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid #1c1c1c;border-radius:13px;background:#0b0b0b;padding:18px 20px;display:flex;flex-direction:column;gap:14px;">
+          <div style="display:flex;gap:11px;align-items:flex-start;">
+            <span style="width:24px;height:24px;border-radius:5px;background:rgba(250,178,131,0.12);border:1px solid rgba(250,178,131,0.3);display:flex;align-items:center;justify-content:center;flex:none;"><svg width="11" height="14" viewBox="0 0 24 30"><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg></span>
+            <div style="flex:1;color:#d6d6d6;font-size:12.5px;padding-top:3px;">Encontrei duas estratégias de migração. Qual você prefere?</div>
+          </div>
+          <div style="margin-left:35px;border:1px solid rgba(157,124,216,0.3);border-radius:10px;background:rgba(157,124,216,0.04);padding:14px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+              <span style="color:#9d7cd8;">◆</span><span style="font-size:11px;font-weight:600;color:#9d7cd8;letter-spacing:0.3px;">PERGUNTA DO AGENTE</span>
+              <span style="flex:1;"></span><span style="font-size:10px;color:#9a9a9a;">question.reply</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:12px;">
+              <button style="display:flex;align-items:center;gap:10px;text-align:left;padding:11px 13px;border:1px solid rgba(250,178,131,0.4);border-radius:8px;background:rgba(250,178,131,0.06);cursor:pointer;">
+                <span style="width:18px;height:18px;border-radius:50%;border:1px solid #fab283;display:flex;align-items:center;justify-content:center;flex:none;"><span style="width:8px;height:8px;border-radius:50%;background:#fab283;"></span></span>
+                <div><div style="font-size:12px;color:#e8e8e8;font-weight:500;">Strangler-fig por grupo de rotas</div><div style="font-size:10.5px;color:#8a8a8a;margin-top:1px;">migra incrementalmente atrás do mesmo contrato</div></div>
+              </button>
+              <button style="display:flex;align-items:center;gap:10px;text-align:left;padding:11px 13px;border:1px solid #242424;border-radius:8px;background:#0c0c0c;cursor:pointer;">
+                <span style="width:18px;height:18px;border-radius:50%;border:1px solid #4a4a4a;flex:none;"></span>
+                <div><div style="font-size:12px;color:#cfcfcf;font-weight:500;">Big-bang rewrite</div><div style="font-size:10.5px;color:#8a8a8a;margin-top:1px;">reescreve tudo de uma vez, corta o TS</div></div>
+              </button>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;">
+              <input placeholder="ou escreva uma resposta livre…" style="flex:1;background:#0a0a0a;border:1px solid #242424;border-radius:7px;padding:8px 11px;color:#eee;font-size:12px;" />
+              <button style="background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:8px 15px;font-weight:600;font-size:12px;cursor:pointer;">Responder</button>
+            </div>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 3. TERMINAL ===== -->
+        <sc-if value="{{ isTerminal }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid #1c1c1c;border-radius:11px;background:#070707;overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 13px;border-bottom:1px solid #181818;background:#0c0c0c;">
+            <span style="display:flex;gap:6px;"><span style="width:11px;height:11px;border-radius:50%;background:#e06c75;"></span><span style="width:11px;height:11px;border-radius:50%;background:#e6c07b;"></span><span style="width:11px;height:11px;border-radius:50%;background:#7fb069;"></span></span>
+            <span style="font-size:11px;color:#9a9a9a;margin-left:5px;">pty · bash — ~/code/opencode</span>
+            <span style="flex:1;"></span>
+            <span style="font-size:9.5px;color:#7fb069;border:1px solid rgba(127,176,105,0.3);border-radius:4px;padding:1px 7px;">● ws conectado</span>
+            <span style="font-size:13px;color:#7a7a7a;cursor:pointer;">+</span>
+          </div>
+          <div style="padding:14px 15px;font-size:12px;line-height:1.75;color:#cfcfcf;min-height:300px;">
+            <div><span style="color:#7fb069;">➜</span> <span style="color:#5a9cf8;">opencode</span> <span style="color:#9d7cd8;">git:(</span><span style="color:#e06c75;">rust-migration</span><span style="color:#9d7cd8;">)</span> cargo run -p opencode-bin</div>
+            <div style="color:#8a8a8a;">   Compiling opencode-core v0.4.0</div>
+            <div style="color:#8a8a8a;">   Compiling opencode-server v0.4.0</div>
+            <div style="color:#7fb069;">    Finished dev [unoptimized] in 4.21s</div>
+            <div style="color:#8a8a8a;">     Running `target/debug/opencode-bin`</div>
+            <div style="margin-top:4px;"><span style="color:#e6c07b;">▶</span> opencode server on <span style="color:#5a9cf8;">http://127.0.0.1:4096</span></div>
+            <div style="color:#8a8a8a;">  web ui  → OPENCODE_WEB_DIR=packages/app/dist</div>
+            <div style="margin-top:8px;"><span style="color:#7fb069;">➜</span> <span style="color:#5a9cf8;">opencode</span> <span style="color:#9d7cd8;">git:(</span><span style="color:#e06c75;">rust-migration</span><span style="color:#9d7cd8;">)</span> <span style="display:inline-block;width:8px;height:15px;background:#fab283;vertical-align:middle;animation:rt-blink 1.1s step-end infinite;"></span></div>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 4. DIFF VIEWER ===== -->
+        <sc-if value="{{ isDiff }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid #1c1c1c;border-radius:11px;background:#0b0b0b;overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:11px;padding:11px 15px;border-bottom:1px solid #181818;">
+            <span style="font-size:8.5px;font-weight:700;letter-spacing:0.5px;color:#0a0a0a;background:#fab283;border-radius:4px;padding:2px 7px;">EDIT</span>
+            <span style="font-size:12.5px;color:#e8e8e8;font-weight:500;">crates/opencode-server/src/router.rs</span>
+            <span style="flex:1;"></span>
+            <span style="font-size:11px;color:#7fb069;">+9</span><span style="font-size:11px;color:#e06c75;">−2</span>
+            <span style="font-size:10px;color:#7a7a7a;border:1px solid #242424;border-radius:5px;padding:2px 8px;">unified ▾</span>
+          </div>
+          <div style="font-size:12px;line-height:1.7;font-family:inherit;">
+            <sc-for list="{{ diffLines }}" as="d" hint-placeholder-count="8">
+              <div style="display:flex;{{ d.rowStyle }}">
+                <span style="width:42px;text-align:right;padding:0 9px;color:#5a5a5a;font-size:10.5px;flex:none;user-select:none;">{{ d.ln }}</span>
+                <span style="width:16px;text-align:center;color:{{ d.signColor }};flex:none;">{{ d.sign }}</span>
+                <span style="flex:1;color:{{ d.textColor }};white-space:pre;padding-right:12px;">{{ d.text }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:11px 15px;border-top:1px solid #181818;background:#0a0a0a;">
+            <button style="background:#7fb069;color:#0a1206;border:none;border-radius:7px;padding:7px 14px;font-weight:600;font-size:12px;cursor:pointer;">Aceitar</button>
+            <button style="background:transparent;border:1px solid #2a2a2a;color:#cfcfcf;border-radius:7px;padding:7px 14px;font-size:12px;cursor:pointer;">Aceitar tudo</button>
+            <button style="background:transparent;border:1px solid rgba(224,108,117,0.35);color:#e06c75;border-radius:7px;padding:7px 14px;font-size:12px;cursor:pointer;">Rejeitar</button>
+            <span style="flex:1;"></span>
+            <span style="font-size:10.5px;color:#7a7a7a;">snapshot #08 será criado ao aceitar</span>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 5. ONBOARDING ===== -->
+        <sc-if value="{{ isOnboarding }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid #1c1c1c;border-radius:14px;background:linear-gradient(180deg,#0e0e0e,#0a0a0a);padding:38px 40px;text-align:center;">
+          <svg width="40" height="50" viewBox="0 0 24 30" style="margin-bottom:18px;"><path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+          <h1 style="margin:0 0 7px;font-size:21px;font-weight:600;">Bem-vindo ao opencode</h1>
+          <p style="margin:0 auto 26px;font-size:12.5px;color:#9a9a9a;max-width:430px;line-height:1.6;">Conecte um provedor de modelo para começar. Tudo roda localmente no seu servidor <span style="color:#cfcfcf;">127.0.0.1:4096</span> — nada sai da sua máquina.</p>
+          <div style="display:flex;flex-direction:column;gap:9px;max-width:420px;margin:0 auto 22px;">
+            <sc-for list="{{ onboardProviders }}" as="p" hint-placeholder-count="3">
+              <button style="display:flex;align-items:center;gap:12px;text-align:left;padding:13px 15px;border:1px solid {{ p.bd }};border-radius:10px;background:{{ p.bg }};cursor:pointer;">
+                <span style="width:30px;height:30px;border-radius:7px;background:#161616;display:flex;align-items:center;justify-content:center;font-size:13px;flex:none;color:{{ p.iconColor }};">{{ p.icon }}</span>
+                <div style="flex:1;"><div style="font-size:13px;font-weight:600;color:#e8e8e8;">{{ p.name }}</div><div style="font-size:10.5px;color:#8a8a8a;">{{ p.desc }}</div></div>
+                <span style="{{ p.tagStyle }}">{{ p.tag }}</span>
+              </button>
+            </sc-for>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;justify-content:center;font-size:11px;color:#6a6a6a;">
+            <span style="width:18px;height:1px;background:#242424;"></span>
+            passo 1 de 3 · conectar → escolher modelo → primeira sessão
+            <span style="width:18px;height:1px;background:#242424;"></span>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 6. MODEL SELECTOR ===== -->
+        <sc-if value="{{ isModelSel }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;justify-content:center;">
+          <div style="width:430px;border:1px solid #2c2c2c;border-radius:11px;background:#121212;box-shadow:0 18px 50px rgba(0,0,0,0.6);overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid #1e1e1e;">
+              <span style="color:#6a6a6a;">⌕</span>
+              <input value="claude" style="flex:1;background:transparent;border:none;color:#eee;font-size:13px;" />
+              <span style="font-size:10px;color:#5a5a5a;">esc</span>
+            </div>
+            <div style="max-height:300px;overflow-y:auto;">
+              <sc-for list="{{ modelOptions }}" as="m" hint-placeholder-count="5">
+                <button style="{{ m.style }}">
+                  <span style="width:7px;height:7px;border-radius:50%;background:{{ m.dot }};flex:none;"></span>
+                  <div style="flex:1;text-align:left;min-width:0;"><div style="font-size:12.5px;color:#e8e8e8;font-weight:{{ m.weight }};">{{ m.name }}</div><div style="font-size:10px;color:#7a7a7a;">{{ m.provider }} · {{ m.ctx }}</div></div>
+                  <sc-if value="{{ m.active }}" hint-placeholder-val="{{ false }}"><span style="color:#fab283;font-size:12px;">✓</span></sc-if>
+                </button>
+              </sc-for>
+            </div>
+            <div style="padding:9px 14px;border-top:1px solid #1e1e1e;font-size:10px;color:#6a6a6a;display:flex;justify-content:space-between;">
+              <span>↑↓ navegar · ⏎ trocar</span><span>aplica a partir da próxima mensagem</span>
+            </div>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 7. EMPTY STATE ===== -->
+        <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <sc-for list="{{ emptyCards }}" as="e" hint-placeholder-count="4">
+            <div style="border:1px dashed #2a2a2a;border-radius:12px;background:#0a0a0a;padding:30px 22px;text-align:center;display:flex;flex-direction:column;align-items:center;">
+              <span style="width:44px;height:44px;border-radius:10px;background:#101010;border:1px solid #1e1e1e;display:flex;align-items:center;justify-content:center;font-size:18px;color:{{ e.iconColor }};margin-bottom:14px;">{{ e.icon }}</span>
+              <div style="font-size:13px;font-weight:600;color:#cfcfcf;margin-bottom:5px;">{{ e.title }}</div>
+              <div style="font-size:11px;color:#7a7a7a;line-height:1.6;margin-bottom:16px;max-width:230px;">{{ e.body }}</div>
+              <button style="{{ e.btnStyle }}">{{ e.cta }}</button>
+            </div>
+          </sc-for>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 8. ERROR / CONNECTION ===== -->
+        <sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:13px;">
+          <sc-for list="{{ errorStates }}" as="e" hint-placeholder-count="4">
+            <div style="display:flex;align-items:flex-start;gap:13px;padding:15px 17px;border-radius:11px;border:1px solid {{ e.border }};background:{{ e.bg }};">
+              <span style="font-size:15px;color:{{ e.color }};flex:none;line-height:1.3;">{{ e.icon }}</span>
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:9px;"><span style="font-size:12.5px;font-weight:600;color:#e8e8e8;">{{ e.title }}</span><span style="font-size:9px;color:{{ e.color }};border:1px solid {{ e.color }}55;border-radius:4px;padding:0 6px;">{{ e.code }}</span></div>
+                <div style="font-size:11px;color:#9a9a9a;margin-top:4px;line-height:1.6;">{{ e.body }}</div>
+              </div>
+              <div style="display:flex;gap:7px;flex:none;">
+                <sc-for list="{{ e.actions }}" as="a" hint-placeholder-count="1"><button style="{{ a.style }}">{{ a.label }}</button></sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+        <!-- ===== 9. UNAVAILABLE ===== -->
+        <sc-if value="{{ isUnavailable }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid #1c1c1c;border-radius:13px;background:#0b0b0b;overflow:hidden;">
+          <div style="padding:30px 28px;text-align:center;border-bottom:1px solid #161616;">
+            <span style="display:inline-flex;width:48px;height:48px;border-radius:11px;background:#101010;border:1px solid #242424;align-items:center;justify-content:center;font-size:20px;color:#7a7a7a;margin-bottom:14px;">⛌</span>
+            <h2 style="margin:0 0 6px;font-size:16px;font-weight:600;color:#cfcfcf;">Compartilhamento indisponível</h2>
+            <p style="margin:0 auto;font-size:11.5px;color:#8a8a8a;max-width:430px;line-height:1.6;">Este recurso ainda não foi portado para o backend Rust (removido no cutover do TS). O endpoint <span style="color:#cfcfcf;">session.share</span> responde <span style="color:#e6c07b;">501 Not Implemented</span>.</p>
+          </div>
+          <div style="padding:16px 20px;">
+            <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:11px;">Recursos aguardando port no Rust</div>
+            <div style="display:flex;flex-direction:column;gap:7px;">
+              <sc-for list="{{ stubbedFeatures }}" as="f" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:11px;padding:9px 12px;border:1px solid #1a1a1a;border-radius:8px;background:#0e0e0e;">
+                  <span style="width:8px;height:8px;border-radius:50%;background:{{ f.dot }};flex:none;"></span>
+                  <span style="font-size:12px;color:#cfcfcf;width:140px;flex:none;">{{ f.name }}</span>
+                  <span style="flex:1;font-size:10.5px;color:#8a8a8a;">{{ f.note }}</span>
+                  <span style="font-size:9.5px;color:{{ f.statusColor }};border:1px solid {{ f.statusColor }}44;border-radius:4px;padding:1px 7px;">{{ f.status }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+        <div style="{{ noteStyle }}">{{ noteText }}</div>
+        </sc-if>
+
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { scene:'permission' };
+  T(){ return { primary:'#fab283', accent:'#9d7cd8', blue:'#5a9cf8', green:'#7fb069', red:'#e06c75', yellow:'#e6c07b' }; }
+  go=(id)=>()=>this.setState({scene:id});
+
+  scenes(){ return {
+    permission:{ title:'Aprovação de permissão', tag:'runtime', tagColor:'#e6c07b', api:'permission.list · permission.respond',
+      desc:'Quando um agente com política ask tenta uma tool sensível (bash/edit), a sessão pausa e pede aprovação inline. Distinto da config de permissão no editor de agente — isto é decisão em tempo de execução.',
+      note:'§5.1 — já existe parcialmente no prompt-input do packages/app; especificar para consistência. Backend: real (permission.respond).' },
+    question:{ title:'Pergunta do agente', tag:'runtime', tagColor:'#9d7cd8', api:'question.reply · question.reject',
+      desc:'O modelo invoca a tool de pergunta para desambiguar. O usuário escolhe uma opção ou escreve resposta livre; a sessão retoma com a resposta.',
+      note:'§5.2 — existe no session-question-dock.tsx. Backend: real.' },
+    terminal:{ title:'Painel de terminal (PTY)', tag:'runtime', tagColor:'#7fb069', api:'pty.* (WebSocket)',
+      desc:'Terminal real conectado a um PTY via WebSocket. O design original não tinha terminal; o packages/app já o implementa contra o backend Rust.',
+      note:'§5.3 — frontend existe (components/terminal.tsx). Backend: real (pty.* + WS). Só faltava no design.' },
+    diff:{ title:'Visualizador de diff / arquivo', tag:'runtime', tagColor:'#fab283', api:'file.read · session.revert',
+      desc:'Revisão de código: o agente propõe uma edição e o usuário vê o diff com aceitar/rejeitar por hunk. O design só tinha tool cards — falta a camada de revisão.',
+      note:'§5.4 — nova. Frontend a construir; backend file.read existe, aceitar/rejeitar mapeia em snapshot/revert.' },
+    onboarding:{ title:'Onboarding / first-run', tag:'onboarding', tagColor:'#5a9cf8', api:'provider.list · auth.set',
+      desc:'Primeiro acesso sem provedor conectado: empty state guiado que leva a conectar um provedor antes de qualquer sessão.',
+      note:'§5.5 — nova. Frontend a construir; backend provider/auth existe.' },
+    modelsel:{ title:'Seletor de modelo (mid-session)', tag:'runtime', tagColor:'#9d7cd8', api:'provider.list · session.update',
+      desc:'Trocar o modelo no meio da sessão via palette. O design mostrava só o indicador do modelo ativo, sem o seletor.',
+      note:'§5.8 — nova. Frontend a construir; backend provider.list existe.' },
+    empty:{ title:'Empty states', tag:'estado', tagColor:'#7a7a7a', api:'—',
+      desc:'Estados vazios consistentes para sessões, agentes, comandos e busca de tema sem resultado. Cada um com CTA claro.',
+      note:'§5.6 — novos. Frontend puro.' },
+    error:{ title:'Erro & conexão', tag:'estado', tagColor:'#e06c75', api:'(todos) · SSE /api/event',
+      desc:'Falhas de runtime: prompt falhou (retry), backend offline (reconectar), sessão ocupada (409), e perda do stream SSE. O design não cobria caminhos de erro.',
+      note:'§5.7 — novos. Frontend puro; refletem códigos reais da API.' },
+    unavailable:{ title:'Indisponível / em breve', tag:'gap backend', tagColor:'#e6c07b', api:'501 / 400 (stubbed)',
+      desc:'Para recursos removidos no cutover (share, MCP, integrações, plugins): um estado honesto de "indisponível" em vez de telas quebradas, enquanto o backend Rust não os porta.',
+      note:'§5.9 — novos. Decisão de produto: mostrar indisponível, re-portar no Rust, ou dropar as telas.' },
+  }; }
+
+  renderVals(){
+    const t=this.T(), s=this.state, sc=this.scenes(), cur=sc[s.scene];
+    const navGroups=[
+      {label:'Runtime da sessão', color:t.primary, ids:['permission','question','diff','modelsel','terminal']},
+      {label:'Entrada & vazio', color:t.blue, ids:['onboarding','empty']},
+      {label:'Erro & gaps', color:t.red, ids:['error','unavailable']},
+    ].map(g=>({ label:g.label, color:g.color, items:g.ids.map(id=>{ const sel=s.scene===id; const x=sc[id];
+      const icon={permission:'▲',question:'◆',terminal:'▶',diff:'≢',onboarding:'✦',modelsel:'◍',empty:'○',error:'⚠',unavailable:'⛌'}[id];
+      return { label:x.title, icon, iconColor:sel?x.tagColor:'#6a6a6a', onClick:this.go(id),
+        tag:x.tag, tagStyle:`font-size:8px;letter-spacing:0.3px;text-transform:uppercase;color:${sel?x.tagColor:'#5a5a5a'};border:1px solid ${sel?x.tagColor+'55':'#222'};border-radius:4px;padding:0 5px;flex:none;`,
+        style:`display:flex;align-items:center;gap:9px;width:100%;padding:8px 9px;margin-bottom:3px;border-radius:7px;cursor:pointer;font-size:12px;text-align:left;border:1px solid ${sel?'#262626':'transparent'};background:${sel?'#161616':'transparent'};color:${sel?'#e8e8e8':'#9a9a9a'};`,
+      };
+    }) }));
+
+    const noteStyle='margin-top:16px;display:flex;align-items:flex-start;gap:9px;padding:11px 14px;border-radius:9px;background:rgba(90,156,248,0.05);border:1px solid rgba(90,156,248,0.16);font-size:11px;color:#9ab4d8;line-height:1.6;';
+
+    // diff
+    const diffLines=[
+      {ln:'14',sign:'',text:'    let app = Router::new()',type:'ctx'},
+      {ln:'15',sign:'',text:'        .route("/api/session", get(list_sessions))',type:'ctx'},
+      {ln:'16',sign:'-',text:'        .route("/healthz", get(|| async { "ok" }));',type:'del'},
+      {ln:'16',sign:'+',text:'        .route("/healthz", get(healthz))',type:'add'},
+      {ln:'17',sign:'+',text:'        .route("/readyz", get(readyz));',type:'add'},
+      {ln:'18',sign:'',text:'',type:'ctx'},
+      {ln:'19',sign:'+',text:'async fn healthz() -> Json<Health> {',type:'add'},
+      {ln:'20',sign:'+',text:'    Json(Health { status: "ok" })',type:'add'},
+      {ln:'21',sign:'+',text:'}',type:'add'},
+    ].map(d=>{ const map={add:['rgba(127,176,105,0.08)',t.green,'#cfe8c2'],del:['rgba(224,108,117,0.08)',t.red,'#e8b8bc'],ctx:['transparent','#5a5a5a','#9a9a9a']}; const m=map[d.type];
+      return { ln:d.ln, sign:d.sign, text:d.text, rowStyle:`background:${m[0]};`, signColor:m[1], textColor:m[2] }; });
+
+    // onboarding providers
+    const onboardProviders=[
+      {name:'Anthropic',desc:'Claude Sonnet 4.5 · Haiku · Opus',icon:'◆',iconColor:t.primary,tag:'API key',recommended:true},
+      {name:'GitHub Copilot',desc:'OAuth · GPT-4o · Claude',icon:'◑',iconColor:t.accent,tag:'OAuth'},
+      {name:'OpenAI',desc:'GPT-4o · o1 · gpt-4o-mini',icon:'◈',iconColor:t.green,tag:'API key'},
+    ].map(p=>({ ...p, bd:p.recommended?'rgba(250,178,131,0.4)':'#1e1e1e', bg:p.recommended?'rgba(250,178,131,0.05)':'#0c0c0c',
+      tagStyle:`font-size:9px;color:${p.recommended?t.primary:'#8a8a8a'};border:1px solid ${p.recommended?'rgba(250,178,131,0.4)':'#2a2a2a'};border-radius:4px;padding:1px 6px;flex:none;` }));
+
+    // model selector
+    const modelOptions=[
+      {name:'claude-sonnet-4-5',provider:'anthropic',ctx:'200k',dot:t.green,active:true},
+      {name:'claude-haiku-4-5',provider:'anthropic',ctx:'200k',dot:t.green,active:false},
+      {name:'claude-opus-4',provider:'anthropic',ctx:'200k',dot:t.green,active:false},
+      {name:'claude-3-5-sonnet',provider:'github-copilot',ctx:'90k',dot:t.accent,active:false},
+      {name:'claude via bedrock',provider:'amazon-bedrock',ctx:'200k',dot:'#5a5a5a',active:false,unavailable:true},
+    ].map(m=>({ ...m, weight:m.active?'600':'400',
+      style:`display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;border:none;border-bottom:1px solid #161616;background:${m.active?'rgba(250,178,131,0.05)':'transparent'};cursor:pointer;` }));
+
+    // empty
+    const emptyCards=[
+      {icon:'◇',iconColor:t.primary,title:'Nenhuma sessão ainda',body:'Inicie uma conversa com o agente build para começar a trabalhar no seu código.',cta:'+ Nova sessão',primary:true},
+      {icon:'◆',iconColor:t.accent,title:'Nenhum agente custom',body:'Os agentes build, plan e general estão disponíveis. Crie um agente especializado.',cta:'Criar agente',primary:false},
+      {icon:'/',iconColor:t.yellow,title:'Nenhum comando',body:'Defina atalhos /comando com templates e placeholders para tarefas recorrentes.',cta:'Novo comando',primary:false},
+      {icon:'⌕',iconColor:'#7a7a7a',title:'Sem resultados de tema',body:'Nenhum tema corresponde a "nordico". Tente outro termo ou limpe a busca.',cta:'Limpar busca',primary:false},
+    ].map(e=>({ ...e, btnStyle:e.primary?'background:#fab283;color:#1a1206;border:none;border-radius:7px;padding:7px 14px;font-weight:600;font-size:11.5px;cursor:pointer;':'background:transparent;border:1px solid #2a2a2a;color:#cfcfcf;border-radius:7px;padding:7px 14px;font-size:11.5px;cursor:pointer;' }));
+
+    // errors
+    const mkAct=(label,primary)=>({label,style:primary?'background:#fab283;color:#1a1206;border:none;border-radius:6px;padding:6px 12px;font-weight:600;font-size:11px;cursor:pointer;':'background:transparent;border:1px solid #2a2a2a;color:#cfcfcf;border-radius:6px;padding:6px 12px;font-size:11px;cursor:pointer;'});
+    const errorStates=[
+      {icon:'⚠',color:t.red,bg:'rgba(224,108,117,0.05)',border:'rgba(224,108,117,0.22)',title:'Falha ao gerar resposta',code:'stream error',body:'A conexão com o provedor caiu no meio do turno. Sua mensagem foi preservada.',actions:[mkAct('Tentar de novo',true),mkAct('Descartar')]},
+      {icon:'◌',color:t.yellow,bg:'rgba(230,192,123,0.05)',border:'rgba(230,192,123,0.22)',title:'Backend offline',code:'ECONNREFUSED',body:'Sem resposta de 127.0.0.1:4096. Verifique se o servidor opencode está rodando.',actions:[mkAct('Reconectar',true)]},
+      {icon:'⊘',color:t.accent,bg:'rgba(157,124,216,0.05)',border:'rgba(157,124,216,0.22)',title:'Sessão ocupada',code:'409',body:'Um turno já está em execução nesta sessão. Aguarde terminar ou interrompa.',actions:[mkAct('Interromper',true),mkAct('Aguardar')]},
+      {icon:'↯',color:t.blue,bg:'rgba(90,156,248,0.05)',border:'rgba(90,156,248,0.22)',title:'Stream de eventos perdido',code:'SSE',body:'A conexão de eventos ao vivo (/api/event) reconectou. O estado foi ressincronizado.',actions:[mkAct('OK')]},
+    ];
+
+    // stubbed
+    const stubbedFeatures=[
+      {name:'session.share',note:'links públicos de conversa',dot:t.red,status:'501',statusColor:t.red},
+      {name:'mcp.*',note:'rmcp não portado — servers MCP',dot:t.red,status:'404',statusColor:t.red},
+      {name:'integration.*',note:'github / gitlab / slack adapters',dot:t.yellow,status:'400',statusColor:t.yellow},
+      {name:'plugin.*',note:'sem API (nem no TS) + host JS',dot:'#5a5a5a',status:'n/d',statusColor:'#7a7a7a'},
+    ];
+
+    return {
+      navGroups,
+      sceneTitle:cur.title, sceneTag:cur.tag, sceneApi:cur.api, sceneDesc:cur.desc,
+      sceneTagStyle:`font-size:9px;letter-spacing:0.4px;text-transform:uppercase;color:${cur.tagColor};border:1px solid ${cur.tagColor}55;border-radius:5px;padding:2px 7px;`,
+      noteStyle, noteText:cur.note,
+      isPermission:s.scene==='permission', isQuestion:s.scene==='question', isTerminal:s.scene==='terminal',
+      isDiff:s.scene==='diff', isOnboarding:s.scene==='onboarding', isModelSel:s.scene==='modelsel',
+      isEmpty:s.scene==='empty', isError:s.scene==='error', isUnavailable:s.scene==='unavailable',
+      diffLines, onboardProviders, modelOptions, emptyCards, errorStates, stubbedFeatures,
+    };
+  }
+}
+</script>
+</body>
+</html>

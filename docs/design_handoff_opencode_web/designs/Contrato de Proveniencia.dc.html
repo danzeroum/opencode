@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{background:#0a0a0a;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-font-smoothing:antialiased;}
+  ::selection{background:rgba(250,178,131,0.28);}
+  *::-webkit-scrollbar{width:10px;height:10px;}
+  *::-webkit-scrollbar-thumb{background:#262626;border-radius:5px;border:2px solid #0a0a0a;}
+  *::-webkit-scrollbar-track{background:transparent;}
+  button{font-family:inherit;}button:focus{outline:none;}
+</style>
+</helmet>
+<div style="position:fixed;inset:0;display:flex;flex-direction:column;background:#0a0a0a;color:#e8e8e8;font-size:13px;line-height:1.5;overflow:hidden;">
+
+  <!-- header -->
+  <header style="flex:none;padding:16px 24px;border-bottom:1px solid #1a1a1a;background:#0c0c0c;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <svg width="16" height="20" viewBox="0 0 24 30"><path d="M18 24H6V12H18V24Z" fill="#3a3a3a"></path><path d="M18 6H6V24H18V6ZM24 30H0V0H24V30Z" fill="#fab283"></path></svg>
+      <span style="font-weight:600;">opencode</span>
+      <span style="color:#3a3a3a;">/</span><span style="color:#9a9a9a;font-size:12px;">Contrato de proveniência</span>
+      <span style="font-size:9px;color:#9d7cd8;border:1px solid rgba(157,124,216,0.4);border-radius:4px;padding:1px 6px;">§5.10 · design ↔ backend</span>
+      <div style="flex:1;"></div>
+      <span style="font-size:10.5px;color:#7a7a7a;">o shape que <span style="color:#cfcfcf;">config.resolve</span> retorna ⇄ como a UI renderiza</span>
+    </div>
+    <p style="margin:9px 0 0;font-size:11.5px;color:#8a8a8a;max-width:920px;line-height:1.6;">Cada campo de config é resolvido pela cascata dos 7 níveis (base→topo). O backend devolve o valor efetivo, a origem vencedora, o lock e a trilha completa; a UI deriva badge, destaque, riscado e cadeado <b>só</b> deste shape. Escolha um campo para ver o caso.</p>
+  </header>
+
+  <!-- field switcher -->
+  <div style="flex:none;display:flex;align-items:center;gap:8px;padding:12px 24px;border-bottom:1px solid #161616;background:#090909;overflow-x:auto;">
+    <span style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;flex:none;margin-right:4px;">Casos</span>
+    <sc-for list="{{ cases }}" as="c" hint-placeholder-count="5">
+      <button onClick="{{ c.onClick }}" style="{{ c.style }}">
+        <span style="font-weight:600;">{{ c.key }}</span>
+        <span style="opacity:0.65;font-size:10px;"> · {{ c.label }}</span>
+      </button>
+    </sc-for>
+  </div>
+
+  <!-- split: UI render | data shape -->
+  <div style="flex:1;min-height:0;display:flex;">
+
+    <!-- LEFT: how the UI renders -->
+    <div style="flex:1;min-width:0;border-right:1px solid #1a1a1a;overflow-y:auto;padding:22px 24px;">
+      <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:14px;">A · como a UI renderiza</div>
+
+      <!-- config-row rendering -->
+      <div style="border:1px solid #1f1f1f;border-radius:10px;background:#0f0f0f;padding:16px 18px;margin-bottom:18px;">
+        <div style="font-size:10px;color:#7a7a7a;margin-bottom:11px;">Linha em <b style="color:#9a9a9a;">Config geral</b> / <b style="color:#9a9a9a;">Dashboard</b></div>
+        <div style="display:flex;align-items:center;gap:16px;padding:13px 14px;border-radius:9px;border:1px solid #1e1e1e;background:#0c0c0c;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;color:#dcdcdc;font-weight:500;">{{ fKey }}</div>
+            <div style="font-size:10.5px;color:#7a7a7a;margin-top:3px;">{{ fHint }}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex:none;">
+            <span style="width:8px;height:8px;border-radius:2px;background:{{ srcColor }};"></span>
+            <span style="font-size:9.5px;font-weight:600;letter-spacing:0.4px;color:{{ srcColor }};">{{ srcCode }}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;flex:none;width:190px;justify-content:flex-end;">
+            <span style="font-size:12.5px;color:{{ valColor }};border:1px solid #242424;border-radius:6px;padding:6px 12px;background:#0c0c0c;white-space:nowrap;">{{ fEffective }}</span>
+            <sc-if value="{{ fLocked }}" hint-placeholder-val="{{ false }}"><span title="read-only — nível protegido" style="color:#e06c75;font-size:13px;flex:none;">🔒</span></sc-if>
+          </div>
+        </div>
+        <div style="margin-top:11px;display:flex;align-items:center;gap:8px;font-size:10.5px;color:#7a7a7a;">
+          <span>regra de render →</span>
+          <span style="color:{{ srcColor }};">badge = <b>source</b></span><span style="color:#3a3a3a;">·</span>
+          <span style="color:#9a9a9a;">valor = <b>effective</b></span><span style="color:#3a3a3a;">·</span>
+          <span style="color:{{ fLocked ? '#e06c75' : '#7a7a7a' }};">🔒 = <b>locked</b></span>
+        </div>
+      </div>
+
+      <!-- cascade trail rendering -->
+      <div style="border:1px solid #1f1f1f;border-radius:10px;background:#0f0f0f;padding:16px 18px;">
+        <div style="font-size:10px;color:#7a7a7a;margin-bottom:4px;">Trilha de cascata (popover / Dashboard) — <b style="color:#9a9a9a;">trail[]</b> base→topo</div>
+        <div style="font-size:10px;color:#6a6a6a;margin-bottom:14px;">winner = destaque verde · set:true sobrescrito = riscado · set:false = "não definido"</div>
+        <sc-for list="{{ trail }}" as="r" hint-placeholder-count="7">
+          <div style="display:flex;align-items:center;gap:0;">
+            <div style="display:flex;flex-direction:column;align-items:center;width:26px;flex:none;">
+              <div style="width:1px;height:9px;background:{{ r.lineTop }};"></div>
+              <span style="width:12px;height:12px;border-radius:3px;background:{{ r.color }};border:2px solid #0f0f0f;box-shadow:0 0 0 1px {{ r.color }};"></span>
+              <div style="width:1px;height:9px;background:{{ r.lineBottom }};"></div>
+            </div>
+            <div style="{{ r.cardStyle }}">
+              <span style="font-size:9px;font-weight:600;letter-spacing:0.4px;color:{{ r.color }};width:62px;flex:none;">{{ r.code }}</span>
+              <span style="font-size:11px;color:#9a9a9a;width:118px;flex:none;">{{ r.path }}</span>
+              <span style="font-size:11.5px;flex:1;color:{{ r.valColor }};{{ r.strike }}">{{ r.value }}</span>
+              <sc-if value="{{ r.locked }}" hint-placeholder-val="{{ false }}"><span style="font-size:10px;color:#7a6a4a;flex:none;">🔒</span></sc-if>
+              <span style="font-size:9.5px;color:{{ r.tagColor }};flex:none;width:96px;text-align:right;">{{ r.tag }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+
+      <!-- write target -->
+      <div style="margin-top:18px;border:1px solid #1f1f1f;border-radius:10px;background:#0f0f0f;padding:16px 18px;">
+        <div style="font-size:10px;color:#7a7a7a;margin-bottom:12px;">Ao <b style="color:#9a9a9a;">editar</b> este campo na UI</div>
+        <sc-if value="{{ writable }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;align-items:center;gap:11px;">
+            <span style="font-size:11.5px;color:#9a9a9a;">grava no nível</span>
+            <span style="display:flex;align-items:center;gap:6px;border:1px solid #242424;border-radius:7px;padding:6px 11px;background:#0c0c0c;">
+              <span style="width:8px;height:8px;border-radius:2px;background:{{ writeColor }};"></span>
+              <span style="font-size:11px;font-weight:600;color:{{ writeColor }};">{{ writeCode }}</span>
+              <span style="color:#6a6a6a;">▾</span>
+            </span>
+            <span style="font-size:10.5px;color:#7a7a7a;">→ <span style="color:#cfcfcf;">config.update(key, value, target)</span></span>
+          </div>
+          <div style="margin-top:10px;font-size:10.5px;color:#6a6a6a;">o usuário pode trocar o nível-destino (project ↔ global) quando não-locked</div>
+        </sc-if>
+        <sc-if value="{{ writable }}" hint-placeholder-val="{{ false }}"></sc-if>
+        <sc-if value="{{ readonly }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;background:rgba(224,108,117,0.06);border:1px solid rgba(224,108,117,0.22);">
+            <span style="color:#e06c75;">🔒</span>
+            <span style="font-size:11px;color:#e0a0a5;">campo somente-leitura — vencedor é nível protegido ({{ srcCode }}). Edição desabilitada; <span style="color:#cfcfcf;">config.update</span> retornaria <b>409</b>.</span>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+
+    <!-- RIGHT: the data shape -->
+    <div style="width:440px;flex:none;overflow-y:auto;padding:22px 22px;background:#080808;">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px;">
+        <span style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;">B · resposta do backend</span>
+        <div style="flex:1;"></div>
+        <span style="font-size:9.5px;color:#7fb069;border:1px solid rgba(127,176,105,0.3);border-radius:4px;padding:1px 7px;">GET config.resolve?key={{ fKey }}</span>
+      </div>
+      <div style="border:1px solid #1c1c1c;border-radius:10px;background:#0b0b0b;overflow:hidden;">
+        <div style="display:flex;align-items:center;gap:7px;padding:9px 13px;border-bottom:1px solid #161616;background:#0c0c0c;">
+          <span style="width:9px;height:9px;border-radius:50%;background:#e06c75;"></span>
+          <span style="width:9px;height:9px;border-radius:50%;background:#e6c07b;"></span>
+          <span style="width:9px;height:9px;border-radius:50%;background:#7fb069;"></span>
+          <span style="font-size:10px;color:#7a7a7a;margin-left:6px;">resolved.json</span>
+        </div>
+        <div style="padding:15px 16px;">
+          <div>{{ jsonEl }}</div>
+        </div>
+      </div>
+
+      <!-- field legend -->
+      <div style="margin-top:16px;border:1px solid #1c1c1c;border-radius:10px;background:#0b0b0b;padding:14px 16px;">
+        <div style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;margin-bottom:11px;">Campos do shape</div>
+        <div style="display:flex;flex-direction:column;gap:9px;">
+          <sc-for list="{{ schema }}" as="f" hint-placeholder-count="6">
+            <div style="display:flex;gap:11px;align-items:baseline;">
+              <span style="font-size:11px;color:{{ f.color }};white-space:nowrap;flex:none;width:104px;">{{ f.name }}</span>
+              <span style="font-size:10.5px;color:#8a8a8a;line-height:1.55;">{{ f.desc }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- footer: the 7 levels reference -->
+  <div style="flex:none;display:flex;align-items:center;gap:0;padding:11px 24px;border-top:1px solid #1a1a1a;background:#0c0c0c;overflow-x:auto;">
+    <span style="font-size:9.5px;letter-spacing:0.8px;color:#6a6a6a;text-transform:uppercase;flex:none;margin-right:14px;">7 níveis · base→topo</span>
+    <sc-for list="{{ levelsRef }}" as="l" hint-placeholder-count="7">
+      <div style="display:flex;align-items:center;gap:6px;flex:none;margin-right:7px;">
+        <span style="width:8px;height:8px;border-radius:2px;background:{{ l.color }};"></span>
+        <span style="font-size:9.5px;font-weight:600;color:{{ l.color }};">{{ l.code }}</span>
+        <sc-if value="{{ l.locked }}" hint-placeholder-val="{{ false }}"><span style="font-size:9px;">🔒</span></sc-if>
+        <sc-if value="{{ l.arrow }}" hint-placeholder-val="{{ true }}"><span style="color:#333;margin-left:5px;">→</span></sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { case:'model' };
+  T(){ return { primary:'#fab283', accent:'#9d7cd8', blue:'#5a9cf8', green:'#7fb069', red:'#e06c75', yellow:'#e6c07b', orange:'#e09a4b', brown:'#ac8e68', dim:'#7a7a7a', faint:'#5a5a5a' }; }
+
+  levels(){ const t=this.T(); return [
+    {code:'REMOTE',  path:'.well-known/opencode', color:t.blue,   locked:true},
+    {code:'GLOBAL',  path:'~/.config/opencode',   color:t.yellow, locked:false},
+    {code:'CUSTOM',  path:'OPENCODE_CONFIG',      color:t.orange, locked:false},
+    {code:'PROJECT', path:'opencode.json',        color:t.green,  locked:false},
+    {code:'.OPENCODE',path:'.opencode/',          color:t.accent, locked:false},
+    {code:'INLINE',  path:'…CONFIG_CONTENT',      color:t.brown,  locked:true},
+    {code:'MANAGED', path:'/etc/opencode · MDM',  color:t.red,    locked:true},
+  ]; }
+
+  go=(k)=>()=>this.setState({case:k});
+
+  // each case: per-level value (null = not set), the hint, write target
+  cases(){ return {
+    model:{ key:'model', label:'vencedor no meio', hint:'modelo principal dos agentes primary', writeTarget:3,
+      vals:['claude-3-5-sonnet','claude-sonnet-4-5',null,'claude-sonnet-4-5',null,null,null] },
+    theme:{ key:'theme', label:'global vence', hint:'tema da interface (38 disponíveis)', writeTarget:1,
+      vals:[null,'argila',null,null,null,null,null] },
+    small_model:{ key:'small_model', label:'não definido', hint:'modelo leve p/ títulos e tarefas auxiliares', writeTarget:3,
+      vals:[null,null,null,null,null,null,null] },
+    autoupdate:{ key:'autoupdate', label:'managed · 🔒', hint:'atualização automática do binário', writeTarget:-1,
+      vals:[null,'true',null,'false',null,null,'false'] },
+    permission:{ key:'permission.bash', label:'objeto mesclado', hint:'política bash — objeto merge entre níveis', writeTarget:3, merged:true,
+      vals:['ask',null,null,'allow',null,null,null] },
+  }; }
+
+  // JSON syntax-highlighted element
+  jsonNode(obj){ const t=this.T(); const key=0; let k=0;
+    const col=(s,c)=>React.createElement('span',{key:k++,style:{color:c}},s);
+    const line=(indent,children)=>React.createElement('div',{key:k++,style:{paddingLeft:(indent*14)+'px',whiteSpace:'pre'}},children);
+    const L=[];
+    L.push(line(0,[col('{','#7a7a7a')]));
+    L.push(line(1,[col('"key"','#5a8a4a'),col(': ','#7a7a7a'),col('"'+obj.key+'"','#fab283'),col(',','#7a7a7a')]));
+    L.push(line(1,[col('"effective"','#5a8a4a'),col(': ','#7a7a7a'),obj.effective===null?col('null','#e06c75'):col(JSON.stringify(obj.effective),'#9ece6a'),col(',','#7a7a7a')]));
+    L.push(line(1,[col('"source"','#5a8a4a'),col(': ','#7a7a7a'),obj.source===null?col('null','#e06c75'):col('"'+obj.source+'"','#bb9af7'),col(',','#7a7a7a')]));
+    L.push(line(1,[col('"locked"','#5a8a4a'),col(': ','#7a7a7a'),col(String(obj.locked),'#5a9cf8'),col(',','#7a7a7a')]));
+    L.push(line(1,[col('"trail"','#5a8a4a'),col(': [','#7a7a7a')]));
+    obj.trail.forEach((r,i)=>{
+      const parts=[col('{ ','#7a7a7a'),
+        col('"level"','#5a8a4a'),col(': ','#7a7a7a'),col('"'+r.level+'"','#bb9af7'),col(', ','#7a7a7a'),
+        col('"value"','#5a8a4a'),col(': ','#7a7a7a'),r.value===null?col('null','#e06c75'):col(JSON.stringify(r.value),'#9ece6a'),col(', ','#7a7a7a'),
+        col('"set"','#5a8a4a'),col(': ','#7a7a7a'),col(String(r.set),'#5a9cf8')];
+      if(r.winner){ parts.push(col(', ','#7a7a7a'),col('"winner"','#5a8a4a'),col(': ','#7a7a7a'),col('true','#7fb069')); }
+      parts.push(col(' }'+(i<obj.trail.length-1?',':''),'#7a7a7a'));
+      L.push(line(2,parts));
+    });
+    L.push(line(1,[col(']','#7a7a7a')]));
+    L.push(line(0,[col('}','#7a7a7a')]));
+    return React.createElement('div',{style:{fontSize:'11.5px',lineHeight:1.7,fontFamily:'inherit'}},L);
+  }
+
+  renderVals(){
+    const t=this.T(), s=this.state, lv=this.levels(), cs=this.cases(), c=cs[s.case];
+    const vals=c.vals;
+    // winner = highest index with a value
+    let winnerIdx=-1; for(let i=vals.length-1;i>=0;i--){ if(vals[i]!==null){ winnerIdx=i; break; } }
+    const winner=winnerIdx>=0?lv[winnerIdx]:null;
+    const locked=winner?winner.locked:false;
+
+    const cases=Object.keys(cs).map(k=>{ const sel=s.case===k; return { key:cs[k].key, label:cs[k].label, onClick:this.go(k),
+      style:`display:flex;align-items:center;gap:0;padding:6px 11px;border-radius:7px;cursor:pointer;font-size:11.5px;flex:none;white-space:nowrap;border:1px solid ${sel?'rgba(250,178,131,0.5)':'#222'};background:${sel?'rgba(250,178,131,0.07)':'#0e0e0e'};color:${sel?'#fab283':'#9a9a9a'};` }; });
+
+    // trail UI
+    const trail=lv.map((L,i)=>{ const val=vals[i]; const isSet=val!==null; const isWinner=i===winnerIdx;
+      const overridden=isSet&&!isWinner;
+      return { code:L.code, path:L.path, color:L.color, locked:L.locked,
+        value:isSet?val:'—',
+        valColor:isWinner?'#eee':isSet?t.dim:t.faint,
+        strike:overridden?'text-decoration:line-through;text-decoration-color:#555;':'',
+        tag:isWinner?'✓ efetivo':overridden?'sobrescrito':L.locked&&!isSet?'protegido':'não definido',
+        tagColor:isWinner?t.green:overridden?t.dim:t.faint,
+        lineTop:i===0?'transparent':'#2a2a2a', lineBottom:i===lv.length-1?'transparent':'#2a2a2a',
+        cardStyle:`flex:1;display:flex;align-items:center;gap:13px;margin:2px 0;padding:8px 12px;border-radius:7px;border:1px solid ${isWinner?'rgba(127,176,105,0.35)':'#1c1c1c'};background:${isWinner?'rgba(127,176,105,0.06)':'#0c0c0c'};`,
+      };
+    });
+
+    // json object
+    const trailObj=lv.map((L,i)=>({ level:L.code.toLowerCase().replace('.',''), value:vals[i], set:vals[i]!==null, winner:i===winnerIdx }));
+    const jsonObj={ key:c.key, effective:winner?vals[winnerIdx]:null, source:winner?winner.code.toLowerCase().replace('.',''):null, locked, trail:trailObj };
+
+    const wt=c.writeTarget;
+    const writeColor=wt>=0?lv[wt].color:t.red;
+
+    const schema=[
+      {name:'key', color:t.primary, desc:'caminho pontilhado do campo (ex.: model, permission.bash)'},
+      {name:'effective', color:t.green, desc:'valor que vence a cascata — o que o engine usa. null se nenhum nível define'},
+      {name:'source', color:t.accent, desc:'nível vencedor (enum dos 7). null quando não definido em lugar nenhum'},
+      {name:'locked', color:t.blue, desc:'true se a origem é nível protegido (remote/inline/managed) → UI desabilita edição'},
+      {name:'trail[]', color:t.dim, desc:'todos os 7 níveis base→topo: { level, value, set, winner? }'},
+      {name:'trail[].set', color:t.blue, desc:'o nível define o campo? distingue "valor —" de "não definido"'},
+    ];
+
+    const levelsRef=lv.map((L,i)=>({ code:L.code, color:L.color, locked:L.locked, arrow:i<lv.length-1 }));
+
+    return {
+      cases, fKey:c.key, fHint:c.hint,
+      fEffective:winner?vals[winnerIdx]:'(não definido)',
+      srcCode:winner?winner.code:'—', srcColor:winner?winner.color:t.faint,
+      valColor:winner?'#dcdcdc':t.faint, fLocked:locked,
+      trail,
+      writable:!locked, readonly:locked,
+      writeCode:wt>=0?lv[wt].code:'—', writeColor,
+      jsonEl:this.jsonNode(jsonObj), schema, levelsRef,
+    };
+  }
+}
+</script>
+</body>
+</html>

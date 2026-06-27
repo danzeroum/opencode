@@ -3,6 +3,8 @@
 > Projeto: **Danzeroum OpenCode** — fork de `github.com/danzeroum/opencode` (branch `rust-migration`).
 > Console web que dá interface gráfica ao backend local do OpenCode (o engine que hoje roda como TUI/servidor em `127.0.0.1:4096`).
 
+> 👉 **Vai implementar?** Comece pelo **`IMPLEMENTATION.md`** — plano faseado para o Claude Code, com a matriz de gaps (design × `packages/app` × backend Rust), ordem de execução e paths reais. Este README é a referência de design (visual, tokens, telas).
+
 ---
 
 ## Overview
@@ -309,6 +311,8 @@ Cada tema tem o conjunto completo: `bg, surf, elev, bd, ink, sec, mut, faint, pr
 
 Em `designs/` (referências — abrir no navegador para interagir):
 - `OpenCode Web.dc.html` — Workspace + Admin completo (dashboard, geral, agentes+editor, comandos+editor/playground, provedores, políticas, servidor, tui, snapshots, compartilhados, cascata de precedência).
+- `Estados de Runtime.dc.html` — §5 do relatório de gaps: permissão, pergunta, terminal, diff, onboarding, seletor de modelo, empty states, erro/conexão, indisponível. **Foco da Fase 1.**
+- `Contrato de Proveniencia.dc.html` — §5.10: spec visual + JSON de `config.resolve` (cascata dos 7 níveis). Contrato design ↔ backend.
 - `Plugins e Integracoes.dc.html` — Plugins/MCP/Integrações + pipeline de hooks + drawer de detalhe + fluxo de install.
 - `Configuracoes Aparencia.dc.html` — seletor de tema com preview ao vivo (13 temas, Argila default).
 - `Paletas.dc.html` — explorador das 4 famílias de paleta em mini-mockups (referência de tokens).
