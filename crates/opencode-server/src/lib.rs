@@ -9,6 +9,7 @@
 
 pub mod proxy;
 pub mod pty;
+pub mod web;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8721,9 +8722,32 @@ pub fn build_router(state: ServerState) -> Router {
     }
 
     router
-        .fallback(proxy::proxy_handler)
+        .fallback(web_or_proxy_fallback)
         .layer(cors_layer())
         .with_state(state)
+}
+
+/// Router fallback: serve the web frontend (`OPENCODE_WEB_DIR`) for unmatched requests when
+/// configured — an exact asset, else the SPA `index.html` for non-API GETs — otherwise fall through to
+/// the strangler proxy (hybrid mode) or its error (Rust-only). This makes the Rust binary the host of
+/// the web SPA (default-#3), mirroring the TS server's embedded-UI serving.
+async fn web_or_proxy_fallback(
+    State(state): State<ServerState>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    if let Some(dir) = web::web_dir() {
+        let path = req.uri().path().to_string();
+        let is_get = req.method() == axum::http::Method::GET;
+        if let Some(resp) = web::serve_asset(dir, &path).await {
+            return resp;
+        }
+        if is_get && !path.starts_with("/api/") {
+            if let Some(resp) = web::serve_index(dir).await {
+                return resp;
+            }
+        }
+    }
+    proxy::proxy_handler(State(state), req).await
 }
 
 /// CORS for the web frontend (`packages/app`, a browser SPA that calls the API via `@opencode-ai/sdk`).
