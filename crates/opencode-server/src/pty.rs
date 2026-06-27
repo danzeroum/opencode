@@ -634,8 +634,9 @@ fn is_allowed_request_origin(origin: Option<&str>, host: Option<&str>) -> bool {
     is_allowed_cors_origin(origin)
 }
 
-/// Port of `isAllowedCorsOrigin` (the default, no configured allow-list).
-fn is_allowed_cors_origin(origin: &str) -> bool {
+/// Port of `isAllowedCorsOrigin` (the default, no configured allow-list). Shared with the server's
+/// CORS layer so the web frontend's allowed-origin rules match the (now-deleted-soon) `cors.ts`.
+pub(crate) fn is_allowed_cors_origin(origin: &str) -> bool {
     if origin.is_empty() {
         return true;
     }
