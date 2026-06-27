@@ -978,6 +978,8 @@ export const dict = {
   "settings.agents.description": "Agent settings will be configurable here.",
   "settings.commands.title": "Commands",
   "settings.commands.description": "Command settings will be configurable here.",
+  "settings.commands.empty": "No custom commands",
+  "settings.commands.deleted": "Deleted command {name}",
   "settings.mcp.title": "MCP",
   "settings.mcp.description": "MCP settings will be configurable here.",
 
