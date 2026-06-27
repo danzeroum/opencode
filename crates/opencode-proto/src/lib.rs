@@ -2638,6 +2638,38 @@ pub struct CommandListResponse {
     pub data: Vec<CommandV2Info>,
 }
 
+/// Request body for `v2.command.set` (PUT /api/command/{commandID}): the writable command fields,
+/// persisted to the project's `.opencode/command/{commandID}.md` (frontmatter + body). `template` is
+/// the markdown body (the prompt template); `model` reuses [`ModelRef`] (rendered back to the
+/// `provider/model` string form in frontmatter).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct CommandWriteRequest {
+    /// Prompt template (the markdown body).
+    pub template: String,
+    /// Optional description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional agent the command runs as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Optional model override (`{ id, providerID, variant? }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Whether the command runs as a subtask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtask: Option<bool>,
+}
+
+/// 200 body of `v2.command.set` (PUT /api/command/{commandID}): the `Location.response` wrapper
+/// `{ location, data }` around the written command (re-read from disk after the write).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct CommandGetResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The written command.
+    pub data: CommandV2Info,
+}
+
 /// Where a reference comes from (`ReferenceInfo.source`) — the golden union of `ReferenceLocalSource`
 /// (`{ type: "local", path, description?, hidden? }`) and `ReferenceGitSource` (`{ type: "git",
 /// repository, branch?, description?, hidden? }`), internally tagged on `type`.
@@ -2786,6 +2818,45 @@ pub struct AgentListResponse {
     pub location: LocationInfo,
     /// The agents.
     pub data: Vec<AgentV2Info>,
+}
+
+/// Request body for `v2.agent.set` (PUT /api/agent/{agentID}): the writable agent fields, persisted to
+/// the project's `.opencode/agent/{agentID}.md` (frontmatter + body). `model` reuses [`ModelRef`];
+/// `system` is the markdown body (the system prompt). All fields are optional — a bare `{}` writes an
+/// empty agent. The computed `request`/`permissions` and the path-param `id` aren't writable here.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AgentWriteRequest {
+    /// Optional model override (`{ id, providerID, variant? }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Optional system prompt (the markdown body).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// Optional description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional operating mode (`subagent` | `primary` | `all`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<AgentMode>,
+    /// Whether the agent is hidden from pickers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// Optional display color (hex or named).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Optional step limit (> 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<i64>,
+}
+
+/// 200 body of `v2.agent.set` (PUT /api/agent/{agentID}): the `Location.response` wrapper
+/// `{ location, data }` around the written agent (re-read from disk after the write).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AgentGetResponse {
+    /// The resolved request location.
+    pub location: LocationInfo,
+    /// The written agent.
+    pub data: AgentV2Info,
 }
 
 /// What triggered a permission request (`PermissionV2Request.source`): `{ type, messageID, callID }`.
