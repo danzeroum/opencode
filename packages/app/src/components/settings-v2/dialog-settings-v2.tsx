@@ -12,6 +12,7 @@ import "./settings-v2.css"
 import { SettingsServersV2 } from "./servers"
 import { SettingsConfigSourcesV2 } from "./config-sources"
 import { SettingsCommandsV2 } from "./commands"
+import { SettingsAgentsV2 } from "./agents"
 
 export const DialogSettings: Component = () => {
   const language = useLanguage()
@@ -61,6 +62,10 @@ export const DialogSettings: Component = () => {
                       <Icon name="bullet-list" />
                       {language.t("settings.commands.title")}
                     </TabsV2.Trigger>
+                    <TabsV2.Trigger value="agents">
+                      <Icon name="brain" />
+                      {language.t("settings.agents.title")}
+                    </TabsV2.Trigger>
                   </div>
                 </div>
               </div>
@@ -91,6 +96,9 @@ export const DialogSettings: Component = () => {
         </TabsV2.Content>
         <TabsV2.Content value="commands" class="settings-v2-panel">
           <SettingsCommandsV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="agents" class="settings-v2-panel">
+          <SettingsAgentsV2 />
         </TabsV2.Content>
       </TabsV2>
     </Dialog>
