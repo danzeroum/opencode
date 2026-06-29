@@ -13,6 +13,7 @@ import { SettingsServersV2 } from "./servers"
 import { SettingsConfigSourcesV2 } from "./config-sources"
 import { SettingsCommandsV2 } from "./commands"
 import { SettingsAgentsV2 } from "./agents"
+import { SettingsOverviewV2 } from "./overview"
 
 export const DialogSettings: Component = () => {
   const language = useLanguage()
@@ -42,6 +43,10 @@ export const DialogSettings: Component = () => {
                 <div class="flex flex-col gap-1.5">
                   <TabsV2.SectionTitle>{language.t("settings.section.server")}</TabsV2.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
+                    <TabsV2.Trigger value="overview">
+                      <Icon name="dot-grid" />
+                      {language.t("settings.overview.title")}
+                    </TabsV2.Trigger>
                     <TabsV2.Trigger value="servers">
                       <Icon name="server" />
                       {language.t("status.popover.tab.servers")}
@@ -76,6 +81,9 @@ export const DialogSettings: Component = () => {
             </div>
           </div>
         </TabsV2.List>
+        <TabsV2.Content value="overview" class="settings-v2-panel">
+          <SettingsOverviewV2 />
+        </TabsV2.Content>
         <TabsV2.Content value="general" class="settings-v2-panel">
           <SettingsGeneralV2 />
         </TabsV2.Content>
