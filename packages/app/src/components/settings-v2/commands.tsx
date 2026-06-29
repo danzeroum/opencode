@@ -1,10 +1,12 @@
 import { Component, For, Show, createResource, createSignal } from "solid-js"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { Tag } from "@opencode-ai/ui/v2/badge-v2"
+import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { showToast } from "@/utils/toast"
 import { useLanguage } from "@/context/language"
 import { useServerSDK } from "@/context/server-sdk"
 import { SettingsListV2 } from "./parts/list"
+import { DialogCommandEdit } from "./dialog-command-edit"
 import "./settings-v2.css"
 
 /**
@@ -15,6 +17,7 @@ import "./settings-v2.css"
 export const SettingsCommandsV2: Component = () => {
   const language = useLanguage()
   const serverSdk = useServerSDK()
+  const dialog = useDialog()
   const [deleting, setDeleting] = createSignal<string | undefined>(undefined)
   const [commands, { refetch }] = createResource(async () => {
     const res = await serverSdk.client.v2.command.list()
@@ -71,20 +74,40 @@ export const SettingsCommandsV2: Component = () => {
                           </Show>
                         </div>
                       </div>
-                      <ButtonV2
-                        size="normal"
-                        variant="ghost-muted"
-                        disabled={deleting() === cmd.name}
-                        onClick={() => void remove(cmd.name)}
-                      >
-                        {language.t("common.delete")}
-                      </ButtonV2>
+                      <div class="flex items-center gap-2">
+                        <ButtonV2
+                          size="normal"
+                          variant="ghost-muted"
+                          onClick={() =>
+                            dialog.show(() => <DialogCommandEdit command={cmd} onSaved={() => void refetch()} />)
+                          }
+                        >
+                          {language.t("common.edit")}
+                        </ButtonV2>
+                        <ButtonV2
+                          size="normal"
+                          variant="ghost-muted"
+                          disabled={deleting() === cmd.name}
+                          onClick={() => void remove(cmd.name)}
+                        >
+                          {language.t("common.delete")}
+                        </ButtonV2>
+                      </div>
                     </div>
                   )}
                 </For>
               </Show>
             </Show>
           </SettingsListV2>
+          <ButtonV2
+            size="normal"
+            variant="neutral"
+            icon="plus"
+            class="mt-3"
+            onClick={() => dialog.show(() => <DialogCommandEdit onSaved={() => void refetch()} />)}
+          >
+            {language.t("settings.commands.new")}
+          </ButtonV2>
         </div>
       </div>
     </>
