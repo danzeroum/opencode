@@ -14,6 +14,7 @@ import { SettingsConfigSourcesV2 } from "./config-sources"
 import { SettingsCommandsV2 } from "./commands"
 import { SettingsAgentsV2 } from "./agents"
 import { SettingsOverviewV2 } from "./overview"
+import { SettingsPoliciesV2 } from "./policies"
 
 export const DialogSettings: Component = () => {
   const language = useLanguage()
@@ -71,6 +72,10 @@ export const DialogSettings: Component = () => {
                       <Icon name="brain" />
                       {language.t("settings.agents.title")}
                     </TabsV2.Trigger>
+                    <TabsV2.Trigger value="policies">
+                      <Icon name="circle-ban-sign" />
+                      {language.t("settings.policies.title")}
+                    </TabsV2.Trigger>
                   </div>
                 </div>
               </div>
@@ -107,6 +112,9 @@ export const DialogSettings: Component = () => {
         </TabsV2.Content>
         <TabsV2.Content value="agents" class="settings-v2-panel">
           <SettingsAgentsV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="policies" class="settings-v2-panel">
+          <SettingsPoliciesV2 />
         </TabsV2.Content>
       </TabsV2>
     </Dialog>
