@@ -354,6 +354,12 @@ import type {
   V2SessionWaitResponses,
   V2SkillListErrors,
   V2SkillListResponses,
+  V2SnapshotCreateErrors,
+  V2SnapshotCreateResponses,
+  V2SnapshotListErrors,
+  V2SnapshotListResponses,
+  V2SnapshotRestoreErrors,
+  V2SnapshotRestoreResponses,
   VcsApplyErrors,
   VcsApplyResponses,
   VcsDiffErrors,
@@ -417,6 +423,63 @@ class HeyApiRegistry<T> {
 
   set(value: T, key?: string): void {
     this.instances.set(key ?? this.defaultKey, value)
+  }
+}
+
+export class Snapshot extends HeyApiClient {
+  /**
+   * List snapshots
+   *
+   * List working-tree snapshots for the current repo.
+   */
+  public list<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<V2SnapshotListResponses, V2SnapshotListErrors, ThrowOnError>({
+      url: "/api/snapshot",
+      ...options,
+    })
+  }
+
+  /**
+   * Create snapshot
+   *
+   * Create a working-tree snapshot of the current repo.
+   */
+  public create<ThrowOnError extends boolean = false>(
+    parameters?: {
+      message?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "body", key: "message" }] }])
+    return (options?.client ?? this.client).post<V2SnapshotCreateResponses, V2SnapshotCreateErrors, ThrowOnError>({
+      url: "/api/snapshot",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Restore snapshot
+   *
+   * Restore the repo to a snapshot (requires a clean working tree).
+   */
+  public restore<ThrowOnError extends boolean = false>(
+    parameters: {
+      id: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "id" }] }])
+    return (options?.client ?? this.client).post<V2SnapshotRestoreResponses, V2SnapshotRestoreErrors, ThrowOnError>({
+      url: "/api/snapshot/{id}/restore",
+      ...options,
+      ...params,
+    })
   }
 }
 
@@ -1986,6 +2049,11 @@ export class ProjectCopy extends HeyApiClient {
 }
 
 export class V2 extends HeyApiClient {
+  private _snapshot?: Snapshot
+  get snapshot(): Snapshot {
+    return (this._snapshot ??= new Snapshot({ client: this.client }))
+  }
+
   private _provider?: Provider
   get provider(): Provider {
     return (this._provider ??= new Provider({ client: this.client }))
