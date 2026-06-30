@@ -4915,9 +4915,51 @@ async fn v2_permission_request_list(
     }))
 }
 
-/// `GET /api/permission/saved` — saved permission decisions (group `permission`). Matches the golden
-/// `v2.permission.saved.list`: 200 `{ data }` + 400/401. Saved rules will be read from the permission
-/// store once policy persistence lands; until then this is empty.
+/// Path to the saved-permissions store (`{config_dir}/permissions.json`), if a config dir is resolvable.
+fn saved_permissions_path() -> Option<std::path::PathBuf> {
+    config_dir().map(|d| d.join("permissions.json"))
+}
+
+/// Read the saved-permission rules from a given store path (empty if absent/unreadable).
+fn load_saved_permissions_at(path: &std::path::Path) -> Vec<opencode_proto::PermissionSavedInfo> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write the saved-permission rules to a given store path (pretty), creating parent dirs.
+fn write_saved_permissions_at(
+    path: &std::path::Path,
+    rules: &[opencode_proto::PermissionSavedInfo],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(rules).unwrap_or_else(|_| "[]".to_string()),
+    )
+}
+
+/// Read the saved-permission rules from the store (empty if absent/unreadable).
+fn load_saved_permissions() -> Vec<opencode_proto::PermissionSavedInfo> {
+    saved_permissions_path()
+        .map(|p| load_saved_permissions_at(&p))
+        .unwrap_or_default()
+}
+
+/// Write the saved-permission rules back to the store, creating the config dir if needed.
+fn write_saved_permissions(rules: &[opencode_proto::PermissionSavedInfo]) -> std::io::Result<()> {
+    let path = saved_permissions_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no config dir (HOME unset)")
+    })?;
+    write_saved_permissions_at(&path, rules)
+}
+
+/// `GET /api/permission/saved` — saved permission rules (group `permission`). Matches the golden
+/// `v2.permission.saved.list`: 200 `{ data }` + 400/401. Reads the file-backed store
+/// (`{config_dir}/permissions.json`); each rule carries its `projectID` so a client can filter.
 #[utoipa::path(
     get,
     path = "/api/permission/saved",
@@ -4933,12 +4975,49 @@ async fn v2_permission_request_list(
 async fn v2_permission_saved_list(
     State(_state): State<ServerState>,
 ) -> Json<opencode_proto::PermissionSavedListResponse> {
-    Json(opencode_proto::PermissionSavedListResponse { data: Vec::new() })
+    Json(opencode_proto::PermissionSavedListResponse {
+        data: load_saved_permissions(),
+    })
+}
+
+/// `POST /api/permission/saved` — create a saved permission rule (group `permission`). New native op:
+/// generates an `id`, persists `{ id, projectID, action, resource }` to the store, and returns it. 200
+/// `PermissionSavedInfo` + 400/401; a write failure is a 500.
+#[utoipa::path(
+    post,
+    path = "/api/permission/saved",
+    operation_id = "v2.permission.saved.create",
+    request_body = opencode_proto::PermissionSavedCreate,
+    responses(
+        (status = 200, description = "Created saved permission rule", body = opencode_proto::PermissionSavedInfo),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "permission"
+)]
+async fn v2_permission_saved_create(
+    State(_state): State<ServerState>,
+    Json(body): Json<opencode_proto::PermissionSavedCreate>,
+) -> Result<Json<opencode_proto::PermissionSavedInfo>, ApiError> {
+    let rule = opencode_proto::PermissionSavedInfo {
+        id: format!("prm_{}", ulid::Ulid::new().to_string().to_lowercase()),
+        project_id: body.project_id,
+        action: body.action,
+        resource: body.resource,
+    };
+    let mut rules = load_saved_permissions();
+    rules.push(rule.clone());
+    write_saved_permissions(&rules).map_err(|e| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))
+    })?;
+    Ok(Json(rule))
 }
 
 /// `DELETE /api/permission/saved/{id}` — remove a saved permission rule (group `permission`). Matches
-/// the golden `v2.permission.saved.remove`: 204, 400, 401. Saved rules aren't persisted natively yet
-/// (`v2.permission.saved.list` is empty), so this is an idempotent no-op 204.
+/// the golden `v2.permission.saved.remove`: 204, 400, 401. Removes the rule with the given id from the
+/// store; an unknown id is an idempotent no-op 204.
 #[utoipa::path(
     delete,
     path = "/api/permission/saved/{id}",
@@ -4952,9 +5031,19 @@ async fn v2_permission_saved_list(
     tag = "permission"
 )]
 async fn v2_permission_saved_remove(
-    axum::extract::Path(_id): axum::extract::Path<String>,
-) -> axum::http::StatusCode {
-    axum::http::StatusCode::NO_CONTENT
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let mut rules = load_saved_permissions();
+    let before = rules.len();
+    rules.retain(|r| r.id != id);
+    if rules.len() != before {
+        write_saved_permissions(&rules).map_err(|e| {
+            ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+                e.to_string()
+            )))
+        })?;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// `DELETE /api/credential/{credentialID}` — remove a stored credential (group `credential`). Matches
@@ -6075,6 +6164,7 @@ async fn v2_provider_test(
         v2_health_get,
         v2_permission_request_list,
         v2_permission_saved_list,
+        v2_permission_saved_create,
         v2_permission_saved_remove,
         v2_credential_remove,
         v2_credential_update,
@@ -8953,7 +9043,10 @@ pub fn build_router(state: ServerState) -> Router {
         router = router.route("/permission", get(permission_list));
         router = router.route("/permission/{requestID}/reply", post(permission_reply));
         router = router.route("/api/permission/request", get(v2_permission_request_list));
-        router = router.route("/api/permission/saved", get(v2_permission_saved_list));
+        router = router.route(
+            "/api/permission/saved",
+            get(v2_permission_saved_list).post(v2_permission_saved_create),
+        );
         router = router.route(
             "/api/permission/saved/{id}",
             axum::routing::delete(v2_permission_saved_remove),
@@ -12195,6 +12288,37 @@ mod tests {
             assert!(l["source"].is_string());
         }
         assert_eq!(levels[0]["config"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn saved_permissions_store_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        // Missing file → empty.
+        assert!(load_saved_permissions_at(&path).is_empty());
+        let rules = vec![
+            opencode_proto::PermissionSavedInfo {
+                id: "prm_1".into(),
+                project_id: "prj_1".into(),
+                action: "bash".into(),
+                resource: "git *".into(),
+            },
+            opencode_proto::PermissionSavedInfo {
+                id: "prm_2".into(),
+                project_id: "prj_1".into(),
+                action: "edit".into(),
+                resource: "src/**".into(),
+            },
+        ];
+        write_saved_permissions_at(&path, &rules).unwrap();
+        assert_eq!(load_saved_permissions_at(&path), rules);
+        // Remove-by-id semantics (what the delete handler does), persisted.
+        let mut after = load_saved_permissions_at(&path);
+        after.retain(|r| r.id != "prm_1");
+        write_saved_permissions_at(&path, &after).unwrap();
+        let loaded = load_saved_permissions_at(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "prm_2");
     }
 
     #[test]

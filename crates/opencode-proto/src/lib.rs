@@ -2981,6 +2981,19 @@ pub struct PermissionSavedListResponse {
     pub data: Vec<PermissionSavedInfo>,
 }
 
+/// Request body for `v2.permission.saved.create` (POST /api/permission/saved): the writable fields of a
+/// saved permission rule; the `id` is generated server-side.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PermissionSavedCreate {
+    /// The project the rule belongs to.
+    #[serde(rename = "projectID")]
+    pub project_id: String,
+    /// The action the rule governs (e.g. `bash`, `edit`).
+    pub action: String,
+    /// The resource the rule governs (e.g. a command pattern or path glob).
+    pub resource: String,
+}
+
 /// 200 body of `v2.session.permission.list` (GET /api/session/{sessionID}/permission): `{ data }` (no
 /// location) around the session's pending permission requests.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
