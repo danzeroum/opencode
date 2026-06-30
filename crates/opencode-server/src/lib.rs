@@ -8997,11 +8997,150 @@ async fn question_list(
     Json(Vec::new())
 }
 
+/// Probe a local (stdio) MCP server: spawn `command` and run the MCP `initialize` JSON-RPC handshake
+/// over its stdio. `Ok` on a valid `initialize` result, else an error string. The child is killed on
+/// drop, so no process lingers; non-mutating (no tools are invoked).
+async fn mcp_probe_local(
+    command: &[String],
+    cwd: Option<&str>,
+    env: &[(String, String)],
+) -> Result<(), String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut cmd = tokio::process::Command::new(&command[0]);
+    cmd.args(&command[1..]);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
+    let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "opencode", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    let probe = tokio::time::timeout(std::time::Duration::from_secs(8), async move {
+        let mut line = serde_json::to_string(&init).map_err(|e| e.to_string())?;
+        line.push('\n');
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stdin.flush().await.map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(stdout);
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            if reader
+                .read_line(&mut buf)
+                .await
+                .map_err(|e| e.to_string())?
+                == 0
+            {
+                return Err("server closed stdout before responding".to_string());
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(buf.trim()) else {
+                continue; // ignore non-JSON / log lines
+            };
+            if v.get("id").and_then(|i| i.as_i64()) == Some(1) {
+                if v.get("result").is_some() {
+                    return Ok(());
+                }
+                if let Some(err) = v.get("error") {
+                    return Err(format!("initialize error: {err}"));
+                }
+            }
+        }
+    })
+    .await;
+    let _ = child.start_kill();
+    probe.unwrap_or_else(|_| Err("timed out waiting for initialize response".to_string()))
+}
+
+/// The [`McpStatus`] of a single configured server (a `config.mcp` value): `disabled` when
+/// `enabled: false`; for `type: "local"`, probe over stdio (`connected`/`failed`). Remote (SSE/HTTP)
+/// transport is a follow-up, reported as `failed` so it's visible-but-honest rather than silently absent.
+async fn mcp_probe_status(def: serde_json::Value) -> opencode_proto::McpStatus {
+    if !def.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true) {
+        return opencode_proto::McpStatus::Disabled;
+    }
+    match def.get("type").and_then(|t| t.as_str()) {
+        Some("local") => {
+            let command: Vec<String> = def
+                .get("command")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if command.is_empty() {
+                return opencode_proto::McpStatus::Failed {
+                    error: "no command configured".to_string(),
+                };
+            }
+            let cwd = def.get("cwd").and_then(|c| c.as_str()).map(String::from);
+            let env: Vec<(String, String)> = def
+                .get("environment")
+                .and_then(|e| e.as_object())
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match mcp_probe_local(&command, cwd.as_deref(), &env).await {
+                Ok(()) => opencode_proto::McpStatus::Connected,
+                Err(error) => opencode_proto::McpStatus::Failed { error },
+            }
+        }
+        Some("remote") => opencode_proto::McpStatus::Failed {
+            error: "remote MCP transport not yet supported".to_string(),
+        },
+        _ => opencode_proto::McpStatus::Failed {
+            error: "invalid MCP server configuration".to_string(),
+        },
+    }
+}
+
+/// Build the `mcp.status` map by probing every server in `config.mcp` concurrently.
+async fn mcp_status_map() -> std::collections::HashMap<String, opencode_proto::McpStatus> {
+    let servers = resolved_config_value()
+        .get("mcp")
+        .and_then(|m| m.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut set = tokio::task::JoinSet::new();
+    for (name, def) in servers {
+        set.spawn(async move { (name, mcp_probe_status(def).await) });
+    }
+    let mut out = std::collections::HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((name, status)) = joined {
+            out.insert(name, status);
+        }
+    }
+    out
+}
+
 /// `GET /mcp` — status of all configured MCP servers (group `mcp`). Matches the golden `mcp.status`:
-/// 200 `{ [server]: MCPStatus }`, 400 `BadRequestError`. MCP connection status is live runtime state
-/// owned by the MCP host (Phase 3b, `rmcp`); until that host exists no server is connected, so this
-/// returns an empty map — consistent with `permission.list`/`question.list` being empty until the
-/// engine produces their state.
+/// 200 `{ [server]: MCPStatus }`, 400 `BadRequestError`. Reads `config.mcp` and probes each enabled
+/// `type: "local"` (stdio) server by spawning it and running the MCP `initialize` handshake — a valid
+/// handshake is `connected`, a spawn/handshake failure is `failed`, `enabled: false` is `disabled`.
+/// Remote (SSE/HTTP) transport and exposing the servers' tools to the runner are follow-ups.
 #[utoipa::path(
     get,
     path = "/mcp",
@@ -9019,7 +9158,7 @@ async fn question_list(
 async fn mcp_status(
     State(_state): State<ServerState>,
 ) -> Json<std::collections::HashMap<String, opencode_proto::McpStatus>> {
-    Json(std::collections::HashMap::new())
+    Json(mcp_status_map().await)
 }
 
 /// 404 responder for the MCP runtime routes — a contract-shaped `McpServerNotFoundError`.
@@ -11203,7 +11342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_status_is_empty_map_until_host_lands() {
+    async fn mcp_status_empty_without_configured_servers() {
         use tower::ServiceExt;
         let state = ServerState {
             ctx: AppContext::in_memory(),
@@ -11226,8 +11365,47 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        // No MCP host yet → an empty JSON object map (not an array).
+        // No servers in config → an empty JSON object map (not an array).
         assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn mcp_probe_local_connects_to_stdio_server() {
+        // A minimal stdio "MCP server": read the initialize request line, reply with a JSON-RPC result.
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "read req; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\"}}\\n'"
+                .to_string(),
+        ];
+        assert!(mcp_probe_local(&cmd, None, &[]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mcp_probe_status_connected_failed_disabled() {
+        use opencode_proto::McpStatus;
+        // enabled:false → disabled (no spawn).
+        let disabled =
+            serde_json::json!({ "type": "local", "command": ["true"], "enabled": false });
+        assert_eq!(mcp_probe_status(disabled).await, McpStatus::Disabled);
+        // unknown command → failed.
+        let bad = serde_json::json!({ "type": "local", "command": ["definitely-not-a-real-command-xyzzy"] });
+        assert!(matches!(
+            mcp_probe_status(bad).await,
+            McpStatus::Failed { .. }
+        ));
+        // a responsive stdio server → connected.
+        let ok = serde_json::json!({
+            "type": "local",
+            "command": ["sh", "-c", "read req; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'"]
+        });
+        assert_eq!(mcp_probe_status(ok).await, McpStatus::Connected);
+        // remote transport → failed (not yet supported), not silently dropped.
+        let remote = serde_json::json!({ "type": "remote", "url": "https://example.com/mcp" });
+        assert!(matches!(
+            mcp_probe_status(remote).await,
+            McpStatus::Failed { .. }
+        ));
     }
 
     #[tokio::test]
