@@ -990,6 +990,7 @@ export const dict = {
   "settings.policies.section.rules": "Rules",
   "settings.policies.field.action": "Action",
   "settings.policies.field.resource": "Resource",
+  "settings.appearance.title": "Appearance",
   "settings.section.extensions": "Extensions",
   "settings.extensions.title": "Extensions",
   "settings.extensions.mcp": "MCP servers",

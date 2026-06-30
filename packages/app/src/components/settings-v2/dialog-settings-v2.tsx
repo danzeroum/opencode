@@ -16,6 +16,7 @@ import { SettingsAgentsV2 } from "./agents"
 import { SettingsOverviewV2 } from "./overview"
 import { SettingsPoliciesV2 } from "./policies"
 import { SettingsExtensionsV2 } from "./extensions"
+import { SettingsAppearanceV2 } from "./appearance"
 
 export const DialogSettings: Component = () => {
   const language = useLanguage()
@@ -38,6 +39,10 @@ export const DialogSettings: Component = () => {
                     <TabsV2.Trigger value="shortcuts">
                       <Icon name="keyboard" />
                       {language.t("settings.tab.shortcuts")}
+                    </TabsV2.Trigger>
+                    <TabsV2.Trigger value="appearance">
+                      <Icon name="layout-left" />
+                      {language.t("settings.appearance.title")}
                     </TabsV2.Trigger>
                   </div>
                 </div>
@@ -105,6 +110,9 @@ export const DialogSettings: Component = () => {
         </TabsV2.Content>
         <TabsV2.Content value="shortcuts" class="settings-v2-panel">
           <SettingsKeybinds v2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="appearance" class="settings-v2-panel">
+          <SettingsAppearanceV2 />
         </TabsV2.Content>
         <TabsV2.Content value="servers" class="settings-v2-panel">
           <SettingsServersV2 />
