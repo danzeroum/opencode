@@ -15,6 +15,7 @@ import { SettingsCommandsV2 } from "./commands"
 import { SettingsAgentsV2 } from "./agents"
 import { SettingsOverviewV2 } from "./overview"
 import { SettingsPoliciesV2 } from "./policies"
+import { SettingsSnapshotsV2 } from "./snapshots"
 import { SettingsExtensionsV2 } from "./extensions"
 import { SettingsAppearanceV2 } from "./appearance"
 
@@ -82,6 +83,10 @@ export const DialogSettings: Component = () => {
                       <Icon name="circle-ban-sign" />
                       {language.t("settings.policies.title")}
                     </TabsV2.Trigger>
+                    <TabsV2.Trigger value="snapshots">
+                      <Icon name="archive" />
+                      {language.t("settings.snapshots.title")}
+                    </TabsV2.Trigger>
                   </div>
                 </div>
 
@@ -134,6 +139,9 @@ export const DialogSettings: Component = () => {
         </TabsV2.Content>
         <TabsV2.Content value="policies" class="settings-v2-panel">
           <SettingsPoliciesV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="snapshots" class="settings-v2-panel">
+          <SettingsSnapshotsV2 />
         </TabsV2.Content>
         <TabsV2.Content value="extensions" class="settings-v2-panel">
           <SettingsExtensionsV2 />

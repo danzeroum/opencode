@@ -5255,6 +5255,111 @@ export type BadRequestError = {
   }
 }
 
+export type V2SnapshotListData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/api/snapshot"
+}
+
+export type V2SnapshotListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2SnapshotListError = V2SnapshotListErrors[keyof V2SnapshotListErrors]
+
+export type V2SnapshotListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<{
+      id: string
+      root: string
+      sha: string
+      message: string
+      time: number
+    }>
+  }
+}
+
+export type V2SnapshotListResponse = V2SnapshotListResponses[keyof V2SnapshotListResponses]
+
+export type V2SnapshotCreateData = {
+  body?: {
+    message?: string
+  }
+  path?: never
+  query?: never
+  url: "/api/snapshot"
+}
+
+export type V2SnapshotCreateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2SnapshotCreateError = V2SnapshotCreateErrors[keyof V2SnapshotCreateErrors]
+
+export type V2SnapshotCreateResponses = {
+  /**
+   * Success
+   */
+  200: {
+    id: string
+    root: string
+    sha: string
+    message: string
+    time: number
+  }
+}
+
+export type V2SnapshotCreateResponse = V2SnapshotCreateResponses[keyof V2SnapshotCreateResponses]
+
+export type V2SnapshotRestoreData = {
+  body?: never
+  path: {
+    id: string
+  }
+  query?: never
+  url: "/api/snapshot/{id}/restore"
+}
+
+export type V2SnapshotRestoreErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2SnapshotRestoreError = V2SnapshotRestoreErrors[keyof V2SnapshotRestoreErrors]
+
+export type V2SnapshotRestoreResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2SnapshotRestoreResponse = V2SnapshotRestoreResponses[keyof V2SnapshotRestoreResponses]
+
 export type V2ProviderTestData = {
   body?: never
   path: {
