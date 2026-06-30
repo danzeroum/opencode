@@ -657,11 +657,23 @@ async fn drive_one_turn(
     let asker: Arc<dyn opencode_core::native_tools::QuestionAsker> = Arc::new(StoreQuestionAsker {
         questions: runner.questions.clone(),
     });
-    let tools: Arc<dyn ToolBox> =
+    let native: Arc<dyn ToolBox> =
         Arc::new(NativeToolBox::new(runner.root.clone()).with_question_asker(asker, session_id));
     // Offer the `question` tool alongside the native tools (the toolbox handles it via the asker).
     let mut tool_defs = native_tools::tool_definitions();
     tool_defs.push(native_tools::question_tool_definition());
+    // Offer the configured MCP servers' tools (best-effort; empty + zero-cost when none are configured).
+    // A `{server}_{tool}` call is routed to that server's `tools/call`; everything else stays native.
+    let (mcp_defs, mcp_routes) = mcp_tools_for_turn().await;
+    tool_defs.extend(mcp_defs);
+    let tools: Arc<dyn ToolBox> = if mcp_routes.is_empty() {
+        native
+    } else {
+        Arc::new(McpToolBox {
+            inner: native,
+            routes: mcp_routes,
+        })
+    };
     let session = Session {
         id: session_id.to_string(),
         model: model_id.to_string(),
@@ -8997,15 +9009,82 @@ async fn question_list(
     Json(Vec::new())
 }
 
-/// Probe a local (stdio) MCP server: spawn `command` and run the MCP `initialize` JSON-RPC handshake
-/// over its stdio. `Ok` on a valid `initialize` result, else an error string. The child is killed on
-/// drop, so no process lingers; non-mutating (no tools are invoked).
-async fn mcp_probe_local(
+/// A local (stdio) MCP server spec: `(command, cwd, environment)`.
+type McpLocalSpec = (Vec<String>, Option<String>, Vec<(String, String)>);
+
+/// Parse a `config.mcp` value into a local (stdio) server spec, or `None` if it isn't a usable
+/// `type: "local"` entry (remote / invalid / empty command).
+fn mcp_local_spec(def: &serde_json::Value) -> Option<McpLocalSpec> {
+    if def.get("type").and_then(|t| t.as_str()) != Some("local") {
+        return None;
+    }
+    let command: Vec<String> = def
+        .get("command")
+        .and_then(|c| c.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if command.is_empty() {
+        return None;
+    }
+    let cwd = def.get("cwd").and_then(|c| c.as_str()).map(String::from);
+    let env: Vec<(String, String)> = def
+        .get("environment")
+        .and_then(|e| e.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((command, cwd, env))
+}
+
+/// Read newline-delimited JSON-RPC responses from `reader` until one with `id` arrives; returns its
+/// `result` (or its `error` as `Err`). Non-matching lines (notifications, logs) are skipped.
+async fn mcp_read_result<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    id: i64,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        if reader
+            .read_line(&mut buf)
+            .await
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            return Err("server closed stdout before responding".to_string());
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(buf.trim()) else {
+            continue;
+        };
+        if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
+            if let Some(result) = v.get("result") {
+                return Ok(result.clone());
+            }
+            if let Some(err) = v.get("error") {
+                return Err(format!("rpc error: {err}"));
+            }
+        }
+    }
+}
+
+/// Run a short MCP stdio session: spawn `command`, do the `initialize` handshake, and (when `follow_up`
+/// is set) send `notifications/initialized` plus one request, returning its `result`. Stateless
+/// (connect-per-call) and bounded by a timeout; the child is killed on drop, so nothing lingers.
+async fn mcp_session_local(
     command: &[String],
     cwd: Option<&str>,
     env: &[(String, String)],
-) -> Result<(), String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    follow_up: Option<(&str, serde_json::Value)>,
+) -> Result<Option<serde_json::Value>, String> {
+    use tokio::io::{AsyncWriteExt, BufReader};
     let mut cmd = tokio::process::Command::new(&command[0]);
     cmd.args(&command[1..]);
     if let Some(cwd) = cwd {
@@ -9021,52 +9100,193 @@ async fn mcp_probe_local(
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     let mut stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
     let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
-    let init = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "opencode", "version": env!("CARGO_PKG_VERSION") }
-        }
-    });
-    let probe = tokio::time::timeout(std::time::Duration::from_secs(8), async move {
-        let mut line = serde_json::to_string(&init).map_err(|e| e.to_string())?;
-        line.push('\n');
+    let follow_up = follow_up.map(|(m, p)| (m.to_string(), p));
+    let work = tokio::time::timeout(std::time::Duration::from_secs(8), async move {
+        let mut reader = BufReader::new(stdout);
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": { "name": "opencode", "version": env!("CARGO_PKG_VERSION") } }
+        });
+        let mut send = serde_json::to_string(&init).map_err(|e| e.to_string())?;
+        send.push('\n');
         stdin
-            .write_all(line.as_bytes())
+            .write_all(send.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
         stdin.flush().await.map_err(|e| e.to_string())?;
-        let mut reader = BufReader::new(stdout);
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            if reader
-                .read_line(&mut buf)
+        mcp_read_result(&mut reader, 1).await?; // handshake
+        let Some((method, params)) = follow_up else {
+            return Ok(None);
+        };
+        for msg in [
+            serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
+        ] {
+            let mut line = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+            line.push('\n');
+            stdin
+                .write_all(line.as_bytes())
                 .await
-                .map_err(|e| e.to_string())?
-                == 0
-            {
-                return Err("server closed stdout before responding".to_string());
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(buf.trim()) else {
-                continue; // ignore non-JSON / log lines
-            };
-            if v.get("id").and_then(|i| i.as_i64()) == Some(1) {
-                if v.get("result").is_some() {
-                    return Ok(());
-                }
-                if let Some(err) = v.get("error") {
-                    return Err(format!("initialize error: {err}"));
-                }
-            }
+                .map_err(|e| e.to_string())?;
         }
+        stdin.flush().await.map_err(|e| e.to_string())?;
+        Ok(Some(mcp_read_result(&mut reader, 2).await?))
     })
     .await;
     let _ = child.start_kill();
-    probe.unwrap_or_else(|_| Err("timed out waiting for initialize response".to_string()))
+    work.unwrap_or_else(|_| Err("timed out waiting for MCP response".to_string()))
+}
+
+/// Probe a local (stdio) MCP server via the `initialize` handshake (used by `mcp.status`).
+async fn mcp_probe_local(
+    command: &[String],
+    cwd: Option<&str>,
+    env: &[(String, String)],
+) -> Result<(), String> {
+    mcp_session_local(command, cwd, env, None).await.map(|_| ())
+}
+
+/// List a local MCP server's tools (`tools/list`), returning the raw tool objects.
+async fn mcp_list_tools(
+    command: &[String],
+    cwd: Option<&str>,
+    env: &[(String, String)],
+) -> Result<Vec<serde_json::Value>, String> {
+    let result = mcp_session_local(
+        command,
+        cwd,
+        env,
+        Some(("tools/list", serde_json::json!({}))),
+    )
+    .await?
+    .ok_or_else(|| "no tools/list result".to_string())?;
+    Ok(result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Concatenate the text parts of an MCP `tools/call` result's `content` array.
+fn mcp_extract_text(result: &serde_json::Value) -> String {
+    result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// A routable MCP tool: the server's stdio spec plus the original (unprefixed) tool name.
+#[derive(Clone)]
+struct McpRoute {
+    command: Vec<String>,
+    cwd: Option<String>,
+    env: Vec<(String, String)>,
+    tool: String,
+}
+
+/// Call an MCP tool (`tools/call`) and return its text result; an `isError` payload becomes `Err`.
+async fn mcp_call_tool(route: &McpRoute, input: serde_json::Value) -> Result<String, String> {
+    let params = serde_json::json!({ "name": route.tool, "arguments": input });
+    let result = mcp_session_local(
+        &route.command,
+        route.cwd.as_deref(),
+        &route.env,
+        Some(("tools/call", params)),
+    )
+    .await?
+    .ok_or_else(|| "no tools/call result".to_string())?;
+    let text = mcp_extract_text(&result);
+    if result
+        .get("isError")
+        .and_then(|e| e.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(if text.is_empty() {
+            "MCP tool returned an error".to_string()
+        } else {
+            text
+        });
+    }
+    Ok(text)
+}
+
+/// Discover the MCP tools available for a turn: list each enabled local server's tools (best-effort — a
+/// server that fails to list is skipped), returning model-facing [`ToolDefinition`]s named
+/// `{server}_{tool}` plus a routing map keyed by that prefixed name. Empty when no local MCP server is
+/// configured, so a turn without MCP pays nothing.
+async fn mcp_tools_for_turn() -> (
+    Vec<opencode_llm::ToolDefinition>,
+    std::collections::HashMap<String, McpRoute>,
+) {
+    let servers = resolved_config_value()
+        .get("mcp")
+        .and_then(|m| m.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut defs = Vec::new();
+    let mut routes = std::collections::HashMap::new();
+    for (name, def) in servers {
+        if !def.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true) {
+            continue;
+        }
+        let Some((command, cwd, env)) = mcp_local_spec(&def) else {
+            continue; // remote / invalid — not supported here yet
+        };
+        let Ok(tools) = mcp_list_tools(&command, cwd.as_deref(), &env).await else {
+            continue; // best-effort: skip a server that won't list
+        };
+        for tool in tools {
+            let Some(tool_name) = tool.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let prefixed = format!("{name}_{tool_name}");
+            defs.push(opencode_llm::ToolDefinition {
+                name: prefixed.clone(),
+                description: tool
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(String::from),
+                input_schema: tool
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
+            });
+            routes.insert(
+                prefixed,
+                McpRoute {
+                    command: command.clone(),
+                    cwd: cwd.clone(),
+                    env: env.clone(),
+                    tool: tool_name.to_string(),
+                },
+            );
+        }
+    }
+    (defs, routes)
+}
+
+/// A [`ToolBox`] that routes MCP tool calls (by prefixed name) to their server's `tools/call` and
+/// delegates everything else to the native toolbox.
+struct McpToolBox {
+    inner: Arc<dyn ToolBox>,
+    routes: std::collections::HashMap<String, McpRoute>,
+}
+
+#[async_trait]
+impl ToolBox for McpToolBox {
+    async fn invoke(&self, name: &str, input: serde_json::Value) -> Result<String, String> {
+        match self.routes.get(name) {
+            Some(route) => mcp_call_tool(route, input).await,
+            None => self.inner.invoke(name, input).await,
+        }
+    }
 }
 
 /// The [`McpStatus`] of a single configured server (a `config.mcp` value): `disabled` when
@@ -9077,36 +9297,17 @@ async fn mcp_probe_status(def: serde_json::Value) -> opencode_proto::McpStatus {
         return opencode_proto::McpStatus::Disabled;
     }
     match def.get("type").and_then(|t| t.as_str()) {
-        Some("local") => {
-            let command: Vec<String> = def
-                .get("command")
-                .and_then(|c| c.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if command.is_empty() {
-                return opencode_proto::McpStatus::Failed {
-                    error: "no command configured".to_string(),
-                };
+        Some("local") => match mcp_local_spec(&def) {
+            Some((command, cwd, env)) => {
+                match mcp_probe_local(&command, cwd.as_deref(), &env).await {
+                    Ok(()) => opencode_proto::McpStatus::Connected,
+                    Err(error) => opencode_proto::McpStatus::Failed { error },
+                }
             }
-            let cwd = def.get("cwd").and_then(|c| c.as_str()).map(String::from);
-            let env: Vec<(String, String)> = def
-                .get("environment")
-                .and_then(|e| e.as_object())
-                .map(|o| {
-                    o.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default();
-            match mcp_probe_local(&command, cwd.as_deref(), &env).await {
-                Ok(()) => opencode_proto::McpStatus::Connected,
-                Err(error) => opencode_proto::McpStatus::Failed { error },
-            }
-        }
+            None => opencode_proto::McpStatus::Failed {
+                error: "no command configured".to_string(),
+            },
+        },
         Some("remote") => opencode_proto::McpStatus::Failed {
             error: "remote MCP transport not yet supported".to_string(),
         },
@@ -11406,6 +11607,65 @@ mod tests {
             mcp_probe_status(remote).await,
             McpStatus::Failed { .. }
         ));
+    }
+
+    // A mock stdio MCP server: replies to `initialize` (id 1), ignores the `initialized` notification,
+    // then replies to the follow-up request (id 2) with the given `result` JSON.
+    fn mock_mcp_server(result_json: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "read i; printf '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}\\n'; \
+                 read n; read r; printf '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}}\\n'",
+                result_json
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn mcp_list_tools_returns_server_tools() {
+        let cmd = mock_mcp_server(
+            "{\"tools\":[{\"name\":\"echo\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}]}",
+        );
+        let tools = mcp_list_tools(&cmd, None, &[]).await.expect("list");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].get("name").and_then(|n| n.as_str()), Some("echo"));
+    }
+
+    #[tokio::test]
+    async fn mcp_call_tool_returns_text_and_routes_via_toolbox() {
+        use opencode_core::native_tools::NativeToolBox;
+        let route = McpRoute {
+            command: mock_mcp_server("{\"content\":[{\"type\":\"text\",\"text\":\"hi there\"}]}"),
+            cwd: None,
+            env: vec![],
+            tool: "echo".to_string(),
+        };
+        // Direct call returns the concatenated text content.
+        assert_eq!(
+            mcp_call_tool(&route, serde_json::json!({ "msg": "x" }))
+                .await
+                .expect("call"),
+            "hi there"
+        );
+        // The toolbox routes an MCP-prefixed name to the server, and delegates other names to native.
+        let native: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(std::env::temp_dir()));
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("srv_echo".to_string(), route);
+        let tb = McpToolBox {
+            inner: native,
+            routes,
+        };
+        assert_eq!(
+            tb.invoke("srv_echo", serde_json::json!({})).await,
+            Ok("hi there".to_string())
+        );
+        // A native name reaches the native toolbox (a missing file errors there → delegation proven).
+        assert!(tb
+            .invoke("read", serde_json::json!({ "path": "/nonexistent/xyzzy" }))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
