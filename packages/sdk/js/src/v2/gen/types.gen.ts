@@ -10604,6 +10604,39 @@ export type V2PermissionSavedListResponses = {
 
 export type V2PermissionSavedListResponse = V2PermissionSavedListResponses[keyof V2PermissionSavedListResponses]
 
+export type V2PermissionSavedCreateData = {
+  body: {
+    projectID: string
+    action: string
+    resource: string
+  }
+  path?: never
+  query?: never
+  url: "/api/permission/saved"
+}
+
+export type V2PermissionSavedCreateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2PermissionSavedCreateError = V2PermissionSavedCreateErrors[keyof V2PermissionSavedCreateErrors]
+
+export type V2PermissionSavedCreateResponses = {
+  /**
+   * Success
+   */
+  200: PermissionSavedInfo
+}
+
+export type V2PermissionSavedCreateResponse = V2PermissionSavedCreateResponses[keyof V2PermissionSavedCreateResponses]
+
 export type V2PermissionSavedRemoveData = {
   body?: never
   path: {

@@ -305,6 +305,8 @@ import type {
   V2ModelListResponses,
   V2PermissionRequestListErrors,
   V2PermissionRequestListResponses,
+  V2PermissionSavedCreateErrors,
+  V2PermissionSavedCreateResponses,
   V2PermissionSavedListErrors,
   V2PermissionSavedListResponses,
   V2PermissionSavedRemoveErrors,
@@ -1586,6 +1588,47 @@ export class Saved extends HeyApiClient {
       url: "/api/permission/saved",
       ...options,
       ...params,
+    })
+  }
+
+  /**
+   * Create saved permission
+   *
+   * Create a saved permission rule.
+   */
+  public create<ThrowOnError extends boolean = false>(
+    parameters?: {
+      projectID?: string
+      action?: string
+      resource?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "projectID" },
+            { in: "body", key: "action" },
+            { in: "body", key: "resource" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2PermissionSavedCreateResponses,
+      V2PermissionSavedCreateErrors,
+      ThrowOnError
+    >({
+      url: "/api/permission/saved",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 
