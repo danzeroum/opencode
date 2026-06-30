@@ -9043,6 +9043,48 @@ fn mcp_local_spec(def: &serde_json::Value) -> Option<McpLocalSpec> {
     Some((command, cwd, env))
 }
 
+/// A remote (HTTP) MCP server spec: `(url, headers)` where `headers` are extra request headers
+/// (e.g. a bearer token) carried on every JSON-RPC POST.
+type McpRemoteSpec = (String, Vec<(String, String)>);
+
+/// Parse a `config.mcp` value into a remote (HTTP) server spec, or `None` if it isn't a usable
+/// `type: "remote"` entry (local / invalid / empty url).
+fn mcp_remote_spec(def: &serde_json::Value) -> Option<McpRemoteSpec> {
+    if def.get("type").and_then(|t| t.as_str()) != Some("remote") {
+        return None;
+    }
+    let url = def
+        .get("url")
+        .and_then(|u| u.as_str())
+        .filter(|u| !u.is_empty())?
+        .to_string();
+    let headers: Vec<(String, String)> = def
+        .get("headers")
+        .and_then(|h| h.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((url, headers))
+}
+
+/// The transport for a configured MCP server: local child process over stdio, or a remote HTTP
+/// endpoint. Built from a `config.mcp` value via [`mcp_local_spec`] / [`mcp_remote_spec`].
+#[derive(Clone)]
+enum McpTransport {
+    Local {
+        command: Vec<String>,
+        cwd: Option<String>,
+        env: Vec<(String, String)>,
+    },
+    Remote {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
+}
+
 /// Read newline-delimited JSON-RPC responses from `reader` until one with `id` arrives; returns its
 /// `result` (or its `error` as `Err`). Non-matching lines (notifications, logs) are skipped.
 async fn mcp_read_result<R: tokio::io::AsyncBufRead + Unpin>(
@@ -9138,29 +9180,144 @@ async fn mcp_session_local(
     work.unwrap_or_else(|_| Err("timed out waiting for MCP response".to_string()))
 }
 
-/// Probe a local (stdio) MCP server via the `initialize` handshake (used by `mcp.status`).
-async fn mcp_probe_local(
-    command: &[String],
-    cwd: Option<&str>,
-    env: &[(String, String)],
-) -> Result<(), String> {
-    mcp_session_local(command, cwd, env, None).await.map(|_| ())
+/// Find the JSON-RPC response with `id` in a `text/event-stream` body, parsing each SSE event's
+/// concatenated `data:` lines as JSON. Server-initiated notifications (no/other `id`) are skipped.
+fn mcp_sse_find_response(body: &str, id: i64) -> Option<serde_json::Value> {
+    let mut data: Vec<&str> = Vec::new();
+    let take = |data: &mut Vec<&str>| -> Option<serde_json::Value> {
+        if data.is_empty() {
+            return None;
+        }
+        let joined = data.join("\n");
+        data.clear();
+        serde_json::from_str::<serde_json::Value>(&joined)
+            .ok()
+            .filter(|v| v.get("id").and_then(|i| i.as_i64()) == Some(id))
+    };
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("data:") {
+            data.push(rest.strip_prefix(' ').unwrap_or(rest));
+        } else if line.trim().is_empty() {
+            if let Some(found) = take(&mut data) {
+                return Some(found);
+            }
+        }
+    }
+    take(&mut data)
 }
 
-/// List a local MCP server's tools (`tools/list`), returning the raw tool objects.
-async fn mcp_list_tools(
-    command: &[String],
-    cwd: Option<&str>,
-    env: &[(String, String)],
-) -> Result<Vec<serde_json::Value>, String> {
-    let result = mcp_session_local(
-        command,
-        cwd,
-        env,
-        Some(("tools/list", serde_json::json!({}))),
-    )
-    .await?
-    .ok_or_else(|| "no tools/list result".to_string())?;
+/// POST one JSON-RPC message to a remote MCP endpoint. For a notification (`expect_id` is `None`)
+/// nothing is read back. For a request, the response is parsed from either an `application/json`
+/// body or a `text/event-stream` (picking the event whose `id` matches). Returns the JSON-RPC
+/// `result` plus any `Mcp-Session-Id` the server assigned.
+async fn mcp_remote_post(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+    session_id: &Option<String>,
+    body: &serde_json::Value,
+    expect_id: Option<i64>,
+) -> Result<(Option<serde_json::Value>, Option<String>), String> {
+    let mut req = client
+        .post(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
+        .json(body);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    if let Some(sid) = session_id {
+        req = req.header("Mcp-Session-Id", sid);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let new_session = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let Some(id) = expect_id else {
+        return Ok((None, new_session)); // notification: no response body to read
+    };
+    let is_sse = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|c| c.contains("text/event-stream"))
+        .unwrap_or(false);
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let value = if is_sse {
+        mcp_sse_find_response(&text, id)
+            .ok_or_else(|| "no matching JSON-RPC response in SSE stream".to_string())?
+    } else {
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())?
+    };
+    if let Some(err) = value.get("error") {
+        return Err(format!("MCP error: {err}"));
+    }
+    let result = value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "MCP response missing result".to_string())?;
+    Ok((Some(result), new_session))
+}
+
+/// Connect to a remote (HTTP) MCP server: `initialize`, then optionally an `initialized`
+/// notification plus one request, returning that request's result. Each request is bounded by an
+/// 8s timeout; configured `headers` (e.g. a bearer token) ride every call.
+async fn mcp_session_remote(
+    url: &str,
+    headers: &[(String, String)],
+    follow_up: Option<(&str, serde_json::Value)>,
+) -> Result<Option<serde_json::Value>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": { "name": "opencode", "version": env!("CARGO_PKG_VERSION") } }
+    });
+    let (_, session_id) = mcp_remote_post(&client, url, headers, &None, &init, Some(1)).await?;
+    let Some((method, params)) = follow_up else {
+        return Ok(None);
+    };
+    let initialized =
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let _ = mcp_remote_post(&client, url, headers, &session_id, &initialized, None).await;
+    let request =
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params });
+    let (result, _) =
+        mcp_remote_post(&client, url, headers, &session_id, &request, Some(2)).await?;
+    Ok(result)
+}
+
+/// Run one MCP `connect → initialize → (optional) request` exchange over the given transport.
+async fn mcp_session(
+    transport: &McpTransport,
+    follow_up: Option<(&str, serde_json::Value)>,
+) -> Result<Option<serde_json::Value>, String> {
+    match transport {
+        McpTransport::Local { command, cwd, env } => {
+            mcp_session_local(command, cwd.as_deref(), env, follow_up).await
+        }
+        McpTransport::Remote { url, headers } => mcp_session_remote(url, headers, follow_up).await,
+    }
+}
+
+/// List an MCP server's tools (`tools/list`), returning the raw tool objects.
+async fn mcp_list_tools(transport: &McpTransport) -> Result<Vec<serde_json::Value>, String> {
+    let result = mcp_session(transport, Some(("tools/list", serde_json::json!({}))))
+        .await?
+        .ok_or_else(|| "no tools/list result".to_string())?;
     Ok(result
         .get("tools")
         .and_then(|t| t.as_array())
@@ -9182,26 +9339,19 @@ fn mcp_extract_text(result: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-/// A routable MCP tool: the server's stdio spec plus the original (unprefixed) tool name.
+/// A routable MCP tool: the server's transport plus the original (unprefixed) tool name.
 #[derive(Clone)]
 struct McpRoute {
-    command: Vec<String>,
-    cwd: Option<String>,
-    env: Vec<(String, String)>,
+    transport: McpTransport,
     tool: String,
 }
 
 /// Call an MCP tool (`tools/call`) and return its text result; an `isError` payload becomes `Err`.
 async fn mcp_call_tool(route: &McpRoute, input: serde_json::Value) -> Result<String, String> {
     let params = serde_json::json!({ "name": route.tool, "arguments": input });
-    let result = mcp_session_local(
-        &route.command,
-        route.cwd.as_deref(),
-        &route.env,
-        Some(("tools/call", params)),
-    )
-    .await?
-    .ok_or_else(|| "no tools/call result".to_string())?;
+    let result = mcp_session(&route.transport, Some(("tools/call", params)))
+        .await?
+        .ok_or_else(|| "no tools/call result".to_string())?;
     let text = mcp_extract_text(&result);
     if result
         .get("isError")
@@ -9217,10 +9367,10 @@ async fn mcp_call_tool(route: &McpRoute, input: serde_json::Value) -> Result<Str
     Ok(text)
 }
 
-/// Discover the MCP tools available for a turn: list each enabled local server's tools (best-effort — a
-/// server that fails to list is skipped), returning model-facing [`ToolDefinition`]s named
-/// `{server}_{tool}` plus a routing map keyed by that prefixed name. Empty when no local MCP server is
-/// configured, so a turn without MCP pays nothing.
+/// Discover the MCP tools available for a turn: list each enabled server's tools over its transport
+/// (local stdio or remote HTTP), best-effort — a server that fails to list is skipped. Returns
+/// model-facing [`ToolDefinition`]s named `{server}_{tool}` plus a routing map keyed by that
+/// prefixed name. Empty when no MCP server is configured, so a turn without MCP pays nothing.
 async fn mcp_tools_for_turn() -> (
     Vec<opencode_llm::ToolDefinition>,
     std::collections::HashMap<String, McpRoute>,
@@ -9236,10 +9386,14 @@ async fn mcp_tools_for_turn() -> (
         if !def.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true) {
             continue;
         }
-        let Some((command, cwd, env)) = mcp_local_spec(&def) else {
-            continue; // remote / invalid — not supported here yet
+        let transport = if let Some((command, cwd, env)) = mcp_local_spec(&def) {
+            McpTransport::Local { command, cwd, env }
+        } else if let Some((url, headers)) = mcp_remote_spec(&def) {
+            McpTransport::Remote { url, headers }
+        } else {
+            continue; // invalid / incomplete entry
         };
-        let Ok(tools) = mcp_list_tools(&command, cwd.as_deref(), &env).await else {
+        let Ok(tools) = mcp_list_tools(&transport).await else {
             continue; // best-effort: skip a server that won't list
         };
         for tool in tools {
@@ -9261,9 +9415,7 @@ async fn mcp_tools_for_turn() -> (
             routes.insert(
                 prefixed,
                 McpRoute {
-                    command: command.clone(),
-                    cwd: cwd.clone(),
-                    env: env.clone(),
+                    transport: transport.clone(),
                     tool: tool_name.to_string(),
                 },
             );
@@ -9290,30 +9442,38 @@ impl ToolBox for McpToolBox {
 }
 
 /// The [`McpStatus`] of a single configured server (a `config.mcp` value): `disabled` when
-/// `enabled: false`; for `type: "local"`, probe over stdio (`connected`/`failed`). Remote (SSE/HTTP)
-/// transport is a follow-up, reported as `failed` so it's visible-but-honest rather than silently absent.
+/// `enabled: false`; otherwise run the `initialize` handshake over the server's transport
+/// (`type: "local"` stdio, or `type: "remote"` HTTP) and report `connected` / `failed`.
 async fn mcp_probe_status(def: serde_json::Value) -> opencode_proto::McpStatus {
     if !def.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true) {
         return opencode_proto::McpStatus::Disabled;
     }
-    match def.get("type").and_then(|t| t.as_str()) {
+    let transport = match def.get("type").and_then(|t| t.as_str()) {
         Some("local") => match mcp_local_spec(&def) {
-            Some((command, cwd, env)) => {
-                match mcp_probe_local(&command, cwd.as_deref(), &env).await {
-                    Ok(()) => opencode_proto::McpStatus::Connected,
-                    Err(error) => opencode_proto::McpStatus::Failed { error },
+            Some((command, cwd, env)) => McpTransport::Local { command, cwd, env },
+            None => {
+                return opencode_proto::McpStatus::Failed {
+                    error: "no command configured".to_string(),
                 }
             }
-            None => opencode_proto::McpStatus::Failed {
-                error: "no command configured".to_string(),
-            },
         },
-        Some("remote") => opencode_proto::McpStatus::Failed {
-            error: "remote MCP transport not yet supported".to_string(),
+        Some("remote") => match mcp_remote_spec(&def) {
+            Some((url, headers)) => McpTransport::Remote { url, headers },
+            None => {
+                return opencode_proto::McpStatus::Failed {
+                    error: "no url configured".to_string(),
+                }
+            }
         },
-        _ => opencode_proto::McpStatus::Failed {
-            error: "invalid MCP server configuration".to_string(),
-        },
+        _ => {
+            return opencode_proto::McpStatus::Failed {
+                error: "invalid MCP server configuration".to_string(),
+            }
+        }
+    };
+    match mcp_session(&transport, None).await {
+        Ok(_) => opencode_proto::McpStatus::Connected,
+        Err(error) => opencode_proto::McpStatus::Failed { error },
     }
 }
 
@@ -9339,9 +9499,10 @@ async fn mcp_status_map() -> std::collections::HashMap<String, opencode_proto::M
 
 /// `GET /mcp` — status of all configured MCP servers (group `mcp`). Matches the golden `mcp.status`:
 /// 200 `{ [server]: MCPStatus }`, 400 `BadRequestError`. Reads `config.mcp` and probes each enabled
-/// `type: "local"` (stdio) server by spawning it and running the MCP `initialize` handshake — a valid
-/// handshake is `connected`, a spawn/handshake failure is `failed`, `enabled: false` is `disabled`.
-/// Remote (SSE/HTTP) transport and exposing the servers' tools to the runner are follow-ups.
+/// server by running the MCP `initialize` handshake over its transport — `type: "local"` spawns a
+/// stdio child, `type: "remote"` POSTs to its HTTP url (with configured headers). A valid handshake
+/// is `connected`, a spawn/connect/handshake failure is `failed`, `enabled: false` is `disabled`.
+/// (OAuth-protected remote servers — `mcp.auth.*` — are a follow-up.)
 #[utoipa::path(
     get,
     path = "/mcp",
@@ -11579,7 +11740,7 @@ mod tests {
             "read req; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\"}}\\n'"
                 .to_string(),
         ];
-        assert!(mcp_probe_local(&cmd, None, &[]).await.is_ok());
+        assert!(mcp_session_local(&cmd, None, &[], None).await.is_ok());
     }
 
     #[tokio::test]
@@ -11601,10 +11762,17 @@ mod tests {
             "command": ["sh", "-c", "read req; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'"]
         });
         assert_eq!(mcp_probe_status(ok).await, McpStatus::Connected);
-        // remote transport → failed (not yet supported), not silently dropped.
-        let remote = serde_json::json!({ "type": "remote", "url": "https://example.com/mcp" });
+        // remote transport with an unreachable url → failed (connection refused), not a panic.
+        // 127.0.0.1:1 is in NO_PROXY, so reqwest connects directly and fails fast.
+        let remote = serde_json::json!({ "type": "remote", "url": "http://127.0.0.1:1/mcp" });
         assert!(matches!(
             mcp_probe_status(remote).await,
+            McpStatus::Failed { .. }
+        ));
+        // remote with no url → failed with a specific reason.
+        let no_url = serde_json::json!({ "type": "remote" });
+        assert!(matches!(
+            mcp_probe_status(no_url).await,
             McpStatus::Failed { .. }
         ));
     }
@@ -11628,7 +11796,12 @@ mod tests {
         let cmd = mock_mcp_server(
             "{\"tools\":[{\"name\":\"echo\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}]}",
         );
-        let tools = mcp_list_tools(&cmd, None, &[]).await.expect("list");
+        let transport = McpTransport::Local {
+            command: cmd,
+            cwd: None,
+            env: vec![],
+        };
+        let tools = mcp_list_tools(&transport).await.expect("list");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].get("name").and_then(|n| n.as_str()), Some("echo"));
     }
@@ -11637,9 +11810,13 @@ mod tests {
     async fn mcp_call_tool_returns_text_and_routes_via_toolbox() {
         use opencode_core::native_tools::NativeToolBox;
         let route = McpRoute {
-            command: mock_mcp_server("{\"content\":[{\"type\":\"text\",\"text\":\"hi there\"}]}"),
-            cwd: None,
-            env: vec![],
+            transport: McpTransport::Local {
+                command: mock_mcp_server(
+                    "{\"content\":[{\"type\":\"text\",\"text\":\"hi there\"}]}",
+                ),
+                cwd: None,
+                env: vec![],
+            },
             tool: "echo".to_string(),
         };
         // Direct call returns the concatenated text content.
@@ -11666,6 +11843,111 @@ mod tests {
             .invoke("read", serde_json::json!({ "path": "/nonexistent/xyzzy" }))
             .await
             .is_err());
+    }
+
+    #[test]
+    fn mcp_sse_find_response_picks_matching_id() {
+        // A server-initiated notification (no id) precedes the real response (id 2); `event:` lines
+        // are ignored and only the matching `data:` payload is returned.
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"log\"}\n\n\
+                    event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}\n\n";
+        let v = mcp_sse_find_response(body, 2).expect("found id 2");
+        assert_eq!(
+            v.get("result").and_then(|r| r.get("ok")),
+            Some(&serde_json::json!(true))
+        );
+        // No event carries id 1.
+        assert!(mcp_sse_find_response(body, 1).is_none());
+    }
+
+    #[test]
+    fn mcp_remote_spec_parses_url_and_headers() {
+        let def = serde_json::json!({
+            "type": "remote", "url": "https://h/mcp",
+            "headers": { "Authorization": "Bearer x" }
+        });
+        let (url, headers) = mcp_remote_spec(&def).expect("remote spec");
+        assert_eq!(url, "https://h/mcp");
+        assert_eq!(
+            headers,
+            vec![("Authorization".to_string(), "Bearer x".to_string())]
+        );
+        // A local entry is not a remote spec; a remote entry with no url is incomplete.
+        assert!(
+            mcp_remote_spec(&serde_json::json!({ "type": "local", "command": ["x"] })).is_none()
+        );
+        assert!(mcp_remote_spec(&serde_json::json!({ "type": "remote" })).is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_remote_session_lists_and_calls_over_http() {
+        use opencode_core::native_tools::NativeToolBox;
+        // A mock streamable-HTTP MCP server: requires the configured bearer header on every request
+        // and replies with `application/json` JSON-RPC results keyed by the request method.
+        async fn mcp_handler(
+            headers: axum::http::HeaderMap,
+            axum::Json(req): axum::Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if method == "notifications/initialized" {
+                return axum::http::StatusCode::ACCEPTED.into_response();
+            }
+            // The bearer token must have ridden along on every request.
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer t0ken") {
+                return axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": req.get("id"),
+                    "error": { "code": -32001, "message": "missing auth" }
+                }))
+                .into_response();
+            }
+            let result = match method {
+                "initialize" => {
+                    serde_json::json!({ "protocolVersion": "2024-11-05", "capabilities": {} })
+                }
+                "tools/list" => serde_json::json!({ "tools": [
+                    { "name": "echo", "description": "d", "inputSchema": { "type": "object" } }
+                ] }),
+                "tools/call" => {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "remote hi" }] })
+                }
+                _ => serde_json::json!({}),
+            };
+            axum::Json(
+                serde_json::json!({ "jsonrpc": "2.0", "id": req.get("id"), "result": result }),
+            )
+            .into_response()
+        }
+        let app = axum::Router::new().route("/mcp", axum::routing::post(mcp_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let transport = McpTransport::Remote {
+            url: format!("http://{addr}/mcp"),
+            headers: vec![("authorization".to_string(), "Bearer t0ken".to_string())],
+        };
+        // tools/list over HTTP (proves initialize handshake + header propagation).
+        let tools = mcp_list_tools(&transport).await.expect("remote list");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].get("name").and_then(|n| n.as_str()), Some("echo"));
+        // tools/call over HTTP, routed through the toolbox by prefixed name.
+        let route = McpRoute {
+            transport,
+            tool: "echo".to_string(),
+        };
+        let native: Arc<dyn ToolBox> = Arc::new(NativeToolBox::new(std::env::temp_dir()));
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("remote_echo".to_string(), route);
+        let tb = McpToolBox {
+            inner: native,
+            routes,
+        };
+        assert_eq!(
+            tb.invoke("remote_echo", serde_json::json!({ "msg": "x" }))
+                .await,
+            Ok("remote hi".to_string())
+        );
     }
 
     #[tokio::test]
