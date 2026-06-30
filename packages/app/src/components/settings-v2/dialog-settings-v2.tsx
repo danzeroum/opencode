@@ -15,6 +15,7 @@ import { SettingsCommandsV2 } from "./commands"
 import { SettingsAgentsV2 } from "./agents"
 import { SettingsOverviewV2 } from "./overview"
 import { SettingsPoliciesV2 } from "./policies"
+import { SettingsExtensionsV2 } from "./extensions"
 
 export const DialogSettings: Component = () => {
   const language = useLanguage()
@@ -78,6 +79,16 @@ export const DialogSettings: Component = () => {
                     </TabsV2.Trigger>
                   </div>
                 </div>
+
+                <div class="flex flex-col gap-1.5">
+                  <TabsV2.SectionTitle>{language.t("settings.section.extensions")}</TabsV2.SectionTitle>
+                  <div class="flex flex-col gap-1.5 w-full">
+                    <TabsV2.Trigger value="extensions">
+                      <Icon name="code-lines" />
+                      {language.t("settings.extensions.title")}
+                    </TabsV2.Trigger>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="settings-v2-nav-footer">
@@ -115,6 +126,9 @@ export const DialogSettings: Component = () => {
         </TabsV2.Content>
         <TabsV2.Content value="policies" class="settings-v2-panel">
           <SettingsPoliciesV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="extensions" class="settings-v2-panel">
+          <SettingsExtensionsV2 />
         </TabsV2.Content>
       </TabsV2>
     </Dialog>
