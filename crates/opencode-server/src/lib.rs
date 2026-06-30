@@ -5046,6 +5046,220 @@ async fn v2_permission_saved_remove(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Path to the snapshot store (`{config_dir}/snapshots.json`), if a config dir is resolvable.
+fn snapshots_path() -> Option<std::path::PathBuf> {
+    config_dir().map(|d| d.join("snapshots.json"))
+}
+
+/// Read snapshots from a given store path (empty if absent/unreadable).
+fn load_snapshots_at(path: &std::path::Path) -> Vec<opencode_proto::SnapshotInfo> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write snapshots to a given store path (pretty), creating parent dirs.
+fn write_snapshots_at(
+    path: &std::path::Path,
+    snaps: &[opencode_proto::SnapshotInfo],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(snaps).unwrap_or_else(|_| "[]".to_string()),
+    )
+}
+
+fn load_snapshots() -> Vec<opencode_proto::SnapshotInfo> {
+    snapshots_path()
+        .map(|p| load_snapshots_at(&p))
+        .unwrap_or_default()
+}
+
+fn write_snapshots(snaps: &[opencode_proto::SnapshotInfo]) -> std::io::Result<()> {
+    let path = snapshots_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no config dir (HOME unset)")
+    })?;
+    write_snapshots_at(&path, snaps)
+}
+
+/// Map a git `ToolError` to a 500 [`ApiError`].
+fn snapshot_git_err(e: opencode_tools::ToolError) -> ApiError {
+    ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+        e.to_string()
+    )))
+}
+
+/// Create a working-tree snapshot of the git repo at `root`, returning the captured commit sha.
+/// `git stash create` records tree + index + working changes into a commit object **without modifying
+/// the working tree, index, or stash list** — so this is safe/non-mutating. On a clean tree it prints
+/// nothing, so we fall back to `HEAD`; an unborn repo (no commits) is a 400.
+async fn git_snapshot_create(root: &std::path::Path) -> Result<String, ApiError> {
+    let created = opencode_tools::git::git(root, &["stash", "create"])
+        .await
+        .map_err(snapshot_git_err)?;
+    let sha = created.stdout.trim();
+    if created.success() && !sha.is_empty() {
+        return Ok(sha.to_string());
+    }
+    let head = opencode_tools::git::git(root, &["rev-parse", "HEAD"])
+        .await
+        .map_err(snapshot_git_err)?;
+    let head_sha = head.stdout.trim();
+    if head.success() && !head_sha.is_empty() {
+        return Ok(head_sha.to_string());
+    }
+    Err(ApiError(opencode_effect::AppError::BadRequest(
+        "nothing to snapshot (repository has no commits yet)".to_string(),
+    )))
+}
+
+/// Restore the git repo at `root` to snapshot `sha`. Guarded: the working tree must be clean, so no
+/// uncommitted work is ever lost (the restore changes tracked files to the snapshot's state, which is
+/// itself git-recoverable). A dirty tree or a failed checkout is a 400.
+async fn git_snapshot_restore(root: &std::path::Path, sha: &str) -> Result<(), ApiError> {
+    let clean = opencode_tools::git::is_clean(root)
+        .await
+        .map_err(snapshot_git_err)?;
+    if !clean {
+        return Err(ApiError(opencode_effect::AppError::BadRequest(
+            "working tree not clean; commit or discard changes before restoring".to_string(),
+        )));
+    }
+    let out = opencode_tools::git::git(root, &["checkout", sha, "--", "."])
+        .await
+        .map_err(snapshot_git_err)?;
+    if !out.success() {
+        return Err(ApiError(opencode_effect::AppError::BadRequest(format!(
+            "restore failed: {}",
+            out.stderr.trim()
+        ))));
+    }
+    Ok(())
+}
+
+/// The git repository root for the server's cwd, or a 400 if cwd isn't in a repo.
+async fn snapshot_repo_root() -> Result<std::path::PathBuf, ApiError> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))
+    })?;
+    opencode_tools::git::root(&cwd)
+        .await
+        .map_err(snapshot_git_err)?
+        .ok_or_else(|| {
+            ApiError(opencode_effect::AppError::BadRequest(
+                "not a git repository".to_string(),
+            ))
+        })
+}
+
+/// `GET /api/snapshot` — list working-tree snapshots for the current repo (group `snapshot`). New
+/// native op: 200 `{ data }` + 400/401. Reads the file-backed store, filtered to the cwd's repo root;
+/// outside a repo it's empty.
+#[utoipa::path(
+    get,
+    path = "/api/snapshot",
+    operation_id = "v2.snapshot.list",
+    responses(
+        (status = 200, description = "Snapshots", body = opencode_proto::SnapshotListResponse),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "snapshot"
+)]
+async fn v2_snapshot_list(
+    State(_state): State<ServerState>,
+) -> Json<opencode_proto::SnapshotListResponse> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let root = opencode_tools::git::root(&cwd)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string());
+    let data = match root {
+        Some(root) => load_snapshots()
+            .into_iter()
+            .filter(|s| s.root == root)
+            .collect(),
+        None => Vec::new(),
+    };
+    Json(opencode_proto::SnapshotListResponse { data })
+}
+
+/// `POST /api/snapshot` — create a working-tree snapshot of the current repo (group `snapshot`). New
+/// native op: 200 `SnapshotInfo` + 400/401. Captures the tree via `git stash create` (non-mutating),
+/// records it in the store, and returns it.
+#[utoipa::path(
+    post,
+    path = "/api/snapshot",
+    operation_id = "v2.snapshot.create",
+    request_body = opencode_proto::SnapshotCreate,
+    responses(
+        (status = 200, description = "Created snapshot", body = opencode_proto::SnapshotInfo),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "snapshot"
+)]
+async fn v2_snapshot_create(
+    State(_state): State<ServerState>,
+    Json(body): Json<opencode_proto::SnapshotCreate>,
+) -> Result<Json<opencode_proto::SnapshotInfo>, ApiError> {
+    let root = snapshot_repo_root().await?;
+    let sha = git_snapshot_create(&root).await?;
+    let snap = opencode_proto::SnapshotInfo {
+        id: format!("snp_{}", ulid::Ulid::new().to_string().to_lowercase()),
+        root: root.display().to_string(),
+        sha,
+        message: body.message.unwrap_or_default(),
+        time: now_ms(),
+    };
+    let mut snaps = load_snapshots();
+    snaps.push(snap.clone());
+    write_snapshots(&snaps).map_err(|e| {
+        ApiError(opencode_effect::AppError::Other(anyhow::anyhow!(
+            e.to_string()
+        )))
+    })?;
+    Ok(Json(snap))
+}
+
+/// `POST /api/snapshot/{id}/restore` — restore the repo to a snapshot (group `snapshot`). New native op:
+/// 204 + 400/401. Guarded by a clean working tree (a dirty tree is a 400), so no uncommitted work is
+/// lost; an unknown id is a 400.
+#[utoipa::path(
+    post,
+    path = "/api/snapshot/{id}/restore",
+    operation_id = "v2.snapshot.restore",
+    params(("id" = String, Path, description = "Snapshot id")),
+    responses(
+        (status = 204, description = "Restored"),
+        (status = 400, description = "Bad request", body = opencode_proto::InvalidRequestError),
+        (status = 401, description = "Unauthorized", body = opencode_proto::UnauthorizedError)
+    ),
+    tag = "snapshot"
+)]
+async fn v2_snapshot_restore(
+    State(_state): State<ServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let snap = load_snapshots()
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| {
+            ApiError(opencode_effect::AppError::BadRequest(format!(
+                "unknown snapshot: {id}"
+            )))
+        })?;
+    git_snapshot_restore(std::path::Path::new(&snap.root), &snap.sha).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// `DELETE /api/credential/{credentialID}` — remove a stored credential (group `credential`). Matches
 /// the golden `v2.credential.remove`: 204, 400, 401. The V2 credential DB store isn't ported yet, so
 /// this is an idempotent no-op 204 (a real store + the connect flows are a follow-up).
@@ -6166,6 +6380,9 @@ async fn v2_provider_test(
         v2_permission_saved_list,
         v2_permission_saved_create,
         v2_permission_saved_remove,
+        v2_snapshot_list,
+        v2_snapshot_create,
+        v2_snapshot_restore,
         v2_credential_remove,
         v2_credential_update,
         v2_integration_attempt_cancel,
@@ -9051,6 +9268,13 @@ pub fn build_router(state: ServerState) -> Router {
             "/api/permission/saved/{id}",
             axum::routing::delete(v2_permission_saved_remove),
         );
+    }
+    if state.routes.handles("snapshot") {
+        router = router.route(
+            "/api/snapshot",
+            get(v2_snapshot_list).post(v2_snapshot_create),
+        );
+        router = router.route("/api/snapshot/{id}/restore", post(v2_snapshot_restore));
     }
     if state.routes.handles("credential") {
         router = router.route(
@@ -12319,6 +12543,57 @@ mod tests {
         let loaded = load_saved_permissions_at(&path);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "prm_2");
+    }
+
+    #[test]
+    fn snapshots_store_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshots.json");
+        assert!(load_snapshots_at(&path).is_empty());
+        let snaps = vec![opencode_proto::SnapshotInfo {
+            id: "snp_1".into(),
+            root: "/repo".into(),
+            sha: "abc123".into(),
+            message: "before refactor".into(),
+            time: 1.0,
+        }];
+        write_snapshots_at(&path, &snaps).unwrap();
+        assert_eq!(load_snapshots_at(&path), snaps);
+    }
+
+    #[tokio::test]
+    async fn git_snapshot_create_and_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &'static [&'static str]| async move {
+            opencode_tools::git::git(root, args).await.unwrap()
+        };
+        run(&["init", "-q", "-b", "main"]).await;
+        run(&["config", "user.email", "t@example.com"]).await;
+        run(&["config", "user.name", "Tester"]).await;
+        std::fs::write(root.join("a.txt"), "v1").unwrap();
+        run(&["add", "-A"]).await;
+        run(&["commit", "-q", "-m", "v1"]).await;
+
+        // Dirty the tree to v2, then snapshot it (stash create captures the working tree).
+        std::fs::write(root.join("a.txt"), "v2").unwrap();
+        let sha = git_snapshot_create(root)
+            .await
+            .ok()
+            .expect("snapshot create");
+        assert!(!sha.is_empty());
+
+        // Discard v2 → clean tree back at v1.
+        run(&["checkout", "--", "a.txt"]).await;
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v1");
+
+        // Restore the snapshot onto the clean tree → a.txt is v2 again.
+        assert!(git_snapshot_restore(root, &sha).await.is_ok());
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v2");
+
+        // Restore refuses on a dirty tree (guard against clobbering uncommitted work).
+        std::fs::write(root.join("a.txt"), "v3-uncommitted").unwrap();
+        assert!(git_snapshot_restore(root, &sha).await.is_err());
     }
 
     #[test]

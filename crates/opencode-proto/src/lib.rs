@@ -2981,6 +2981,38 @@ pub struct PermissionSavedListResponse {
     pub data: Vec<PermissionSavedInfo>,
 }
 
+/// A working-tree snapshot (`v2.snapshot.*`): a git object (`sha`) capturing the repo's tree at a point
+/// in time, with a generated `id`, the repo `root` it belongs to, an optional `message`, and a creation
+/// `time` (epoch ms).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SnapshotInfo {
+    /// Snapshot id.
+    pub id: String,
+    /// The repository root the snapshot belongs to.
+    pub root: String,
+    /// The git commit object capturing the snapshotted tree.
+    pub sha: String,
+    /// Optional label.
+    pub message: String,
+    /// Creation time (epoch milliseconds).
+    pub time: f64,
+}
+
+/// Request body for `v2.snapshot.create` (POST /api/snapshot): an optional label for the snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+pub struct SnapshotCreate {
+    /// Optional label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// 200 body of `v2.snapshot.list` (GET /api/snapshot): `{ data }` — the snapshots for the current repo.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct SnapshotListResponse {
+    /// The snapshots.
+    pub data: Vec<SnapshotInfo>,
+}
+
 /// Request body for `v2.permission.saved.create` (POST /api/permission/saved): the writable fields of a
 /// saved permission rule; the `id` is generated server-side.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
